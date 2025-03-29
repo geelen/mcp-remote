@@ -157,3 +157,15 @@ For bash on WSL:
 or Powershell:
 
 `Get-Content "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log" -Wait -Tail 20`
+
+
+## Debugging
+
+If you encounter the following error, returned by the `/callback` URL:
+
+```
+Authentication Error
+Token exchange failed: HTTP 400
+```
+
+You can run `rm -rf ~/.mcp-auth` to clear any locally stored state and tokens.
