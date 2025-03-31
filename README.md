@@ -16,17 +16,7 @@ That's where `mcp-remote` comes in. As soon as your chosen MCP client supports r
 
 ## Usage
 
-### Claude Desktop
-
-[Official Docs](https://modelcontextprotocol.io/quickstart/user)
-
-In order to add an MCP server to Claude Desktop you need to edit the configuration file located at:
-
-macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-If it does not exist yet, [you may need to enable it under Settings > Developer](https://modelcontextprotocol.io/quickstart/user#2-add-the-filesystem-mcp-server).
+All the most popular MCP clients (Claude Desktop, Cursor & Windsurf) use the following config format:
 
 ```json
 {
@@ -34,7 +24,6 @@ If it does not exist yet, [you may need to enable it under Settings > Developer]
     "remote-example": {
       "command": "npx",
       "args": [
-        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
       ]
@@ -42,6 +31,59 @@ If it does not exist yet, [you may need to enable it under Settings > Developer]
   }
 }
 ```
+
+### Flags
+
+* If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.
+
+```json
+      "command": "npx",
+      "args": [
+        "-y"
+        "mcp-remote",
+        "https://remote.mcp.server/sse"
+      ]
+```
+
+* To force `npx` to always check for an updated version of `mcp-remote`, add the `@latest` flag:
+
+```json
+      "args": [
+        "mcp-remote@latest",
+        "https://remote.mcp.server/sse"
+      ]
+```
+
+* To force `mcp-remote` to ignore any existing access tokens and begin the authorization flow anew, pass `--clean`.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--clean"
+      ]
+```
+
+* To change which port `mcp-remote` listens for an OAuth redirect (by default `3334`), add an additional argument after the server URL. Note that whatever port you specify, if it is unavailable an open port will be chosen at random.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "9696"
+      ]
+```
+
+### Claude Desktop
+
+[Official Docs](https://modelcontextprotocol.io/quickstart/user)
+
+In order to add an MCP server to Claude Desktop you need to edit the configuration file located at:
+
+* macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+* Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+If it does not exist yet, [you may need to enable it under Settings > Developer](https://modelcontextprotocol.io/quickstart/user#2-add-the-filesystem-mcp-server).
 
 Restart Claude Desktop to pick up the changes in the configuration file.
 Upon restarting, you should see a hammer icon in the bottom right corner
@@ -49,45 +91,13 @@ of the input box.
 
 ### Cursor
 
-[Official Docs](https://docs.cursor.com/context/model-context-protocol)
+[Official Docs](https://docs.cursor.com/context/model-context-protocol). The configuration file is located at `~/.cursor/mcp.json`.
 
-Add the following configuration to `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "remote-example": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://remote.mcp.server/sse"
-      ]
-    }
-  }
-}
-```
+As of version `0.48.0`, Cursor supports unauthed SSE servers directly. If your MCP server is using the official MCP OAuth authorization protocol, you still need to add a **"command"** server and call `mcp-remote`.
 
 ### Windsurf
 
-[Official Docs](https://docs.codeium.com/windsurf/mcp)
-
-Add the following configuration to `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "remote-example": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://remote.mcp.server/sse"
-      ]
-    }
-  }
-}
-```
+[Official Docs](https://docs.codeium.com/windsurf/mcp). The configuration file is located at `~/.codeium/windsurf/mcp_config.json`.
 
 ## Building Remote MCP Servers
 
@@ -106,7 +116,17 @@ For more information about testing these servers, see also:
 
 Know of more resources you'd like to share? Please add them to this Readme and send a PR!
 
-## Debugging
+## Troubleshooting
+
+### Clear your `~/.mcp-auth` directory
+
+`mcp-remote` stores all the credential information inside `~/.mcp-auth` (or wherever your `MCP_REMOTE_CONFIG_DIR` points to). If you're having persistent issues, try running:
+
+```sh
+rm -rf ~/.mcp-auth
+```
+
+Then restarting your MCP client.
 
 ### Check your Node version
 
@@ -144,20 +164,10 @@ this might look like:
 
 ### Check the logs
 
-[Follow Claude Desktop logs in real-time](https://modelcontextprotocol.io/docs/tools/debugging#debugging-in-claude-desktop)
-
-MacOS / Linux:
-
-`tail -n 20 -F ~/Library/Logs/Claude/mcp*.log`
-
-For bash on WSL:
-
-`tail -n 20 -f "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log"`
-
-or Powershell:
-
-`Get-Content "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log" -Wait -Tail 20`
-
+* [Follow Claude Desktop logs in real-time](https://modelcontextprotocol.io/docs/tools/debugging#debugging-in-claude-desktop)
+* MacOS / Linux:<br/>`tail -n 20 -F ~/Library/Logs/Claude/mcp*.log`
+* For bash on WSL:<br/>`tail -n 20 -f "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log"`
+* Powershell: <br/>`Get-Content "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log" -Wait -Tail 20`
 
 ## Debugging
 
@@ -169,3 +179,13 @@ Token exchange failed: HTTP 400
 ```
 
 You can run `rm -rf ~/.mcp-auth` to clear any locally stored state and tokens.
+
+### "Client" mode
+
+Run the following on the command line (not from an MCP server):
+
+```shell
+npx -p mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
+```
+
+This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Pair this with `--clean` or after running `rm -rf ~/.mcp-auth` to see if stale credentials are your problem, otherwise hopefully the issue will be more obvious in these logs than those in your MCP client.

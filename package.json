@@ -1,21 +1,26 @@
 {
   "name": "mcp-remote",
-  "version": "0.0.10",
+  "version": "0.0.15",
+  "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
+  "keywords": [
+    "mcp",
+    "stdio",
+    "sse",
+    "remote",
+    "oauth"
+  ],
+  "author": "Glen Maddern <glen@cloudflare.com>",
+  "repository": "https://github.com/geelen/mcp-remote",
   "type": "module",
-  "bin": {
-    "mcp-remote": "dist/cli/proxy.js"
-  },
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
-  "exports": {
-    "./react": {
-      "types": "./dist/react/index.d.ts",
-      "require": "./dist/react/index.js",
-      "import": "./dist/react/index.js"
-    }
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-remote": "dist/proxy.js",
+    "mcp-remote-client": "dist/client.js"
   },
   "scripts": {
     "dev": "tsup --watch",
@@ -39,9 +44,8 @@
   },
   "tsup": {
     "entry": [
-      "src/cli/client.ts",
-      "src/cli/proxy.ts",
-      "src/react/index.ts"
+      "src/client.ts",
+      "src/proxy.ts"
     ],
     "format": [
       "esm"

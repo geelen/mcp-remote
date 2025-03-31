@@ -4,7 +4,10 @@
  * MCP Client with OAuth support
  * A command-line client that connects to an MCP server using SSE with OAuth authentication.
  *
- * Run with: npx tsx client.ts https://example.remote/server [callback-port]
+ * Run with: npx tsx client.ts [--clean] https://example.remote/server [callback-port]
+ *
+ * Options:
+ * --clean: Deletes stored configuration before reading, ensuring a fresh session
  *
  * If callback-port is not specified, an available port will be automatically selected.
  */
@@ -14,32 +17,47 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { ListResourcesResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
-import { NodeOAuthClientProvider, setupOAuthCallbackServer, parseCommandLineArgs, setupSignalHandlers } from './shared.js'
+import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
+import { parseCommandLineArgs, setupSignalHandlers, log, MCP_REMOTE_VERSION, getServerUrlHash } from './lib/utils'
+import { coordinateAuth } from './lib/coordination'
 
 /**
  * Main function to run the client
  */
-async function runClient(serverUrl: string, callbackPort: number) {
+async function runClient(serverUrl: string, callbackPort: number, clean: boolean = false) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
+
+  // Get the server URL hash for lockfile operations
+  const serverUrlHash = getServerUrlHash(serverUrl)
+
+  // Coordinate authentication with other instances
+  const { server, waitForAuthCode, skipBrowserAuth } = await coordinateAuth(serverUrlHash, callbackPort, events)
 
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
     callbackPort,
     clientName: 'MCP CLI Client',
+    clean,
   })
+
+  // If auth was completed by another instance, just log that we'll use the auth from disk
+  if (skipBrowserAuth) {
+    log('Authentication was completed by another instance - will use tokens from disk...')
+    // TODO: remove, the callback is happening before the tokens are exchanged
+    //  so we're slightly too early
+    await new Promise((res) => setTimeout(res, 1_000))
+  }
 
   // Create the client
   const client = new Client(
     {
-      name: 'mcp-cli',
-      version: '0.1.0',
+      name: 'mcp-remote',
+      version: MCP_REMOTE_VERSION,
     },
     {
-      capabilities: {
-        sampling: {},
-      },
+      capabilities: {},
     },
   )
 
@@ -50,15 +68,15 @@ async function runClient(serverUrl: string, callbackPort: number) {
 
     // Set up message and error handlers
     transport.onmessage = (message) => {
-      console.log('Received message:', JSON.stringify(message, null, 2))
+      log('Received message:', JSON.stringify(message, null, 2))
     }
 
     transport.onerror = (error) => {
-      console.error('Transport error:', error)
+      log('Transport error:', error)
     }
 
     transport.onclose = () => {
-      console.log('Connection closed.')
+      log('Connection closed.')
       process.exit(0)
     }
     return transport
@@ -66,16 +84,9 @@ async function runClient(serverUrl: string, callbackPort: number) {
 
   const transport = initTransport()
 
-  // Set up an HTTP server to handle OAuth callback
-  const { server, waitForAuthCode } = setupOAuthCallbackServer({
-    port: callbackPort,
-    path: '/oauth/callback',
-    events,
-  })
-
   // Set up cleanup handler
   const cleanup = async () => {
-    console.log('\nClosing connection...')
+    log('\nClosing connection...')
     await client.close()
     server.close()
   }
@@ -83,44 +94,44 @@ async function runClient(serverUrl: string, callbackPort: number) {
 
   // Try to connect
   try {
-    console.log('Connecting to server...')
+    log('Connecting to server...')
     await client.connect(transport)
-    console.log('Connected successfully!')
+    log('Connected successfully!')
   } catch (error) {
     if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
-      console.log('Authentication required. Waiting for authorization...')
+      log('Authentication required. Waiting for authorization...')
 
-      // Wait for the authorization code from the callback
+      // Wait for the authorization code from the callback or another instance
       const code = await waitForAuthCode()
 
       try {
-        console.log('Completing authorization...')
+        log('Completing authorization...')
         await transport.finishAuth(code)
 
         // Reconnect after authorization with a new transport
-        console.log('Connecting after authorization...')
+        log('Connecting after authorization...')
         await client.connect(initTransport())
 
-        console.log('Connected successfully!')
+        log('Connected successfully!')
 
         // Request tools list after auth
-        console.log('Requesting tools list...')
+        log('Requesting tools list...')
         const tools = await client.request({ method: 'tools/list' }, ListToolsResultSchema)
-        console.log('Tools:', JSON.stringify(tools, null, 2))
+        log('Tools:', JSON.stringify(tools, null, 2))
 
         // Request resources list after auth
-        console.log('Requesting resource list...')
+        log('Requesting resource list...')
         const resources = await client.request({ method: 'resources/list' }, ListResourcesResultSchema)
-        console.log('Resources:', JSON.stringify(resources, null, 2))
+        log('Resources:', JSON.stringify(resources, null, 2))
 
-        console.log('Listening for messages. Press Ctrl+C to exit.')
+        log('Listening for messages. Press Ctrl+C to exit.')
       } catch (authError) {
-        console.error('Authorization error:', authError)
+        log('Authorization error:', authError)
         server.close()
         process.exit(1)
       }
     } else {
-      console.error('Connection error:', error)
+      log('Connection error:', error)
       server.close()
       process.exit(1)
     }
@@ -128,29 +139,29 @@ async function runClient(serverUrl: string, callbackPort: number) {
 
   try {
     // Request tools list
-    console.log('Requesting tools list...')
+    log('Requesting tools list...')
     const tools = await client.request({ method: 'tools/list' }, ListToolsResultSchema)
-    console.log('Tools:', JSON.stringify(tools, null, 2))
+    log('Tools:', JSON.stringify(tools, null, 2))
   } catch (e) {
-    console.log('Error requesting tools list:', e)
+    log('Error requesting tools list:', e)
   }
 
   try {
     // Request resources list
-    console.log('Requesting resource list...')
+    log('Requesting resource list...')
     const resources = await client.request({ method: 'resources/list' }, ListResourcesResultSchema)
-    console.log('Resources:', JSON.stringify(resources, null, 2))
+    log('Resources:', JSON.stringify(resources, null, 2))
   } catch (e) {
-    console.log('Error requesting resources list:', e)
+    log('Error requesting resources list:', e)
   }
 
-  console.log('Listening for messages. Press Ctrl+C to exit.')
+  log('Listening for messages. Press Ctrl+C to exit.')
 }
 
 // Parse command-line arguments and run the client
-parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort }) => {
-    return runClient(serverUrl, callbackPort)
+parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts [--clean] <https://server-url> [callback-port]')
+  .then(({ serverUrl, callbackPort, clean }) => {
+    return runClient(serverUrl, callbackPort, clean)
   })
   .catch((error) => {
     console.error('Fatal error:', error)

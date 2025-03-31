@@ -16,6 +16,8 @@ export interface OAuthProviderOptions {
   clientName?: string
   /** Client URI to use for OAuth registration */
   clientUri?: string
+  /** Whether to clean stored configuration before reading */
+  clean?: boolean
 }
 
 /**
