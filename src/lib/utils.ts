@@ -85,16 +85,20 @@ export async function connectToRemoteServer(
 
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
-    fetch: (url: string | URL, init: RequestInit | undefined) => {
-      return fetch(url, {
-        ...init,
-        headers: {
-          ...init?.headers,
-          ...headers,
-        },
-      })
+    fetch: (url: string | URL, init?: RequestInit) => {
+      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
+        fetch(url, {
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string> | undefined),
+            ...headers,
+            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
+            Accept: "text/event-stream",
+          } as Record<string, string>,
+        })
+      );
     },
-  }
+  };
 
   const transport = new SSEClientTransport(url, {
     authProvider,
