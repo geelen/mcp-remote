@@ -9,7 +9,7 @@ import {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
-import { getServerUrlHash, log } from './utils'
+import { getServerUrlHash, log, MCP_REMOTE_VERSION } from './utils'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -20,6 +20,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private callbackPath: string
   private clientName: string
   private clientUri: string
+  private softwareId: string
+  private softwareVersion: string
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -30,6 +32,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.callbackPath = options.callbackPath || '/oauth/callback'
     this.clientName = options.clientName || 'MCP CLI Client'
     this.clientUri = options.clientUri || 'https://github.com/modelcontextprotocol/mcp-cli'
+    this.softwareId = options.softwareId || '2e6dc280-f3c3-4e01-99a7-8181dbd1d23d'
+    this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
   }
 
   get redirectUrl(): string {
@@ -44,6 +48,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       response_types: ['code'],
       client_name: this.clientName,
       client_uri: this.clientUri,
+      software_id: this.softwareId,
+      software_version: this.softwareVersion,
     }
   }
 
