@@ -85,20 +85,16 @@ export async function connectToRemoteServer(
 
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
-    fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
-          ...init,
-          headers: {
-            ...(init?.headers as Record<string, string> | undefined),
-            ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: "text/event-stream",
-          } as Record<string, string>,
-        })
-      );
+    fetch: (url: string | URL, init: RequestInit | undefined) => {
+      return fetch(url, {
+        ...init,
+        headers: {
+          ...init?.headers,
+          ...headers,
+        },
+      })
     },
-  };
+  }
 
   const transport = new SSEClientTransport(url, {
     authProvider,
@@ -116,6 +112,54 @@ export async function connectToRemoteServer(
         log('Authentication required but skipping browser auth - using shared auth')
       } else {
         log('Authentication required. Waiting for authorization...')
+        
+        // Check if we need to register the client
+        const clientInfo = await authProvider.clientInformation()
+        if (!clientInfo) {
+          log('No client information found - performing dynamic client registration')
+          
+          try {
+            // Derive registration endpoint URL from server URL
+            // Typically /register or /oauth/register
+            const registrationUrl = new URL(url.origin)
+            registrationUrl.pathname = registrationUrl.pathname.replace(/\/*$/, '') + '/oauth/register'
+            
+            log(`Registering client at ${registrationUrl.toString()}`)
+            
+            // Get client metadata from the auth provider
+            const clientMetadata = (authProvider as any).clientMetadata
+            
+            // Register the client
+            const response = await fetch(registrationUrl.toString(), {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...headers
+              },
+              body: JSON.stringify(clientMetadata)
+            })
+            
+            if (!response.ok) {
+              const error = await response.text()
+              throw new Error(`Client registration failed: ${error}`)
+            }
+            
+            // Parse and save client information
+            const clientRegistration = await response.json()
+            log('Client registration successful')
+            
+            // Check if saveClientInformation is implemented before calling it
+            if (typeof authProvider.saveClientInformation === 'function') {
+              await authProvider.saveClientInformation(clientRegistration)
+            } else {
+              log('Warning: saveClientInformation not implemented, cannot save client registration data')
+              throw new Error('Cannot complete OAuth flow: saveClientInformation not implemented in auth provider')
+            }
+          } catch (registrationError) {
+            log('Client registration error:', registrationError)
+            throw registrationError
+          }
+        }
       }
 
       // Wait for the authorization code from the callback
