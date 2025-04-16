@@ -299,6 +299,7 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
 
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
+  const allowHttp = args.includes('--allow-http')
 
   if (!serverUrl) {
     log(usage)
@@ -308,7 +309,8 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
   const url = new URL(serverUrl)
   const isLocalhost = (url.hostname === 'localhost' || url.hostname === '127.0.0.1') && url.protocol === 'http:'
 
-  if (!(url.protocol == 'https:' || isLocalhost)) {
+  if (!(url.protocol == 'https:' || isLocalhost || allowHttp)) {
+    log('Error: Non-HTTPS URLs are only allowed for localhost or when --allow-http flag is provided')
     log(usage)
     process.exit(1)
   }

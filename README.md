@@ -87,6 +87,16 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+* To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
+
+```json
+      "args": [
+        "mcp-remote",
+        "http://internal-service.vpc/sse",
+        "--allow-http"
+      ]
+```
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)
