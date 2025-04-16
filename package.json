@@ -28,7 +28,7 @@
     "check": "prettier --check . && tsc"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@modelcontextprotocol/sdk": "^1.9.0",
     "express": "^4.21.2",
     "open": "^10.1.0"
   },
