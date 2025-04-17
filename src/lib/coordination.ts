@@ -5,6 +5,10 @@ import express from 'express'
 import { AddressInfo } from 'net'
 import { log, setupOAuthCallbackServerWithLongPoll } from './utils'
 
+export type AuthCoordinator = {
+  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
+}
+
 /**
  * Checks if a process with the given PID is running
  * @param pid The process ID to check
@@ -85,6 +89,36 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
   } catch (error) {
     log(`Error waiting for authentication: ${(error as Error).message}`)
     return false
+  }
+}
+
+/**
+ * Creates a lazy auth coordinator that will only initiate auth when needed
+ * @param serverUrlHash The hash of the server URL
+ * @param callbackPort The port to use for the callback server
+ * @param events The event emitter to use for signaling
+ * @returns An AuthCoordinator object with an initializeAuth method
+ */
+export function createLazyAuthCoordinator(
+  serverUrlHash: string,
+  callbackPort: number,
+  events: EventEmitter
+): AuthCoordinator {
+  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
+
+  return {
+    initializeAuth: async () => {
+      // If auth has already been initialized, return the existing state
+      if (authState) {
+        return authState
+      }
+
+      log('Initializing auth coordination on-demand')
+      
+      // Initialize auth using the existing coordinateAuth logic
+      authState = await coordinateAuth(serverUrlHash, callbackPort, events)
+      return authState
+    }
   }
 }
 
