@@ -14,19 +14,22 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { connectToRemoteServer, log, mcpProxy, parseCommandLineArgs, setupSignalHandlers, getServerUrlHash } from './lib/utils'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { coordinateAuth } from './lib/coordination'
+import express from 'express'
 
 /**
  * Main function to run the proxy
  */
-async function runProxy(serverUrl: string, callbackPort: number, headers: Record<string, string>) {
+async function runProxy(serverUrl: string, callbackPort: number, headers: Record<string, string>, skipAuth: boolean = false) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
   // Get the server URL hash for lockfile operations
   const serverUrlHash = getServerUrlHash(serverUrl)
 
-  // Coordinate authentication with other instances
-  const { server, waitForAuthCode, skipBrowserAuth } = await coordinateAuth(serverUrlHash, callbackPort, events)
+  // Skip authentication related processes when skip auth is enabled
+  const { server, waitForAuthCode, skipBrowserAuth } = skipAuth
+    ? { server: express().listen(0), waitForAuthCode: () => Promise.resolve(''), skipBrowserAuth: true }
+    : await coordinateAuth(serverUrlHash, callbackPort, events)
 
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
@@ -48,7 +51,7 @@ async function runProxy(serverUrl: string, callbackPort: number, headers: Record
 
   try {
     // Connect to remote server with authentication
-    const remoteTransport = await connectToRemoteServer(serverUrl, authProvider, headers, waitForAuthCode, skipBrowserAuth)
+    const remoteTransport = await connectToRemoteServer(serverUrl, authProvider, headers, waitForAuthCode, skipBrowserAuth, skipAuth)
 
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
@@ -100,8 +103,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 3334, 'Usage: npx tsx proxy.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers }) => {
-    return runProxy(serverUrl, callbackPort, headers)
+  .then(({ serverUrl, callbackPort, headers, skipAuth }) => {
+    return runProxy(serverUrl, callbackPort, headers, skipAuth)
   })
   .catch((error) => {
     log('Fatal error:', error)

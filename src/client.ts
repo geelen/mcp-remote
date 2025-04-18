@@ -156,7 +156,7 @@ async function runClient(serverUrl: string, callbackPort: number, headers: Recor
 
 // Parse command-line arguments and run the client
 parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers }) => {
+  .then(({ serverUrl, callbackPort, headers, skipAuth }) => {
     return runClient(serverUrl, callbackPort, headers)
   })
   .catch((error) => {

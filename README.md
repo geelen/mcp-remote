@@ -114,6 +114,16 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+* To completely skip authentication for servers that don't require it, add the `--skip-auth` flag. While the primary purpose of mcp-remote is to provide OAuth authentication to clients connecting to MCP servers, this flag enables the tool to be used as a simple SSE connection proxy in trusted environments (e.g., development environments, internal networks) where authentication is not required.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--skip-auth"
+      ]
+```
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)
