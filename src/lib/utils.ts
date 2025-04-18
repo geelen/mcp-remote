@@ -208,7 +208,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     log('Auth code received, resolving promise')
     authCompletedResolve(code)
 
-    res.send('Authorization successful! You may close this window and return to the CLI.')
+    res.send('Authorization successful! You may close this window and return to the CLI.' +
+             '<script>window.close();</script>')
 
     // Notify main flow that auth code is available
     options.events.emit('auth-code-received', code)
