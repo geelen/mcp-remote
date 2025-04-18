@@ -71,6 +71,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
  * @param headers Additional headers to send with the request
  * @param waitForAuthCode Function to wait for the auth code
  * @param skipBrowserAuth Whether to skip browser auth and use shared auth
+ * @param skipAuth Whether to skip authentication
  * @returns The connected SSE client transport
  */
 export async function connectToRemoteServer(
@@ -79,6 +80,7 @@ export async function connectToRemoteServer(
   headers: Record<string, string>,
   waitForAuthCode: () => Promise<string>,
   skipBrowserAuth: boolean = false,
+  skipAuth: boolean = false,
 ): Promise<SSEClientTransport> {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
@@ -86,6 +88,18 @@ export async function connectToRemoteServer(
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
     fetch: (url: string | URL, init?: RequestInit) => {
+      // Skip adding authorization header when skip auth is enabled
+      if (skipAuth) {
+        return fetch(url, {
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string> | undefined),
+            ...headers,
+            Accept: "text/event-stream",
+          } as Record<string, string>,
+        });
+      }
+
       return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
         fetch(url, {
           ...init,
@@ -111,6 +125,12 @@ export async function connectToRemoteServer(
     log('Connected to remote server')
     return transport
   } catch (error) {
+    // Ignore authentication errors when skip auth is enabled
+    if (skipAuth) {
+      log('Skipping authentication as requested')
+      return transport
+    }
+
     if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
       if (skipBrowserAuth) {
         log('Authentication required but skipping browser auth - using shared auth')
@@ -300,6 +320,7 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
   const allowHttp = args.includes('--allow-http')
+  const skipAuth = args.includes('--skip-auth')
 
   if (!serverUrl) {
     log(usage)
@@ -343,7 +364,13 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     })
   }
 
-  return { serverUrl, callbackPort, headers }
+  return {
+    serverUrl,
+    callbackPort,
+    headers,
+    allowHttp,
+    skipAuth,
+  }
 }
 
 /**
