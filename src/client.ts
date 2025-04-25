@@ -28,15 +28,16 @@ async function runClient(serverUrl: string, callbackPort: number, headers: Recor
   // Get the server URL hash for lockfile operations
   const serverUrlHash = getServerUrlHash(serverUrl)
 
-  // Coordinate authentication with other instances
-  const { server, waitForAuthCode, skipBrowserAuth } = await coordinateAuth(serverUrlHash, callbackPort, events)
-
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
     callbackPort,
     clientName: 'MCP CLI Client',
   })
+
+  // Coordinate authentication with other instances
+  const hasSavedTokens = !!(await authProvider.tokens())
+  const { server, waitForAuthCode, skipBrowserAuth } = await coordinateAuth(serverUrlHash, callbackPort, events, hasSavedTokens)
 
   // If auth was completed by another instance, just log that we'll use the auth from disk
   if (skipBrowserAuth) {

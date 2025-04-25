@@ -25,13 +25,6 @@ export async function isPidRunning(pid: number): Promise<boolean> {
  * @returns True if the lockfile is valid, false otherwise
  */
 export async function isLockValid(lockData: LockfileData): Promise<boolean> {
-  // Check if the lockfile is too old (over 30 minutes)
-  const MAX_LOCK_AGE = 30 * 60 * 1000 // 30 minutes
-  if (Date.now() - lockData.timestamp > MAX_LOCK_AGE) {
-    log('Lockfile is too old')
-    return false
-  }
-
   // Check if the process is still running
   if (!(await isPidRunning(lockData.pid))) {
     log('Process from lockfile is not running')
@@ -93,12 +86,14 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
  * @param serverUrlHash The hash of the server URL
  * @param callbackPort The port to use for the callback server
  * @param events The event emitter to use for signaling
+ * @param hasSavedTokens Whether the client has saved tokens
  * @returns An object with the server, waitForAuthCode function, and a flag indicating if browser auth can be skipped
  */
 export async function coordinateAuth(
   serverUrlHash: string,
   callbackPort: number,
   events: EventEmitter,
+  hasSavedTokens: boolean,
 ): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
   // Check for a lockfile (disabled on Windows for the time being)
   const lockData = process.platform === 'win32' ? null : await checkLockfile(serverUrlHash)
@@ -109,7 +104,7 @@ export async function coordinateAuth(
 
     try {
       // Try to wait for the authentication to complete
-      const authCompleted = await waitForAuthentication(lockData.port)
+      const authCompleted = hasSavedTokens || (await waitForAuthentication(lockData.port))
       if (authCompleted) {
         log('Authentication completed by another instance')
 
