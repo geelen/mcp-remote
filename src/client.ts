@@ -100,7 +100,6 @@ async function runClient(serverUrl: string, callbackPort: number, headers: Recor
 
       // Wait for the authorization code from the callback or another instance
       const code = await waitForAuthCode()
-      console.log('~~~ CLIENT - AUTH CODE ~~~', code)
 
       try {
         log('Completing authorization...')
