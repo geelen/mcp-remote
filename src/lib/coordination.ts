@@ -25,13 +25,6 @@ export async function isPidRunning(pid: number): Promise<boolean> {
  * @returns True if the lockfile is valid, false otherwise
  */
 export async function isLockValid(lockData: LockfileData): Promise<boolean> {
-  // Check if the lockfile is too old (over 30 minutes)
-  const MAX_LOCK_AGE = 30 * 60 * 1000 // 30 minutes
-  if (Date.now() - lockData.timestamp > MAX_LOCK_AGE) {
-    log('Lockfile is too old')
-    return false
-  }
-
   // Check if the process is still running
   if (!(await isPidRunning(lockData.pid))) {
     log('Process from lockfile is not running')
