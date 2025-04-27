@@ -1,10 +1,10 @@
 import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { OAuthCallbackServerOptions } from './types'
+import crypto from 'crypto'
 import express from 'express'
 import net from 'net'
-import crypto from 'crypto'
+import { OAuthCallbackServerOptions } from './types'
 
 // Package version from package.json
 export const MCP_REMOTE_VERSION = require('../../package.json').version
@@ -293,7 +293,6 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
       } else {
         log(`Warning: ignoring invalid header argument: ${value}`)
       }
-      args.splice(i, 2)
     }
   })
 
