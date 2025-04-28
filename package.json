@@ -1,5 +1,5 @@
 {
-  "name": "mcp-remote",
+  "name": "@ownid/mcp-remote",
   "version": "0.0.20",
   "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
   "keywords": [
@@ -10,7 +10,10 @@
     "oauth"
   ],
   "author": "Glen Maddern <glen@cloudflare.com>",
-  "repository": "https://github.com/geelen/mcp-remote",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OwnID/mcp-remote.git"
+  },
   "type": "module",
   "files": [
     "dist",
