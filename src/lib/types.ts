@@ -16,6 +16,10 @@ export interface OAuthProviderOptions {
   clientName?: string
   /** Client URI to use for OAuth registration */
   clientUri?: string
+  /** Software ID to use for OAuth registration */
+  softwareId?: string
+  /** Software version to use for OAuth registration */
+  softwareVersion?: string
 }
 
 /**

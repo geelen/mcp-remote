@@ -1,4 +1,5 @@
 import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthCallbackServerOptions } from './types'
@@ -65,13 +66,14 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 }
 
 /**
- * Creates and connects to a remote SSE server with OAuth authentication
+ * Creates and connects to a remote server with OAuth authentication
  * @param serverUrl The URL of the remote server
  * @param authProvider The OAuth client provider
  * @param headers Additional headers to send with the request
  * @param waitForAuthCode Function to wait for the auth code
  * @param skipBrowserAuth Whether to skip browser auth and use shared auth
- * @returns The connected SSE client transport
+ * @param useStreamableHttp Whether to use Streamable HTTP transport instead of SSE
+ * @returns The connected client transport
  */
 export async function connectToRemoteServer(
   serverUrl: string,
@@ -79,32 +81,27 @@ export async function connectToRemoteServer(
   headers: Record<string, string>,
   waitForAuthCode: () => Promise<string>,
   skipBrowserAuth: boolean = false,
-): Promise<SSEClientTransport> {
+  useStreamableHttp: boolean = false,
+): Promise<StreamableHTTPClientTransport | SSEClientTransport> {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
 
-  // Create transport with eventSourceInit to pass Authorization header if present
-  const eventSourceInit = {
-    fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
-          ...init,
-          headers: {
-            ...(init?.headers as Record<string, string> | undefined),
-            ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: "text/event-stream",
-          } as Record<string, string>,
-        })
-      );
-    },
-  };
-
-  const transport = new SSEClientTransport(url, {
-    authProvider,
-    requestInit: { headers },
-    eventSourceInit,
-  })
+  // Create the appropriate transport (Streamable HTTP or SSE) based on the flag
+  const transport = useStreamableHttp 
+    ? new StreamableHTTPClientTransport(url, {
+        authProvider,
+        requestInit: { headers },
+        reconnectionOptions: {
+          initialReconnectionDelay: 1000,
+          maxReconnectionDelay: 10000,
+          reconnectionDelayGrowFactor: 1.5,
+          maxRetries: 10,
+        },
+      })
+    : new SSEClientTransport(url, {
+        authProvider,
+        requestInit: { headers }
+      })
 
   try {
     await transport.start()
@@ -125,8 +122,22 @@ export async function connectToRemoteServer(
         log('Completing authorization...')
         await transport.finishAuth(code)
 
-        // Create a new transport after auth
-        const newTransport = new SSEClientTransport(url, { authProvider, requestInit: { headers } })
+        // Create a new transport (Streamable HTTP or SSE) after auth with the same type as before
+        const newTransport = useStreamableHttp
+          ? new StreamableHTTPClientTransport(url, {
+              authProvider,
+              requestInit: { headers },
+              reconnectionOptions: {
+                initialReconnectionDelay: 1000,
+                maxReconnectionDelay: 10000,
+                reconnectionDelayGrowFactor: 1.5,
+                maxRetries: 10,
+              },
+            })
+          : new SSEClientTransport(url, {
+              authProvider,
+              requestInit: { headers }
+            })
         await newTransport.start()
         log('Connected to remote server after authentication')
         return newTransport
@@ -299,6 +310,8 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
 
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
+  const allowHttp = args.includes('--allow-http')
+  const useStreamableHttp = args.includes('--streamableHttp')
 
   if (!serverUrl) {
     log(usage)
@@ -308,7 +321,8 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
   const url = new URL(serverUrl)
   const isLocalhost = (url.hostname === 'localhost' || url.hostname === '127.0.0.1') && url.protocol === 'http:'
 
-  if (!(url.protocol == 'https:' || isLocalhost)) {
+  if (!(url.protocol == 'https:' || isLocalhost || allowHttp)) {
+    log('Error: Non-HTTPS URLs are only allowed for localhost or when --allow-http flag is provided')
     log(usage)
     process.exit(1)
   }
@@ -341,7 +355,7 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     })
   }
 
-  return { serverUrl, callbackPort, headers }
+  return { serverUrl, callbackPort, headers, useStreamableHttp }
 }
 
 /**

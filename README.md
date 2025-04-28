@@ -10,7 +10,7 @@ So far, the majority of MCP servers in the wild are installed locally, using the
 
 But there's a reason most software that _could_ be moved to the web _did_ get moved to the web: it's so much easier to find and fix bugs & iterate on new features when you can push updates to all your users with a single deploy.
 
-With the MCP [Authorization specification](https://spec.modelcontextprotocol.io/specification/draft/basic/authorization/) nearing completion, we now have a secure way of sharing our MCP servers with the world _without_ running code on user's laptops. Or at least, you would, if all the popular MCP _clients_ supported it yet. Most are stdio-only, and those that _do_ support HTTP+SSE don't yet support the OAuth flows required.
+With the latest MCP [Authorization specification](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization), we now have a secure way of sharing our MCP servers with the world _without_ running code on user's laptops. Or at least, you would, if all the popular MCP _clients_ supported it yet. Most are stdio-only, and those that _do_ support HTTP+SSE don't yet support the OAuth flows required.
 
 That's where `mcp-remote` comes in. As soon as your chosen MCP client supports remote, authorized servers, you can remove it. Until that time, drop in this one liner and dress for the MCP clients you want!
 
@@ -55,6 +55,23 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 }
 ```
 
+**Note:** Cursor has a bug where spaces inside `args` aren't escaped when it invokes `npx`, which ends up mangling these values. You can work around it using:
+
+```jsonc
+{
+  // rest of config...
+  "args": [
+    "mcp-remote",
+    "https://remote.mcp.server/sse",
+    "--header",
+    "Authorization:${AUTH_HEADER}" // note no spaces around ':'
+  ]
+},
+"env": {
+  "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
+}
+```
+
 ### Flags
 
 * If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.
@@ -62,9 +79,19 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 ```json
       "command": "npx",
       "args": [
-        "-y"
+        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
+      ]
+```
+
+* To use Streamable HTTP instead of Server-Sent Events (SSE), add the `--streamableHttp` flag. This is recommended as SSE is deprecated:
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--streamableHttp"
       ]
 ```
 
@@ -84,6 +111,16 @@ To bypass authentication, or to emit custom headers on all requests to your remo
         "mcp-remote",
         "https://remote.mcp.server/sse",
         "9696"
+      ]
+```
+
+* To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
+
+```json
+      "args": [
+        "mcp-remote",
+        "http://internal-service.vpc/sse",
+        "--allow-http"
       ]
 ```
 
