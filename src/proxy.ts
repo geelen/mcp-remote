@@ -2,7 +2,7 @@
 
 /**
  * MCP Proxy with OAuth support
- * A bidirectional proxy between a local STDIO MCP server and a remote SSE server with OAuth authentication.
+ * A bidirectional proxy between a local STDIO MCP server and a remote server with OAuth authentication.
  *
  * Run with: npx tsx proxy.ts https://example.remote/server [callback-port]
  *
@@ -59,7 +59,7 @@ async function runProxy(serverUrl: string, callbackPort: number, headers: Record
     // Start the local STDIO server
     await localTransport.start()
     log('Local STDIO server running')
-    log('Proxy established successfully between local STDIO and remote SSE')
+    log('Proxy established successfully between local STDIO and remote server')
     log('Press Ctrl+C to exit')
 
     // Setup cleanup handler

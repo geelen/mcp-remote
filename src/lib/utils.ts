@@ -1,5 +1,5 @@
 import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthCallbackServerOptions } from './types'
 import express from 'express'
@@ -65,13 +65,13 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 }
 
 /**
- * Creates and connects to a remote SSE server with OAuth authentication
+ * Creates and connects to a remote server with OAuth authentication
  * @param serverUrl The URL of the remote server
  * @param authProvider The OAuth client provider
  * @param headers Additional headers to send with the request
  * @param waitForAuthCode Function to wait for the auth code
  * @param skipBrowserAuth Whether to skip browser auth and use shared auth
- * @returns The connected SSE client transport
+ * @returns The connected StreamableHTTP client transport
  */
 export async function connectToRemoteServer(
   serverUrl: string,
@@ -79,31 +79,19 @@ export async function connectToRemoteServer(
   headers: Record<string, string>,
   waitForAuthCode: () => Promise<string>,
   skipBrowserAuth: boolean = false,
-): Promise<SSEClientTransport> {
+): Promise<StreamableHTTPClientTransport> {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
 
-  // Create transport with eventSourceInit to pass Authorization header if present
-  const eventSourceInit = {
-    fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
-          ...init,
-          headers: {
-            ...(init?.headers as Record<string, string> | undefined),
-            ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: "text/event-stream",
-          } as Record<string, string>,
-        })
-      );
-    },
-  };
-
-  const transport = new SSEClientTransport(url, {
+  const transport = new StreamableHTTPClientTransport(url, {
     authProvider,
     requestInit: { headers },
-    eventSourceInit,
+    reconnectionOptions: {
+      initialReconnectionDelay: 1000,
+      maxReconnectionDelay: 10000,
+      reconnectionDelayGrowFactor: 1.5,
+      maxRetries: 10,
+    },
   })
 
   try {
@@ -126,7 +114,16 @@ export async function connectToRemoteServer(
         await transport.finishAuth(code)
 
         // Create a new transport after auth
-        const newTransport = new SSEClientTransport(url, { authProvider, requestInit: { headers } })
+        const newTransport = new StreamableHTTPClientTransport(url, {
+          authProvider,
+          requestInit: { headers },
+          reconnectionOptions: {
+            initialReconnectionDelay: 1000,
+            maxReconnectionDelay: 10000,
+            reconnectionDelayGrowFactor: 1.5,
+            maxRetries: 10,
+          },
+        })
         await newTransport.start()
         log('Connected to remote server after authentication')
         return newTransport
