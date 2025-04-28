@@ -79,9 +79,19 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 ```json
       "command": "npx",
       "args": [
-        "-y"
+        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
+      ]
+```
+
+* To use Streamable HTTP instead of Server-Sent Events (SSE), add the `--streamableHttp` flag. This is recommended as SSE is deprecated:
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--streamableHttp"
       ]
 ```
 

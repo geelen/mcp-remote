@@ -2,7 +2,7 @@
 
 /**
  * MCP Client with OAuth support
- * A command-line client that connects to an MCP server using SSE with OAuth authentication.
+ * A command-line client that connects to an MCP server using StreamableHTTP with OAuth authentication.
  *
  * Run with: npx tsx client.ts https://example.remote/server [callback-port]
  *
@@ -11,6 +11,7 @@
 
 import { EventEmitter } from 'events'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { ListResourcesResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -21,7 +22,7 @@ import { coordinateAuth } from './lib/coordination'
 /**
  * Main function to run the client
  */
-async function runClient(serverUrl: string, callbackPort: number, headers: Record<string, string>) {
+async function runClient(serverUrl: string, callbackPort: number, headers: Record<string, string>, useStreamableHttp: boolean = false) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
@@ -60,7 +61,22 @@ async function runClient(serverUrl: string, callbackPort: number, headers: Recor
   // Create the transport factory
   const url = new URL(serverUrl)
   function initTransport() {
-    const transport = new SSEClientTransport(url, { authProvider, requestInit: { headers } })
+    // Choose between Streamable HTTP or SSE transport based on flag
+    const transport = useStreamableHttp 
+      ? new StreamableHTTPClientTransport(url, {
+          authProvider,
+          requestInit: { headers },
+          reconnectionOptions: {
+            initialReconnectionDelay: 1000,
+            maxReconnectionDelay: 10000,
+            reconnectionDelayGrowFactor: 1.5,
+            maxRetries: 10,
+          },
+        })
+      : new SSEClientTransport(url, {
+          authProvider,
+          requestInit: { headers }
+        })
 
     // Set up message and error handlers
     transport.onmessage = (message) => {
@@ -155,9 +171,9 @@ async function runClient(serverUrl: string, callbackPort: number, headers: Recor
 }
 
 // Parse command-line arguments and run the client
-parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers }) => {
-    return runClient(serverUrl, callbackPort, headers)
+parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port] [--streamableHttp]')
+  .then(({ serverUrl, callbackPort, headers, useStreamableHttp }) => {
+    return runClient(serverUrl, callbackPort, headers, useStreamableHttp)
   })
   .catch((error) => {
     console.error('Fatal error:', error)
