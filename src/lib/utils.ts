@@ -162,7 +162,7 @@ export async function connectToRemoteServer(
     if (
       error instanceof Error &&
       shouldAttemptFallback &&
-      (sseTransport
+      (!sseTransport
         ? error.message.includes('405') || error.message.includes('Method Not Allowed')
         : error.message.includes('404') || error.message.includes('Not Found'))
     ) {
