@@ -114,6 +114,23 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+### Transport Strategies
+
+MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.
+
+Specify the transport strategy with the `--transport` flag:
+
+```bash
+npx mcp-remote https://example.remote/server --transport sse-only
+```
+
+**Available Strategies:**
+
+- `http-first` (default): Tries HTTP transport first, falls back to SSE if HTTP fails with a 404 error
+- `sse-first`: Tries SSE transport first, falls back to HTTP if SSE fails with a 405 error
+- `http-only`: Only uses HTTP transport, fails if the server doesn't support it
+- `sse-only`: Only uses SSE transport, fails if the server doesn't support it
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)
