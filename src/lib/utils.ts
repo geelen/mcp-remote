@@ -303,7 +303,7 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     const postAuthRedirectUri = req.query.postAuthRedirectUri as string | undefined
     if (postAuthRedirectUri) {
       log(`Redirecting to post-auth redirect URI: ${postAuthRedirectUri}`)
-      res.redirect(postAuthRedirectUri);
+      res.redirect(postAuthRedirectUri)
     } else {
       res.send('Authorization successful! You may close this window and return to the CLI.')
     }
