@@ -300,7 +300,13 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     log('Auth code received, resolving promise')
     authCompletedResolve(code)
 
-    res.send('Authorization successful! You may close this window and return to the CLI.')
+    const postAuthRedirectUri = req.query.postAuthRedirectUri as string | undefined
+    if (postAuthRedirectUri) {
+      log(`Redirecting to post-auth redirect URI: ${postAuthRedirectUri}`)
+      res.redirect(postAuthRedirectUri);
+    } else {
+      res.send('Authorization successful! You may close this window and return to the CLI.')
+    }
 
     // Notify main flow that auth code is available
     options.events.emit('auth-code-received', code)
