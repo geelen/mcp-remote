@@ -130,14 +130,14 @@ export async function connectToRemoteServer(
   const sseTransport = transportStrategy === 'sse-only' || transportStrategy === 'sse-first'
   const transport = sseTransport
     ? new SSEClientTransport(url, {
-        authProvider,
-        requestInit: { headers },
-        eventSourceInit,
-      })
+      authProvider,
+      requestInit: { headers },
+      eventSourceInit,
+    })
     : new StreamableHTTPClientTransport(url, {
-        authProvider,
-        requestInit: { headers },
-      })
+      authProvider,
+      requestInit: { headers },
+    })
 
   try {
     if (client) {
@@ -376,8 +376,9 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
 export async function parseCommandLineArgs(args: string[], defaultPort: number, usage: string) {
   // Process headers
   const headers: Record<string, string> = {}
-  args.forEach((arg, i) => {
-    if (arg === '--header' && i < args.length - 1) {
+  let i = 0;
+  while (i < args.length) {
+    if (args[i] === '--header' && i < args.length - 1) {
       const value = args[i + 1]
       const match = value.match(/^([A-Za-z0-9_-]+):(.*)$/)
       if (match) {
@@ -386,8 +387,11 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
         log(`Warning: ignoring invalid header argument: ${value}`)
       }
       args.splice(i, 2)
+      // Do not increment i, as the array has shifted
+      continue
     }
-  })
+    i++
+  }
 
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
