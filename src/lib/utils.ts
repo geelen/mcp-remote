@@ -477,6 +477,11 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
 
   // Keep the process alive
   process.stdin.resume()
+  process.stdin.on('end', async () => {
+    log('\nShutting down...')
+    await cleanup()
+    process.exit(0)
+  })
 }
 
 /**
