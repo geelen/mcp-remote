@@ -10,7 +10,7 @@
  */
 
 import { EventEmitter } from 'events'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { StdioServerTransportExt } from './lib/utils'
 import {
   connectToRemoteServer,
   log,
@@ -50,7 +50,7 @@ async function runProxy(
   })
 
   // Create the STDIO transport for local connections
-  const localTransport = new StdioServerTransport()
+  const localTransport = new StdioServerTransportExt()
 
   // Keep track of the server instance for cleanup
   let server: any = null
@@ -78,7 +78,15 @@ async function runProxy(
 
   try {
     // Connect to remote server with lazy authentication
-    const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
+    const remoteTransport = await connectToRemoteServer(
+      null,
+      serverUrl,
+      authProvider,
+      headers,
+      authInitializer,
+      transportStrategy,
+      localTransport,
+    )
 
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
