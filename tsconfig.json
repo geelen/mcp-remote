@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "noEmit": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["node", "react"],
+    "types": ["node"],
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   }

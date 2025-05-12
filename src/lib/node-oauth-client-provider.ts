@@ -37,7 +37,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
-    return `http://127.0.0.1:${this.options.callbackPort}${this.callbackPath}`
+    return `http://localhost:${this.options.callbackPort}${this.callbackPath}`
   }
 
   get clientMetadata() {
