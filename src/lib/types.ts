@@ -33,3 +33,8 @@ export interface OAuthCallbackServerOptions {
   /** Event emitter to signal when auth code is received */
   events: EventEmitter
 }
+
+/*
+ * Connection status types used for logging (via local transport, in proxy mode)
+ */
+export type ConnStatus = 'connected' | 'connecting' | 'reconnecting' | 'authenticating' | 'error' | 'error_final'
