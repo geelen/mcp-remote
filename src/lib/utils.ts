@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -11,6 +12,7 @@ export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
 import { OAuthCallbackServerOptions } from './types'
+import { readJsonFile } from './mcp-auth-config'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
@@ -352,6 +354,21 @@ export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
   return { server, authCode, waitForAuthCode }
 }
 
+async function findExistingClientPort(serverUrl: string): Promise<number | undefined> {
+  const serverUrlHash = getServerUrlHash(serverUrl)
+  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+  if (!clientInfo) {
+    return undefined
+  }
+
+  const localhostRedirectUri = clientInfo.redirect_uris.map((uri) => new URL(uri)).find(({ hostname }) => hostname === 'localhost')
+  if (!localhostRedirectUri) {
+    throw new Error('Cannot find localhost callback URI from existing client information')
+  }
+
+  return parseInt(localhostRedirectUri.port)
+}
+
 /**
  * Finds an available port on the local machine
  * @param preferredPort Optional preferred port to try first
@@ -440,11 +457,14 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     process.exit(1)
   }
 
-  // Use the specified port, or find an available one
-  const callbackPort = specifiedPort || (await findAvailablePort(defaultPort))
+  // Use the specified port, or the existing client port or fallback to find an available one
+  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrl), findAvailablePort(defaultPort)])
+  const callbackPort = specifiedPort || existingClientPort || availablePort
 
   if (specifiedPort) {
     log(`Using specified callback port: ${callbackPort}`)
+  } else if (existingClientPort) {
+    log(`Using existing client port: ${existingClientPort}`)
   } else {
     log(`Using automatically selected callback port: ${callbackPort}`)
   }
