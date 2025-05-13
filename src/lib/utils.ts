@@ -10,7 +10,7 @@ export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
-import { OAuthCallbackServerOptions } from './types'
+import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
@@ -311,8 +311,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
       Authorization successful!
       You may close this window and return to the CLI.
       <script>
-        // If this is a non-interactive session (no manual approval step was required) then 
-        // this should automatically close the window. If not, this will have no effect and 
+        // If this is a non-interactive session (no manual approval step was required) then
+        // this should automatically close the window. If not, this will have no effect and
         // the user will see the message above.
         window.close();
       </script>
@@ -426,6 +426,26 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     }
   }
 
+  let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
+  const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
+  if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
+    staticOAuthClientMetadata = JSON.parse(args[staticOAuthClientMetadataIndex + 1])
+    if (staticOAuthClientMetadata) {
+      log(`Using static OAuth client metadata`)
+    }
+  }
+
+  // parse static OAuth client information, if provided
+  // defaults to OAuth dynamic client registration
+  let staticOAuthClientInfo: StaticOAuthClientInformationFull = null
+  const staticOAuthClientInfoIndex = args.indexOf('--static-oauth-client-info')
+  if (staticOAuthClientInfoIndex !== -1 && staticOAuthClientInfoIndex < args.length - 1) {
+    staticOAuthClientInfo = JSON.parse(args[staticOAuthClientInfoIndex + 1])
+    if (staticOAuthClientInfo) {
+      log(`Using static OAuth client information`)
+    }
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -468,7 +488,7 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     })
   }
 
-  return { serverUrl, callbackPort, headers, transportStrategy }
+  return { serverUrl, callbackPort, headers, transportStrategy, staticOAuthClientMetadata, staticOAuthClientInfo }
 }
 
 /**

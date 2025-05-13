@@ -22,6 +22,7 @@ import {
   connectToRemoteServer,
   TransportStrategy,
 } from './lib/utils'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
 /**
@@ -32,6 +33,8 @@ async function runClient(
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
+  staticOAuthClientMetadata: StaticOAuthClientMetadata,
+  staticOAuthClientInfo: StaticOAuthClientInformationFull,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -47,6 +50,8 @@ async function runClient(
     serverUrl,
     callbackPort,
     clientName: 'MCP CLI Client',
+    staticOAuthClientMetadata,
+    staticOAuthClientInfo,
   })
 
   // Create the client
@@ -152,8 +157,8 @@ async function runClient(
 
 // Parse command-line arguments and run the client
 parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy }) => {
-    return runClient(serverUrl, callbackPort, headers, transportStrategy)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, staticOAuthClientMetadata, staticOAuthClientInfo }) => {
+    return runClient(serverUrl, callbackPort, headers, transportStrategy, staticOAuthClientMetadata, staticOAuthClientInfo)
   })
   .catch((error) => {
     console.error('Fatal error:', error)

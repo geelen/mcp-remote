@@ -7,9 +7,10 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthProviderOptions } from './types'
+import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
 import { getServerUrlHash, log, MCP_REMOTE_VERSION } from './utils'
+import { StaticOAuthClientInformationFull } from './types'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -22,6 +23,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private clientUri: string
   private softwareId: string
   private softwareVersion: string
+  private staticOAuthClientMetadata: StaticOAuthClientMetadata
+  private staticOAuthClientInfo: StaticOAuthClientInformationFull
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -34,6 +37,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.clientUri = options.clientUri || 'https://github.com/modelcontextprotocol/mcp-cli'
     this.softwareId = options.softwareId || '2e6dc280-f3c3-4e01-99a7-8181dbd1d23d'
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
+    this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
+    this.staticOAuthClientInfo = options.staticOAuthClientInfo
   }
 
   get redirectUrl(): string {
@@ -50,6 +55,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
+      ...this.staticOAuthClientMetadata,
     }
   }
 
@@ -58,6 +64,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The client information or undefined
    */
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
+    if (this.staticOAuthClientInfo) {
+      return this.staticOAuthClientInfo
+    }
     // log('Reading client info')
     return readJsonFile<OAuthClientInformation>(this.serverUrlHash, 'client_info.json', OAuthClientInformationSchema)
   }

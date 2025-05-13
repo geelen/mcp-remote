@@ -131,6 +131,33 @@ npx mcp-remote https://example.remote/server --transport sse-only
 - `http-only`: Only uses HTTP transport, fails if the server doesn't support it
 - `sse-only`: Only uses SSE transport, fails if the server doesn't support it
 
+### Static OAuth Client Metadata
+
+MCP Remote supports providing static OAuth client metadata instead of using the mcp-remote defaults.
+This is useful when connecting to OAuth servers that expect specific client/software IDs or scopes.
+
+Provide the client metadata as JSON with the `--static-oauth-client-metadata` flag:
+
+```bash
+npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "scope": "space separated scopes" }'
+```
+
+### Static OAuth Client Information
+
+Per the [spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization#2-4-dynamic-client-registration),
+servers are encouraged but not required to support [OAuth dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591).
+
+For these servers, MCP Remote supports providing static OAuth client information instead.
+This is useful when connecting to OAuth servers that require pre-registered clients.
+
+Provide the client information as JSON with the `--static-oauth-client-info` flag:
+
+```bash
+export MCP_REMOTE_CLIENT_ID=xxx
+export MCP_REMOTE_CLIENT_SECRET=yyy
+npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"client_id\": \"$MCP_REMOTE_CLIENT_ID\", \"client_secret\": \"$MCP_REMOTE_CLIENT_SECRET\" }"
+```
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)
@@ -187,7 +214,7 @@ Then restarting your MCP client.
 
 ### Check your Node version
 
-Make sure that the version of Node you have installed is [18 or 
+Make sure that the version of Node you have installed is [18 or
 higher](https://modelcontextprotocol.io/quickstart/server). Claude
 Desktop will use your system version of Node, even if you have a newer
 version installed elsewhere.

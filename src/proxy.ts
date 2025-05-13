@@ -21,6 +21,7 @@ import {
   MCP_REMOTE_VERSION,
   TransportStrategy,
 } from './lib/utils'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
@@ -32,6 +33,8 @@ async function runProxy(
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
+  staticOAuthClientMetadata: StaticOAuthClientMetadata,
+  staticOAuthClientInfo: StaticOAuthClientInformationFull,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -47,6 +50,8 @@ async function runProxy(
     serverUrl,
     callbackPort,
     clientName: 'MCP CLI Proxy',
+    staticOAuthClientMetadata,
+    staticOAuthClientInfo,
   })
 
   // Create the STDIO transport for local connections
@@ -136,8 +141,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 3334, 'Usage: npx tsx proxy.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy }) => {
-    return runProxy(serverUrl, callbackPort, headers, transportStrategy)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, staticOAuthClientMetadata, staticOAuthClientInfo }) => {
+    return runProxy(serverUrl, callbackPort, headers, transportStrategy, staticOAuthClientMetadata, staticOAuthClientInfo)
   })
   .catch((error) => {
     log('Fatal error:', error)
