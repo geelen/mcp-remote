@@ -7,6 +7,12 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { OAuthCallbackServerOptions } from './types'
+import { getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import express from 'express'
+import net from 'net'
+import crypto from 'crypto'
+import fs from 'fs/promises'
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -15,11 +21,6 @@ export const SHORT_TIMEOUT_DURATION = 50000
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
-import { OAuthCallbackServerOptions } from './types'
-import { readJsonFile } from './mcp-auth-config'
-import express from 'express'
-import net from 'net'
-import crypto from 'crypto'
 
 // Package version from package.json
 export const MCP_REMOTE_VERSION = require('../../package.json').version
@@ -401,8 +402,7 @@ export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
   return { server, authCode, waitForAuthCode }
 }
 
-async function findExistingClientPort(serverUrl: string): Promise<number | undefined> {
-  const serverUrlHash = getServerUrlHash(serverUrl)
+async function findExistingClientPort(serverUrlHash: string): Promise<number | undefined> {
   const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
   if (!clientInfo) {
     return undefined
@@ -414,6 +414,13 @@ async function findExistingClientPort(serverUrl: string): Promise<number | undef
   }
 
   return parseInt(localhostRedirectUri.port)
+}
+
+function calculateDefaultPort(serverUrlHash: string): number {
+  // Convert the first 4 bytes of the serverUrlHash into a port offset
+  const offset = parseInt(serverUrlHash.substring(0, 4), 16)
+  // Pick a consistent but random-seeming port from 3335 to 49151
+  return 3335 + (offset % 45816)
 }
 
 /**
@@ -449,11 +456,10 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
 /**
  * Parses command line arguments for MCP clients and proxies
  * @param args Command line arguments
- * @param defaultPort Default port for the callback server if specified port is unavailable
  * @param usage Usage message to show on error
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
-export async function parseCommandLineArgs(args: string[], defaultPort: number, usage: string) {
+export async function parseCommandLineArgs(args: string[], usage: string) {
   // Process headers
   const headers: Record<string, string> = {}
   let i = 0
@@ -504,17 +510,28 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     log(usage)
     process.exit(1)
   }
+  const serverUrlHash = getServerUrlHash(serverUrl)
+  const defaultPort = calculateDefaultPort(serverUrlHash)
 
   // Use the specified port, or the existing client port or fallback to find an available one
-  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrl), findAvailablePort(defaultPort)])
-  const callbackPort = specifiedPort || existingClientPort || availablePort
+  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrlHash), findAvailablePort(defaultPort)])
+  let callbackPort: number
 
   if (specifiedPort) {
-    log(`Using specified callback port: ${callbackPort}`)
+    if (existingClientPort && specifiedPort !== existingClientPort) {
+      log(
+        `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
+      )
+      await fs.rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
+    }
+    log(`Using specified callback port: ${specifiedPort}`)
+    callbackPort = specifiedPort
   } else if (existingClientPort) {
     log(`Using existing client port: ${existingClientPort}`)
+    callbackPort = existingClientPort
   } else {
-    log(`Using automatically selected callback port: ${callbackPort}`)
+    log(`Using automatically selected callback port: ${availablePort}`)
+    callbackPort = availablePort
   }
 
   if (Object.keys(headers).length > 0) {
