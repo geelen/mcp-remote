@@ -46,11 +46,11 @@ To bypass authentication, or to emit custom headers on all requests to your remo
         "https://remote.mcp.server/sse",
         "--header",
         "Authorization: Bearer ${AUTH_TOKEN}"
-      ]
+      ],
+      "env": {
+        "AUTH_TOKEN": "..."
+      }
     },
-    "env": {
-      "AUTH_TOKEN": "..."
-    }
   }
 }
 ```
@@ -65,11 +65,11 @@ To bypass authentication, or to emit custom headers on all requests to your remo
     "https://remote.mcp.server/sse",
     "--header",
     "Authorization:${AUTH_HEADER}" // note no spaces around ':'
-  ]
+  ],
+  "env": {
+    "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
+  }
 },
-"env": {
-  "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
-}
 ```
 
 ### Flags
