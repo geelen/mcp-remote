@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import fs from 'fs'
+import * as fsSync from 'fs'
 import path from 'path'
 import os from 'os'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
@@ -12,7 +12,7 @@ import { getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
-import fs from 'fs/promises'
+import * as fs from 'fs/promises'
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -37,15 +37,17 @@ export function log(str: string, ...rest: unknown[]) {
  */
 function clearMcpAuthFiles() {
   try {
-    const mcpDir = path.join(os.homedir(), '.mcp-auth')
-    log('Short timeout reached, clearing MCP auth files')
-    // Check if the directory exists
-    if (fs.existsSync(mcpDir)) {
-      // Delete the entire directory and its contents
-      fs.rmSync(mcpDir, { recursive: true, force: true })
-      log('MCP auth directory cleared successfully')
+    const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
+    const versionDir = path.join(baseConfigDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+    
+    log('Short timeout reached, clearing MCP auth files for current version')
+    // Check if the version directory exists
+    if (fsSync.existsSync(versionDir)) {
+      // Delete only the current version directory and its contents
+      fsSync.rmSync(versionDir, { recursive: true, force: true })
+      log(`MCP auth directory for version ${MCP_REMOTE_VERSION} cleared successfully`)
     } else {
-      log('No MCP directory found, nothing to clear')
+      log(`No MCP directory found for version ${MCP_REMOTE_VERSION}, nothing to clear`)
     }
   } catch (error) {
     log('Error clearing MCP auth files:', error)
