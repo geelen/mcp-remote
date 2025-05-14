@@ -22,18 +22,23 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private clientUri: string
   private softwareId: string
   private softwareVersion: string
-
+  private clientId: string | undefined
+  private clientSecret: string | undefined
+  private scope: string | undefined
   /**
    * Creates a new NodeOAuthClientProvider
    * @param options Configuration options for the provider
    */
-  constructor(readonly options: OAuthProviderOptions) {
+  constructor(readonly options: OAuthProviderOptions & { clientId?: string, clientSecret?: string, scope?: string }) {
     this.serverUrlHash = getServerUrlHash(options.serverUrl)
     this.callbackPath = options.callbackPath || '/oauth/callback'
     this.clientName = options.clientName || 'MCP CLI Client'
     this.clientUri = options.clientUri || 'https://github.com/modelcontextprotocol/mcp-cli'
     this.softwareId = options.softwareId || '2e6dc280-f3c3-4e01-99a7-8181dbd1d23d'
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
+    this.clientId = options.clientId
+    this.clientSecret = options.clientSecret
+    this.scope = options.scope
   }
 
   get redirectUrl(): string {
@@ -50,6 +55,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
+      scope: this.scope,
     }
   }
 
@@ -59,6 +65,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
     // log('Reading client info')
+    if (this.clientId) {
+      return {
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+      }
+    }
     return readJsonFile<OAuthClientInformation>(this.serverUrlHash, 'client_info.json', OAuthClientInformationSchema)
   }
 

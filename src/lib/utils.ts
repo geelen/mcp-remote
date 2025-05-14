@@ -392,9 +392,49 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
 export async function parseCommandLineArgs(args: string[], defaultPort: number, usage: string) {
   // Process headers
   const headers: Record<string, string> = {}
+  let clientId: string | undefined = undefined
+  let clientSecret: string | undefined = undefined
+  let callbackPath: string | undefined = undefined
+  let scope: string | undefined = undefined
   let i = 0
   while (i < args.length) {
-    if (args[i] === '--header' && i < args.length - 1) {
+    if (args[i] === '--client-id' && i < args.length - 1) {
+      const value = args[i + 1]
+      if (value) {
+        clientId = value
+      } else {
+        log('Warning: ignoring empty client-id argument')
+      }
+      args.splice(i, 2)
+      continue
+    } else if (args[i] === '--client-secret' && i < args.length - 1) {
+      const value = args[i + 1]
+      if (value) {
+        clientSecret = value
+      } else {
+        log('Warning: ignoring empty client-secret argument')
+      }
+      args.splice(i, 2)
+      continue
+    } else if (args[i] === '--callback-path' && i < args.length - 1) {
+      const value = args[i + 1]
+      if (value) {
+        callbackPath = value
+      } else {
+        log('Warning: ignoring empty callback-path argument')
+      }
+      args.splice(i, 2)
+      continue
+    } else if (args[i] === '--scope' && i < args.length - 1) {
+      const value = args[i + 1]
+      if (value) {
+        scope = value
+      } else {
+        log('Warning: ignoring empty scope argument')
+      }
+      args.splice(i, 2)
+      continue
+    } else if (args[i] === '--header' && i < args.length - 1) {
       const value = args[i + 1]
       const match = value.match(/^([A-Za-z0-9_-]+):(.*)$/)
       if (match) {
@@ -468,7 +508,7 @@ export async function parseCommandLineArgs(args: string[], defaultPort: number, 
     })
   }
 
-  return { serverUrl, callbackPort, headers, transportStrategy }
+  return { serverUrl, callbackPort, headers, transportStrategy, callbackPath, clientId, clientSecret, scope }
 }
 
 /**

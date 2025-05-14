@@ -32,6 +32,10 @@ async function runProxy(
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
+  callbackPath?: string,
+  clientId?: string,
+  clientSecret?: string,
+  scope?: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -46,7 +50,11 @@ async function runProxy(
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
     callbackPort,
+    callbackPath,
     clientName: 'MCP CLI Proxy',
+    clientId: clientId,
+    clientSecret: clientSecret,
+    scope: scope,
   })
 
   // Create the STDIO transport for local connections
@@ -136,8 +144,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 3334, 'Usage: npx tsx proxy.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy }) => {
-    return runProxy(serverUrl, callbackPort, headers, transportStrategy)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, callbackPath, clientId, clientSecret, scope }) => {
+    return runProxy(serverUrl, callbackPort, headers, transportStrategy, callbackPath, clientId, clientSecret, scope)
   })
   .catch((error) => {
     log('Fatal error:', error)
