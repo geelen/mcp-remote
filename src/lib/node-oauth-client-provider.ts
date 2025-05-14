@@ -1,9 +1,8 @@
 import open from 'open'
 import { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
-  OAuthClientInformation,
   OAuthClientInformationFull,
-  OAuthClientInformationSchema,
+  OAuthClientInformationFullSchema,
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
@@ -63,15 +62,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * Gets the client information if it exists
    * @returns The client information or undefined
    */
-  async clientInformation(): Promise<OAuthClientInformation | undefined> {
+  async clientInformation(): Promise<OAuthClientInformationFull | undefined> {
     // log('Reading client info')
     if (this.clientId) {
       return {
         client_id: this.clientId,
         client_secret: this.clientSecret,
+        redirect_uris: [this.redirectUrl],
       }
     }
-    return readJsonFile<OAuthClientInformation>(this.serverUrlHash, 'client_info.json', OAuthClientInformationSchema)
+    return readJsonFile<OAuthClientInformationFull>(this.serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
   }
 
   /**
