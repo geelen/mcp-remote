@@ -314,8 +314,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
       Authorization successful!
       You may close this window and return to the CLI.
       <script>
-        // If this is a non-interactive session (no manual approval step was required) then 
-        // this should automatically close the window. If not, this will have no effect and 
+        // If this is a non-interactive session (no manual approval step was required) then
+        // this should automatically close the window. If not, this will have no effect and
         // the user will see the message above.
         window.close();
       </script>
@@ -424,6 +424,29 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
         headers[match[1]] = match[2]
       } else {
         log(`Warning: ignoring invalid header argument: ${value}`)
+      }
+      args.splice(i, 2)
+      // Do not increment i, as the array has shifted
+      continue
+    } else if (args[i] === '--headerFile' && i < args.length - 1) {
+      const filePath = args[i + 1]
+      try {
+        const fileContent = await fs.readFile(filePath, 'utf8')
+        const lines = fileContent.split('\n')
+        for (const line of lines) {
+          const trimmedLine = line.trim()
+          if (trimmedLine && !trimmedLine.startsWith('#')) {
+            const match = trimmedLine.match(/^([A-Za-z0-9_-]+):(.*)$/)
+            if (match) {
+              headers[match[1]] = match[2]
+            } else {
+              log(`Warning: ignoring invalid header in file: ${trimmedLine}`)
+            }
+          }
+        }
+        log(`Loaded headers from file: ${filePath}`)
+      } catch (error) {
+        log(`Error reading header file ${filePath}: ${error}`)
       }
       args.splice(i, 2)
       // Do not increment i, as the array has shifted
