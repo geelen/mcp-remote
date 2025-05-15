@@ -79,7 +79,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 ```json
       "command": "npx",
       "args": [
-        "-y"
+        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
       ]
@@ -130,6 +130,14 @@ npx mcp-remote https://example.remote/server --transport sse-only
 - `sse-first`: Tries SSE transport first, falls back to HTTP if SSE fails with a 405 error
 - `http-only`: Only uses HTTP transport, fails if the server doesn't support it
 - `sse-only`: Only uses SSE transport, fails if the server doesn't support it
+
+### Post-Auth Redirect URI
+
+To customize the redirect behavior after an OAuth flow, include a `postAuthRedirectUri` query parameter in the request to the OAuth callback endpoint. This parameter specifies where users should be redirected after successful authentication.
+
+Ensure that your server appends `postAuthRedirectUri` as a query parameter when invoking the `redirectUri`.
+
+Once authentication is complete, users will be redirected to the specified URI instead of seeing the default "Authorization successful" message. This allows you to deliver a smoother user experience by guiding users to a custom post-authentication page.
 
 ### Claude Desktop
 
