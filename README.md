@@ -104,6 +104,16 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+* If the remote server is automatically closing your connection while not actively being used (e.g., disconnects after 5 minutes of inactivity) you can add the `--keep-alive` flag to ping the server every 30 seconds. The interval can also be customized using `--ping-interval`.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--keep-alive"
+      ]
+```
+
 * To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
 
 ```json

@@ -18,11 +18,12 @@ import {
   parseCommandLineArgs,
   setupSignalHandlers,
   getServerUrlHash,
-  MCP_REMOTE_VERSION,
   TransportStrategy,
+  setupPing,
 } from './lib/utils'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { PingConfig } from './lib/types'
 
 /**
  * Main function to run the proxy
@@ -32,6 +33,7 @@ async function runProxy(
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
+  pingConfig: PingConfig,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -80,6 +82,9 @@ async function runProxy(
     // Connect to remote server with lazy authentication
     const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
+    // Set up ping mechanism for remote transport
+    const stopPing = setupPing(remoteTransport, pingConfig)
+
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
       transportToClient: localTransport,
@@ -94,6 +99,7 @@ async function runProxy(
 
     // Setup cleanup handler
     const cleanup = async () => {
+      stopPing()
       await remoteTransport.close()
       await localTransport.close()
       // Only close the server if it was initialized
@@ -136,8 +142,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy }) => {
-    return runProxy(serverUrl, callbackPort, headers, transportStrategy)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, pingConfig }) => {
+    return runProxy(serverUrl, callbackPort, headers, transportStrategy, pingConfig)
   })
   .catch((error) => {
     log('Fatal error:', error)

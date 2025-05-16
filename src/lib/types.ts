@@ -33,3 +33,11 @@ export interface OAuthCallbackServerOptions {
   /** Event emitter to signal when auth code is received */
   events: EventEmitter
 }
+
+/*
+ * Configuration for the ping mechanism
+ */
+export interface PingConfig {
+  enabled: boolean
+  interval: number
+}
