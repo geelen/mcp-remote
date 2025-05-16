@@ -104,14 +104,14 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
-* To change which host `mcp-remote` registers as the OAuth callback URL (by default `127.0.0.1`), add the `--host` flag.
+* To change which host `mcp-remote` registers as the OAuth callback URL (by default `localhost`), add the `--host` flag.
 
 ```json
       "args": [
         "mcp-remote",
         "https://remote.mcp.server/sse",
         "--host",
-        "localhost"
+        "127.0.0.1"
       ]
 ```
 

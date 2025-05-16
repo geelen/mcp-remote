@@ -450,7 +450,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   // Parse host
-  let host = '127.0.0.1' // Default
+  let host = 'localhost' // Default
   const hostIndex = args.indexOf('--host')
   if (hostIndex !== -1 && hostIndex < args.length - 1) {
     host = args[hostIndex + 1]
