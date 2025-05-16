@@ -361,7 +361,7 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     return undefined
   }
 
-  const localhostRedirectUri = clientInfo.redirect_uris.map((uri) => new URL(uri)).find(({ hostname }) => hostname === 'localhost')
+  const localhostRedirectUri = clientInfo.redirect_uris.map((uri) => new URL(uri)).find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
     throw new Error('Cannot find localhost callback URI from existing client information')
   }
@@ -449,6 +449,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  // Parse host
+  let host = '127.0.0.1' // Default
+  const hostIndex = args.indexOf('--host')
+  if (hostIndex !== -1 && hostIndex < args.length - 1) {
+    host = args[hostIndex + 1]
+    log(`Using callback hostname: ${host}`)
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -505,7 +513,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     })
   }
 
-  return { serverUrl, callbackPort, headers, transportStrategy }
+  return { serverUrl, callbackPort, headers, transportStrategy, host }
 }
 
 /**
