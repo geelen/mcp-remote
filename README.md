@@ -147,10 +147,12 @@ npx mcp-remote https://example.remote/server --transport sse-only
 MCP Remote supports providing static OAuth client metadata instead of using the mcp-remote defaults.
 This is useful when connecting to OAuth servers that expect specific client/software IDs or scopes.
 
-Provide the client metadata as JSON with the `--static-oauth-client-metadata` flag:
+Provide the client metadata as a JSON string or as a `@` prefixed filepath with the `--static-oauth-client-metadata` flag:
 
 ```bash
 npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "scope": "space separated scopes" }'
+# uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
+npx mcp-remote https://example.remote/server --static-oauth-client-metadata '@/Users/username/Library/Application Support/Claude/oauth_client_metadata.json'
 ```
 
 ### Static OAuth Client Information
@@ -161,12 +163,14 @@ servers are encouraged but not required to support [OAuth dynamic client registr
 For these servers, MCP Remote supports providing static OAuth client information instead.
 This is useful when connecting to OAuth servers that require pre-registered clients.
 
-Provide the client information as JSON with the `--static-oauth-client-info` flag:
+Provide the client metadata as a JSON string or as a `@` prefixed filepath with the `--static-oauth-client-info` flag:
 
 ```bash
 export MCP_REMOTE_CLIENT_ID=xxx
 export MCP_REMOTE_CLIENT_SECRET=yyy
 npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"client_id\": \"$MCP_REMOTE_CLIENT_ID\", \"client_secret\": \"$MCP_REMOTE_CLIENT_SECRET\" }"
+# uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
+npx mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
 ```
 
 ### Claude Desktop

@@ -9,7 +9,7 @@ import { getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
-import fs from 'fs/promises'
+import fs, { readFile } from 'fs/promises'
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -454,9 +454,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
   const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
   if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
-    staticOAuthClientMetadata = JSON.parse(args[staticOAuthClientMetadataIndex + 1])
-    if (staticOAuthClientMetadata) {
-      log(`Using static OAuth client metadata`)
+    const staticOAuthClientMetadataArg = args[staticOAuthClientMetadataIndex + 1]
+    if (staticOAuthClientMetadataArg.startsWith('@')) {
+      const filePath = staticOAuthClientMetadataArg.slice(1)
+      staticOAuthClientMetadata = JSON.parse(await readFile(filePath, 'utf8'))
+      log(`Using static OAuth client metadata from file: ${filePath}`)
+    } else {
+      staticOAuthClientMetadata = JSON.parse(staticOAuthClientMetadataArg)
+      log(`Using static OAuth client metadata from string`)
     }
   }
 
@@ -465,9 +470,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   let staticOAuthClientInfo: StaticOAuthClientInformationFull = null
   const staticOAuthClientInfoIndex = args.indexOf('--static-oauth-client-info')
   if (staticOAuthClientInfoIndex !== -1 && staticOAuthClientInfoIndex < args.length - 1) {
-    staticOAuthClientInfo = JSON.parse(args[staticOAuthClientInfoIndex + 1])
-    if (staticOAuthClientInfo) {
-      log(`Using static OAuth client information`)
+    const staticOAuthClientInfoArg = args[staticOAuthClientInfoIndex + 1]
+    if (staticOAuthClientInfoArg.startsWith('@')) {
+      const filePath = staticOAuthClientInfoArg.slice(1)
+      staticOAuthClientInfo = JSON.parse(await readFile(filePath, 'utf8'))
+      log(`Using static OAuth client information from file: ${filePath}`)
+    } else {
+      staticOAuthClientInfo = JSON.parse(staticOAuthClientInfoArg)
+      log(`Using static OAuth client information from string`)
     }
   }
 
