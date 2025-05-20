@@ -6,9 +6,10 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthProviderOptions } from './types'
+import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
-import { getServerUrlHash, log, MCP_REMOTE_VERSION } from './utils'
+import { StaticOAuthClientInformationFull } from './types'
+import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -21,6 +22,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private clientUri: string
   private softwareId: string
   private softwareVersion: string
+  private staticOAuthClientMetadata: StaticOAuthClientMetadata
+  private staticOAuthClientInfo: StaticOAuthClientInformationFull
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -33,10 +36,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.clientUri = options.clientUri || 'https://github.com/modelcontextprotocol/mcp-cli'
     this.softwareId = options.softwareId || '2e6dc280-f3c3-4e01-99a7-8181dbd1d23d'
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
+    this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
+    this.staticOAuthClientInfo = options.staticOAuthClientInfo
   }
 
   get redirectUrl(): string {
-    return `http://localhost:${this.options.callbackPort}${this.callbackPath}`
+    return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`;
   }
 
   get clientMetadata() {
@@ -49,6 +54,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
+      ...this.staticOAuthClientMetadata,
     }
   }
 
@@ -57,8 +63,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The client information or undefined
    */
   async clientInformation(): Promise<OAuthClientInformationFull | undefined> {
-    // log('Reading client info')
-    return readJsonFile<OAuthClientInformationFull>(this.serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Reading client info')
+    if (this.staticOAuthClientInfo) {
+      if (DEBUG) await debugLog(this.serverUrlHash, 'Returning static client info')
+      return this.staticOAuthClientInfo
+    }
+    const clientInfo = await readJsonFile<OAuthClientInformationFull>(this.serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Client info result:', clientInfo ? 'Found' : 'Not found')
+    return clientInfo
   }
 
   /**
@@ -66,7 +78,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param clientInformation The client information to save
    */
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
-    // log('Saving client info')
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Saving client info', { client_id: clientInformation.client_id })
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -75,9 +87,43 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The OAuth tokens or undefined
    */
   async tokens(): Promise<OAuthTokens | undefined> {
-    // log('Reading tokens')
-    // console.log(new Error().stack)
-    return readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
+    if (DEBUG) {
+      await debugLog(this.serverUrlHash, 'Reading OAuth tokens')
+      await debugLog(this.serverUrlHash, 'Token request stack trace:', new Error().stack)
+    }
+
+    const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
+
+    if (DEBUG) {
+      if (tokens) {
+        const expiresAt = new Date(tokens.expires_at)
+        const now = new Date()
+        const expiresAtTime = expiresAt.getTime()
+        const timeLeft = !isNaN(expiresAtTime) ? Math.round((expiresAtTime - now.getTime()) / 1000) : 0
+
+        // Alert if expires_at produces an invalid date
+        if (isNaN(expiresAtTime)) {
+          await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_at detected while reading tokens ⚠️', {
+            expiresAt: tokens.expires_at,
+            tokenObject: JSON.stringify(tokens),
+            stack: new Error('Invalid expires_at timestamp').stack
+          })
+        }
+
+        await debugLog(this.serverUrlHash, 'Token result:', {
+          found: true,
+          hasAccessToken: !!tokens.access_token,
+          hasRefreshToken: !!tokens.refresh_token,
+          expiresIn: `${timeLeft} seconds`,
+          isExpired: timeLeft <= 0,
+          expiresAt: tokens.expires_at
+        })
+      } else {
+        await debugLog(this.serverUrlHash, 'Token result: Not found')
+      }
+    }
+
+    return tokens
   }
 
   /**
@@ -85,7 +131,29 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param tokens The tokens to save
    */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    // log('Saving tokens')
+    if (DEBUG) {
+      const expiresAt = new Date(tokens.expires_at)
+      const now = new Date()
+      const expiresAtTime = expiresAt.getTime()
+      const timeLeft = !isNaN(expiresAtTime) ? Math.round((expiresAtTime - now.getTime()) / 1000) : 0
+
+      // Alert if expires_at produces an invalid date
+      if (isNaN(expiresAtTime)) {
+        await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_at detected in tokens ⚠️', {
+          expiresAt: tokens.expires_at,
+          tokenObject: JSON.stringify(tokens),
+          stack: new Error('Invalid expires_at timestamp').stack
+        })
+      }
+
+      await debugLog(this.serverUrlHash, 'Saving tokens', {
+        hasAccessToken: !!tokens.access_token,
+        hasRefreshToken: !!tokens.refresh_token,
+        expiresIn: `${timeLeft} seconds`,
+        expiresAt: tokens.expires_at
+      })
+    }
+
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
   }
 
@@ -95,11 +163,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
+
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Redirecting to authorization URL', authorizationUrl.toString())
+
     try {
       await open(authorizationUrl.toString())
       log('Browser opened automatically.')
+      if (DEBUG) await debugLog(this.serverUrlHash, 'Browser opened automatically')
     } catch (error) {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
+      if (DEBUG) await debugLog(this.serverUrlHash, 'Failed to open browser', error)
     }
   }
 
@@ -108,7 +181,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
-    // log('Saving code verifier')
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Saving code verifier')
     await writeTextFile(this.serverUrlHash, 'code_verifier.txt', codeVerifier)
   }
 
@@ -117,7 +190,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The code verifier
    */
   async codeVerifier(): Promise<string> {
-    // log('Reading code verifier')
-    return await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Reading code verifier')
+    const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Code verifier found:', !!verifier)
+    return verifier
   }
 }
