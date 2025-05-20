@@ -10,6 +10,7 @@ import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
 import fs from 'fs/promises'
+import untildify from 'untildify';
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -91,6 +92,14 @@ export type AuthInitializer = () => Promise<{
   skipBrowserAuth: boolean
 }>
 
+async function loadToken() {
+  try {
+    return await fs.readFile(untildify('~/.dpx/session/token'), 'utf8');
+  } catch (_err) {
+    return undefined;
+  }
+}
+
 /**
  * Creates and connects to a remote server with OAuth authentication
  * @param client The client to connect with
@@ -106,7 +115,7 @@ export async function connectToRemoteServer(
   client: Client | null,
   serverUrl: string,
   authProvider: OAuthClientProvider,
-  headers: Record<string, string>,
+  tempHeaders: Record<string, string>,
   authInitializer: AuthInitializer,
   transportStrategy: TransportStrategy = 'http-first',
   recursionReasons: Set<string> = new Set(),
@@ -114,20 +123,37 @@ export async function connectToRemoteServer(
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
 
+  const access_token = await loadToken();
+  const Authorization = access_token ? `Bearer ${access_token}` : '';
+  log('access_token', access_token);
+  const headers = {
+    ...tempHeaders,
+    Authorization,
+  }
+
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
     fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
+      return fetch(url, {
           ...init,
           headers: {
             ...(init?.headers as Record<string, string> | undefined),
             ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
+            Authorization,
             Accept: 'text/event-stream',
           } as Record<string, string>,
-        }),
-      )
+        });
+      // return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
+      //   fetch(url, {
+      //     ...init,
+      //     headers: {
+      //       ...(init?.headers as Record<string, string> | undefined),
+      //       ...headers,
+      //       Authorization: `Bearer ${access_token}` ,
+      //       Accept: 'text/event-stream',
+      //     } as Record<string, string>,
+      //   }),
+      // )
     },
   }
 

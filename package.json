@@ -29,7 +29,8 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "open": "^10.1.0"
+    "open": "^10.1.0",
+    "untildify": "^5.0.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.11.2",
