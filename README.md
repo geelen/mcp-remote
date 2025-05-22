@@ -1,5 +1,7 @@
 # `mcp-remote`
 
+Forked for local development.
+
 Connect an MCP Client that only supports local (stdio) servers to a Remote MCP Server, with auth support:
 
 **Note: this is a working proof-of-concept** but should be considered **experimental**.
