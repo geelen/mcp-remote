@@ -15,7 +15,7 @@ import os from 'os'
 
 // Global type declaration for typescript
 declare global {
-  var currentServerUrlHash: string | undefined;
+  var currentServerUrlHash: string | undefined
 }
 
 // Connection constants
@@ -30,55 +30,53 @@ export const MCP_REMOTE_VERSION = require('../../package.json').version
 
 const pid = process.pid
 // Global debug flag
-export let DEBUG = false;
+export let DEBUG = false
 
 // Helper function for timestamp formatting
 function getTimestamp(): string {
-  const now = new Date();
-  return now.toISOString();
+  const now = new Date()
+  return now.toISOString()
 }
 
 // Debug logging function
 export async function debugLog(message: string, ...args: any[]): Promise<void> {
-  if (!DEBUG) return;
+  if (!DEBUG) return
 
-  const serverUrlHash = global.currentServerUrlHash;
+  const serverUrlHash = global.currentServerUrlHash
   if (!serverUrlHash) {
-    console.error("[DEBUG LOG ERROR] global.currentServerUrlHash is not set. Cannot write debug log.");
-    return;
+    console.error('[DEBUG LOG ERROR] global.currentServerUrlHash is not set. Cannot write debug log.')
+    return
   }
 
   try {
     // Format with timestamp and PID
-    const formattedMessage = `[${getTimestamp()}][${pid}] ${message}`;
+    const formattedMessage = `[${getTimestamp()}][${pid}] ${message}`
 
     // Log to console
-    console.error(formattedMessage, ...args);
+    console.error(formattedMessage, ...args)
 
     // Ensure config directory exists
-    const configDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth');
-    await fs.mkdir(configDir, { recursive: true });
+    const configDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
+    await fs.mkdir(configDir, { recursive: true })
 
     // Append to log file
-    const logPath = path.join(configDir, `${serverUrlHash}_debug.log`);
-    const logMessage = `${formattedMessage} ${args.map(arg => 
-      typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-    ).join(' ')}\n`;
+    const logPath = path.join(configDir, `${serverUrlHash}_debug.log`)
+    const logMessage = `${formattedMessage} ${args.map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg))).join(' ')}\n`
 
-    await fs.appendFile(logPath, logMessage, { encoding: 'utf8' });
+    await fs.appendFile(logPath, logMessage, { encoding: 'utf8' })
   } catch (error) {
     // Fallback to console if file logging fails
-    console.error(`[DEBUG LOG ERROR] ${error}`);
+    console.error(`[DEBUG LOG ERROR] ${error}`)
   }
 }
 
 export function log(str: string, ...rest: unknown[]) {
   // Using stderr so that it doesn't interfere with stdout
-  console.error(`[${pid}] ${str}`, ...rest);
+  console.error(`[${pid}] ${str}`, ...rest)
 
   // If debug mode is on, also log to debug file
   if (DEBUG && global.currentServerUrlHash) {
-      debugLog(str, ...rest).catch(() => {});
+    debugLog(str, ...rest).catch(() => {})
   }
 }
 
@@ -99,7 +97,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
       debugLog('Local → Remote message', {
         method: message.method,
         id: message.id,
-        params: message.params ? JSON.stringify(message.params).substring(0, 500) : undefined
+        params: message.params ? JSON.stringify(message.params).substring(0, 500) : undefined,
       }).catch(() => {})
     }
 
@@ -126,7 +124,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
         method: message.method,
         id: message.id,
         result: message.result ? 'result-present' : undefined,
-        error: message.error
+        error: message.error,
       }).catch(() => {})
     }
 
@@ -295,7 +293,7 @@ export async function connectToRemoteServer(
       if (DEBUG) {
         await debugLog('Authentication required, initializing auth process', {
           errorMessage: error.message,
-          stack: error.stack
+          stack: error.stack,
         })
       }
 
@@ -343,11 +341,12 @@ export async function connectToRemoteServer(
       }
     } else {
       log('Connection error:', error)
-      if (DEBUG) await debugLog('Connection error', {
-        errorMessage: error.message,
-        stack: error.stack,
-        transportType: transport.constructor.name
-      })
+      if (DEBUG)
+        await debugLog('Connection error', {
+          errorMessage: error.message,
+          stack: error.stack,
+          transportType: transport.constructor.name,
+        })
       throw error
     }
   }
@@ -471,7 +470,9 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     return undefined
   }
 
-  const localhostRedirectUri = clientInfo.redirect_uris.map((uri) => new URL(uri)).find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
+  const localhostRedirectUri = clientInfo.redirect_uris
+    .map((uri) => new URL(uri))
+    .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
     throw new Error('Cannot find localhost callback URI from existing client information')
   }

@@ -25,7 +25,8 @@
   "scripts": {
     "build": "tsup",
     "build:watch": "tsup --watch",
-    "check": "prettier --check . && tsc"
+    "check": "prettier --check . && tsc",
+    "lint-fix": "prettier --check . --write"
   },
   "dependencies": {
     "express": "^4.21.2",

@@ -32,15 +32,16 @@ export async function isPidRunning(pid: number): Promise<boolean> {
  */
 export async function isLockValid(lockData: LockfileData): Promise<boolean> {
   if (DEBUG) await debugLog(global.currentServerUrlHash!, 'Checking if lockfile is valid', lockData)
-  
+
   // Check if the lockfile is too old (over 30 minutes)
   const MAX_LOCK_AGE = 30 * 60 * 1000 // 30 minutes
   if (Date.now() - lockData.timestamp > MAX_LOCK_AGE) {
     log('Lockfile is too old')
-    if (DEBUG) await debugLog(global.currentServerUrlHash!, 'Lockfile is too old', {
-      age: Date.now() - lockData.timestamp,
-      maxAge: MAX_LOCK_AGE
-    })
+    if (DEBUG)
+      await debugLog(global.currentServerUrlHash!, 'Lockfile is too old', {
+        age: Date.now() - lockData.timestamp,
+        maxAge: MAX_LOCK_AGE,
+      })
     return false
   }
 
@@ -54,7 +55,7 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
   // Check if the endpoint is accessible
   try {
     if (DEBUG) await debugLog(global.currentServerUrlHash!, 'Checking if endpoint is accessible', { port: lockData.port })
-    
+
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 1000)
 
@@ -63,9 +64,10 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
     })
 
     clearTimeout(timeout)
-    
+
     const isValid = response.status === 200 || response.status === 202
-    if (DEBUG) await debugLog(global.currentServerUrlHash!, `Endpoint check result: ${isValid ? 'valid' : 'invalid'}`, { status: response.status })
+    if (DEBUG)
+      await debugLog(global.currentServerUrlHash!, `Endpoint check result: ${isValid ? 'valid' : 'invalid'}`, { status: response.status })
     return isValid
   } catch (error) {
     log(`Error connecting to auth server: ${(error as Error).message}`)
@@ -84,13 +86,13 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
   if (DEBUG) await debugLog(global.currentServerUrlHash!, `Waiting for authentication from server on port ${port}`)
 
   try {
-    let attempts = 0;
+    let attempts = 0
     while (true) {
-      attempts++;
+      attempts++
       const url = `http://127.0.0.1:${port}/wait-for-auth`
       log(`Querying: ${url}`)
       if (DEBUG) await debugLog(global.currentServerUrlHash!, `Poll attempt ${attempts}: ${url}`)
-      
+
       try {
         const response = await fetch(url)
         if (DEBUG) await debugLog(global.currentServerUrlHash!, `Poll response status: ${response.status}`)
@@ -130,11 +132,7 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
  * @param events The event emitter to use for signaling
  * @returns An AuthCoordinator object with an initializeAuth method
  */
-export function createLazyAuthCoordinator(
-  serverUrlHash: string,
-  callbackPort: number,
-  events: EventEmitter
-): AuthCoordinator {
+export function createLazyAuthCoordinator(serverUrlHash: string, callbackPort: number, events: EventEmitter): AuthCoordinator {
   let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
 
   return {
@@ -147,12 +145,12 @@ export function createLazyAuthCoordinator(
 
       log('Initializing auth coordination on-demand')
       if (DEBUG) await debugLog(serverUrlHash, 'Initializing auth coordination on-demand', { serverUrlHash, callbackPort })
-      
+
       // Initialize auth using the existing coordinateAuth logic
       authState = await coordinateAuth(serverUrlHash, callbackPort, events)
       if (DEBUG) await debugLog(serverUrlHash, 'Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
       return authState
-    }
+    },
   }
 }
 
@@ -169,10 +167,10 @@ export async function coordinateAuth(
   events: EventEmitter,
 ): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
   if (DEBUG) await debugLog(serverUrlHash, 'Coordinating authentication', { serverUrlHash, callbackPort })
-  
+
   // Check for a lockfile (disabled on Windows for the time being)
   const lockData = process.platform === 'win32' ? null : await checkLockfile(serverUrlHash)
-  
+
   if (DEBUG) {
     if (process.platform === 'win32') {
       await debugLog(serverUrlHash, 'Skipping lockfile check on Windows')
@@ -190,7 +188,7 @@ export async function coordinateAuth(
       // Try to wait for the authentication to complete
       if (DEBUG) await debugLog(serverUrlHash, 'Waiting for authentication from other instance')
       const authCompleted = await waitForAuthentication(lockData.port)
-      
+
       if (authCompleted) {
         log('Authentication completed by another instance')
         if (DEBUG) await debugLog(serverUrlHash, 'Authentication completed by another instance, will use tokens from disk')

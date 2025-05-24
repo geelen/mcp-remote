@@ -41,7 +41,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
-    return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`;
+    return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
   }
 
   get clientMetadata() {
@@ -68,7 +68,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       if (DEBUG) await debugLog(this.serverUrlHash, 'Returning static client info')
       return this.staticOAuthClientInfo
     }
-    const clientInfo = await readJsonFile<OAuthClientInformationFull>(this.serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+    const clientInfo = await readJsonFile<OAuthClientInformationFull>(
+      this.serverUrlHash,
+      'client_info.json',
+      OAuthClientInformationFullSchema,
+    )
     if (DEBUG) await debugLog(this.serverUrlHash, 'Client info result:', clientInfo ? 'Found' : 'Not found')
     return clientInfo
   }
@@ -103,7 +107,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_in detected while reading tokens ⚠️', {
             expiresIn: tokens.expires_in,
             tokenObject: JSON.stringify(tokens),
-            stack: new Error('Invalid expires_in value').stack
+            stack: new Error('Invalid expires_in value').stack,
           })
         }
 
@@ -113,7 +117,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           hasRefreshToken: !!tokens.refresh_token,
           expiresIn: `${timeLeft} seconds`,
           isExpired: timeLeft <= 0,
-          expiresInValue: tokens.expires_in
+          expiresInValue: tokens.expires_in,
         })
       } else {
         await debugLog(this.serverUrlHash, 'Token result: Not found')
@@ -136,7 +140,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_in detected in tokens ⚠️', {
           expiresIn: tokens.expires_in,
           tokenObject: JSON.stringify(tokens),
-          stack: new Error('Invalid expires_in value').stack
+          stack: new Error('Invalid expires_in value').stack,
         })
       }
 
@@ -144,7 +148,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         hasAccessToken: !!tokens.access_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
-        expiresInValue: tokens.expires_in
+        expiresInValue: tokens.expires_in,
       })
     }
 
