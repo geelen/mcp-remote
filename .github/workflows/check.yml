@@ -1,0 +1,26 @@
+name: Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm & install
+        uses: wyvox/action-setup-pnpm@v3
+        with:
+          node-version: 22
+          pnpm-version: 10
+
+      - name: Build
+        run: pnpm build
+
+      - name: Run checks
+        run: pnpm run check
