@@ -256,7 +256,7 @@ export async function connectToRemoteServer(
     if (DEBUG) await debugLog(`Connected to remote server successfully`, { transportType: transport.constructor.name })
 
     return transport
-  } catch (error) {
+  } catch (error: any) {
     // Check if it's a protocol error and we should attempt fallback
     if (
       error instanceof Error &&
@@ -336,7 +336,7 @@ export async function connectToRemoteServer(
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
         return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
-      } catch (authError) {
+      } catch (authError: any) {
         log('Authorization error:', authError)
         if (DEBUG) await debugLog('Authorization error during finishAuth', { errorMessage: authError.message, stack: authError.stack })
         throw authError
