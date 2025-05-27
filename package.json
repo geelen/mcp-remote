@@ -1,6 +1,6 @@
 {
   "name": "mcp-remote",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
   "keywords": [
     "mcp",
@@ -33,7 +33,7 @@
     "open": "^10.1.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.2",
+    "@modelcontextprotocol/sdk": "https://pkg.pr.new/geelen/typescript-sdk/@modelcontextprotocol/sdk@49c155a",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
     "prettier": "^3.5.3",
