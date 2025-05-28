@@ -10,6 +10,7 @@ import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
+import { randomUUID } from "node:crypto";
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -24,6 +25,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private softwareVersion: string
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
+  private _state: string
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -38,6 +40,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
+    this._state = randomUUID()
   }
 
   get redirectUrl(): string {
@@ -56,6 +59,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       software_version: this.softwareVersion,
       ...this.staticOAuthClientMetadata,
     }
+  }
+
+  state(): string {
+    return this._state;
   }
 
   /**
