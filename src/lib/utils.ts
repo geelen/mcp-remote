@@ -156,12 +156,12 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 
   function onClientError(error: Error) {
     log('Error from local client:', error)
-    if (DEBUG) debugLog('Error from local client', { errorMessage: error.message, stack: error.stack })
+    if (DEBUG) debugLog('Error from local client', { stack: error.stack })
   }
 
   function onServerError(error: Error) {
     log('Error from remote server:', error)
-    if (DEBUG) debugLog('Error from remote server', { errorMessage: error.message, stack: error.stack })
+    if (DEBUG) debugLog('Error from remote server', { stack: error.stack })
   }
 }
 
@@ -252,7 +252,6 @@ export async function connectToRemoteServer(
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`)
-    if (DEBUG) debugLog(`Connected to remote server successfully`, { transportType: transport.constructor.name })
 
     return transport
   } catch (error: any) {
@@ -305,10 +304,8 @@ export async function connectToRemoteServer(
 
       if (skipBrowserAuth) {
         log('Authentication required but skipping browser auth - using shared auth')
-        if (DEBUG) debugLog('Authentication required but skipping browser auth - using shared auth')
       } else {
         log('Authentication required. Waiting for authorization...')
-        if (DEBUG) debugLog('Authentication required. Waiting for authorization...')
       }
 
       // Wait for the authorization code from the callback
@@ -318,7 +315,6 @@ export async function connectToRemoteServer(
 
       try {
         log('Completing authorization...')
-        if (DEBUG) debugLog('Completing authorization with transport.finishAuth')
         await transport.finishAuth(code)
         if (DEBUG) debugLog('Authorization completed successfully')
 

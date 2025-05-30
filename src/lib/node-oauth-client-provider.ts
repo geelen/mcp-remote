@@ -167,7 +167,6 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     try {
       await open(authorizationUrl.toString())
       log('Browser opened automatically.')
-      if (DEBUG) debugLog('Browser opened automatically')
     } catch (error) {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
       if (DEBUG) debugLog('Failed to open browser', error)

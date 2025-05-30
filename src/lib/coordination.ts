@@ -83,7 +83,6 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
  */
 export async function waitForAuthentication(port: number): Promise<boolean> {
   log(`Waiting for authentication from the server on port ${port}...`)
-  if (DEBUG) debugLog(`Waiting for authentication from server on port ${port}`)
 
   try {
     let attempts = 0
@@ -91,7 +90,7 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
       attempts++
       const url = `http://127.0.0.1:${port}/wait-for-auth`
       log(`Querying: ${url}`)
-      if (DEBUG) debugLog(`Poll attempt ${attempts}: ${url}`)
+      if (DEBUG) debugLog(`Poll attempt ${attempts}`)
 
       try {
         const response = await fetch(url)
@@ -100,16 +99,14 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
         if (response.status === 200) {
           // Auth completed, but we don't return the code anymore
           log(`Authentication completed by other instance`)
-          if (DEBUG) debugLog(`Authentication completed by other instance`)
           return true
         } else if (response.status === 202) {
           // Continue polling
           log(`Authentication still in progress`)
-          if (DEBUG) debugLog(`Authentication still in progress, will retry in 1s`)
+          if (DEBUG) debugLog(`Will retry in 1s`)
           await new Promise((resolve) => setTimeout(resolve, 1000))
         } else {
           log(`Unexpected response status: ${response.status}`)
-          if (DEBUG) debugLog(`Unexpected response status`, { status: response.status })
           return false
         }
       } catch (fetchError) {
@@ -181,8 +178,7 @@ export async function coordinateAuth(
 
   // If there's a valid lockfile, try to use the existing auth process
   if (lockData && (await isLockValid(lockData))) {
-    log(`Another instance is handling authentication on port ${lockData.port}`)
-    if (DEBUG) debugLog('Another instance is handling authentication', { port: lockData.port, pid: lockData.pid })
+    log(`Another instance is handling authentication on port ${lockData.port} (pid: ${lockData.pid})`)
 
     try {
       // Try to wait for the authentication to complete
@@ -190,8 +186,7 @@ export async function coordinateAuth(
       const authCompleted = await waitForAuthentication(lockData.port)
 
       if (authCompleted) {
-        log('Authentication completed by another instance')
-        if (DEBUG) debugLog('Authentication completed by another instance, will use tokens from disk')
+        log('Authentication completed by another instance. Using tokens from disk')
 
         // Setup a dummy server - the client will use tokens directly from disk
         const dummyServer = express().listen(0) // Listen on any available port
@@ -201,7 +196,6 @@ export async function coordinateAuth(
         // This shouldn't actually be called in normal operation, but provide it for API compatibility
         const dummyWaitForAuthCode = () => {
           log('WARNING: waitForAuthCode called in secondary instance - this is unexpected')
-          if (DEBUG) debugLog('WARNING: waitForAuthCode called in secondary instance - this is unexpected')
           // Return a promise that never resolves - the client should use the tokens from disk instead
           return new Promise<string>(() => {})
         }
@@ -213,7 +207,6 @@ export async function coordinateAuth(
         }
       } else {
         log('Taking over authentication process...')
-        if (DEBUG) debugLog('Taking over authentication process')
       }
     } catch (error) {
       log(`Error waiting for authentication: ${error}`)
@@ -226,7 +219,6 @@ export async function coordinateAuth(
   } else if (lockData) {
     // Invalid lockfile, delete it
     log('Found invalid lockfile, deleting it')
-    if (DEBUG) debugLog('Found invalid lockfile, deleting it')
     await deleteLockfile(serverUrlHash)
   }
 
@@ -244,14 +236,12 @@ export async function coordinateAuth(
   if (DEBUG) debugLog('OAuth callback server running', { port: actualPort })
 
   log(`Creating lockfile for server ${serverUrlHash} with process ${process.pid} on port ${actualPort}`)
-  if (DEBUG) debugLog('Creating lockfile', { serverUrlHash, pid: process.pid, port: actualPort })
   await createLockfile(serverUrlHash, process.pid, actualPort)
 
   // Make sure lockfile is deleted on process exit
   const cleanupHandler = async () => {
     try {
       log(`Cleaning up lockfile for server ${serverUrlHash}`)
-      if (DEBUG) debugLog('Cleaning up lockfile')
       await deleteLockfile(serverUrlHash)
     } catch (error) {
       log(`Error cleaning up lockfile: ${error}`)
