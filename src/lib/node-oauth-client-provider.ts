@@ -7,7 +7,7 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
+import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
 
@@ -63,9 +63,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The client information or undefined
    */
   async clientInformation(): Promise<OAuthClientInformationFull | undefined> {
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Reading client info')
+    if (DEBUG) debugLog('Reading client info')
     if (this.staticOAuthClientInfo) {
-      if (DEBUG) await debugLog(this.serverUrlHash, 'Returning static client info')
+      if (DEBUG) debugLog('Returning static client info')
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -73,7 +73,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       'client_info.json',
       OAuthClientInformationFullSchema,
     )
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Client info result:', clientInfo ? 'Found' : 'Not found')
+    if (DEBUG) debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
     return clientInfo
   }
 
@@ -82,7 +82,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param clientInformation The client information to save
    */
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Saving client info', { client_id: clientInformation.client_id })
+    if (DEBUG) debugLog('Saving client info', { client_id: clientInformation.client_id })
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -92,8 +92,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async tokens(): Promise<OAuthTokens | undefined> {
     if (DEBUG) {
-      await debugLog(this.serverUrlHash, 'Reading OAuth tokens')
-      await debugLog(this.serverUrlHash, 'Token request stack trace:', new Error().stack)
+      debugLog('Reading OAuth tokens')
+      debugLog('Token request stack trace:', new Error().stack)
     }
 
     const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
@@ -104,14 +104,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
         // Alert if expires_in is invalid
         if (typeof tokens.expires_in !== 'number' || tokens.expires_in < 0) {
-          await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_in detected while reading tokens ⚠️', {
+          debugLog('⚠️ WARNING: Invalid expires_in detected while reading tokens ⚠️', {
             expiresIn: tokens.expires_in,
             tokenObject: JSON.stringify(tokens),
             stack: new Error('Invalid expires_in value').stack,
           })
         }
 
-        await debugLog(this.serverUrlHash, 'Token result:', {
+        debugLog('Token result:', {
           found: true,
           hasAccessToken: !!tokens.access_token,
           hasRefreshToken: !!tokens.refresh_token,
@@ -120,7 +120,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           expiresInValue: tokens.expires_in,
         })
       } else {
-        await debugLog(this.serverUrlHash, 'Token result: Not found')
+        debugLog('Token result: Not found')
       }
     }
 
@@ -137,14 +137,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
       // Alert if expires_in is invalid
       if (typeof tokens.expires_in !== 'number' || tokens.expires_in < 0) {
-        await debugLog(this.serverUrlHash, '⚠️ WARNING: Invalid expires_in detected in tokens ⚠️', {
+        debugLog('⚠️ WARNING: Invalid expires_in detected in tokens ⚠️', {
           expiresIn: tokens.expires_in,
           tokenObject: JSON.stringify(tokens),
           stack: new Error('Invalid expires_in value').stack,
         })
       }
 
-      await debugLog(this.serverUrlHash, 'Saving tokens', {
+      debugLog('Saving tokens', {
         hasAccessToken: !!tokens.access_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
@@ -162,15 +162,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Redirecting to authorization URL', authorizationUrl.toString())
+    if (DEBUG) debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
     try {
       await open(authorizationUrl.toString())
       log('Browser opened automatically.')
-      if (DEBUG) await debugLog(this.serverUrlHash, 'Browser opened automatically')
     } catch (error) {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
-      if (DEBUG) await debugLog(this.serverUrlHash, 'Failed to open browser', error)
+      if (DEBUG) debugLog('Failed to open browser', error)
     }
   }
 
@@ -179,7 +178,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Saving code verifier')
+    if (DEBUG) debugLog('Saving code verifier')
     await writeTextFile(this.serverUrlHash, 'code_verifier.txt', codeVerifier)
   }
 
@@ -188,9 +187,46 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The code verifier
    */
   async codeVerifier(): Promise<string> {
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Reading code verifier')
+    if (DEBUG) debugLog('Reading code verifier')
     const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
-    if (DEBUG) await debugLog(this.serverUrlHash, 'Code verifier found:', !!verifier)
+    if (DEBUG) debugLog('Code verifier found:', !!verifier)
     return verifier
+  }
+
+  /**
+   * Invalidates the specified credentials
+   * @param scope The scope of credentials to invalidate
+   */
+  async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier'): Promise<void> {
+    if (DEBUG) debugLog(`Invalidating credentials: ${scope}`)
+
+    switch (scope) {
+      case 'all':
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, 'client_info.json'),
+          deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+        ])
+        if (DEBUG) debugLog('All credentials invalidated')
+        break
+
+      case 'client':
+        await deleteConfigFile(this.serverUrlHash, 'client_info.json')
+        if (DEBUG) debugLog('Client information invalidated')
+        break
+
+      case 'tokens':
+        await deleteConfigFile(this.serverUrlHash, 'tokens.json')
+        if (DEBUG) debugLog('OAuth tokens invalidated')
+        break
+
+      case 'verifier':
+        await deleteConfigFile(this.serverUrlHash, 'code_verifier.txt')
+        if (DEBUG) debugLog('Code verifier invalidated')
+        break
+
+      default:
+        throw new Error(`Unknown credential scope: ${scope}`)
+    }
   }
 }
