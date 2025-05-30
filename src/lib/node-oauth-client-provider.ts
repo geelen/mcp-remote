@@ -7,7 +7,7 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
+import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
 
@@ -192,5 +192,42 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
     if (DEBUG) debugLog('Code verifier found:', !!verifier)
     return verifier
+  }
+
+  /**
+   * Invalidates the specified credentials
+   * @param scope The scope of credentials to invalidate
+   */
+  async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier'): Promise<void> {
+    if (DEBUG) debugLog(`Invalidating credentials: ${scope}`)
+
+    switch (scope) {
+      case 'all':
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, 'client_info.json'),
+          deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+        ])
+        if (DEBUG) debugLog('All credentials invalidated')
+        break
+
+      case 'client':
+        await deleteConfigFile(this.serverUrlHash, 'client_info.json')
+        if (DEBUG) debugLog('Client information invalidated')
+        break
+
+      case 'tokens':
+        await deleteConfigFile(this.serverUrlHash, 'tokens.json')
+        if (DEBUG) debugLog('OAuth tokens invalidated')
+        break
+
+      case 'verifier':
+        await deleteConfigFile(this.serverUrlHash, 'code_verifier.txt')
+        if (DEBUG) debugLog('Code verifier invalidated')
+        break
+
+      default:
+        throw new Error(`Unknown credential scope: ${scope}`)
+    }
   }
 }

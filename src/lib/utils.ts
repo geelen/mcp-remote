@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
@@ -12,7 +13,6 @@ import crypto from 'crypto'
 import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
 import path from 'path'
-import os from 'os'
 
 // Global type declaration for typescript
 declare global {
@@ -293,7 +293,7 @@ export async function connectToRemoteServer(
       log('Authentication required. Initializing auth...')
       if (DEBUG) {
         debugLog('Authentication error detected', {
-          errorType,
+          errorCode: error instanceof OAuthError ? error.errorCode : undefined,
           errorMessage: error.message,
           stack: error.stack,
         })
