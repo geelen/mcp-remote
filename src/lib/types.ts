@@ -27,6 +27,8 @@ export interface OAuthProviderOptions {
   staticOAuthClientMetadata?: StaticOAuthClientMetadata
   /** Static OAuth client information to use instead of OAuth registration */
   staticOAuthClientInfo?: StaticOAuthClientInformationFull
+  /** State parameter for OAuth authorization request */
+  state?: string
 }
 
 /**

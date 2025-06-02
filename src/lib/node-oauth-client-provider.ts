@@ -10,6 +10,7 @@ import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
+import crypto from 'crypto'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -192,5 +193,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
     if (DEBUG) await debugLog(this.serverUrlHash, 'Code verifier found:', !!verifier)
     return verifier
+  }
+
+  /**
+   * Gets the state parameter for OAuth authorization request
+   * @returns The state parameter if provided in options, or a generated state
+   */
+  async state(): Promise<string> {
+    if (DEBUG) await debugLog(this.serverUrlHash, 'Getting state parameter')
+    return this.options.state || crypto.randomBytes(32).toString('hex')
   }
 }
