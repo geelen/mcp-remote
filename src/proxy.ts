@@ -36,6 +36,7 @@ async function runProxy(
   host: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  useOidcConfig: boolean = false,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -54,6 +55,7 @@ async function runProxy(
     clientName: 'MCP CLI Proxy',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
+    useOidcConfig,
   })
 
   // Create the STDIO transport for local connections
@@ -143,8 +145,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo }) => {
-    return runProxy(serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo, useOidcConfig }) => {
+    return runProxy(serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo, useOidcConfig)
   })
   .catch((error) => {
     log('Fatal error:', error)
