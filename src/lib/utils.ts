@@ -609,6 +609,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  // Parse resource to authorize
+  let authorizeResource = '' // Default
+  const resourceIndex = args.indexOf('--resource')
+  if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
+    authorizeResource = args[resourceIndex + 1]
+    log(`Using authorize resource: ${authorizeResource}`)
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -673,7 +681,17 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     })
   }
 
-  return { serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo }
+  return {
+    serverUrl,
+    callbackPort,
+    headers,
+    transportStrategy,
+    host,
+    debug,
+    staticOAuthClientMetadata,
+    staticOAuthClientInfo,
+    authorizeResource,
+  }
 }
 
 /**
