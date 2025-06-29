@@ -41,6 +41,27 @@ export interface OAuthCallbackServerOptions {
   events: EventEmitter
 }
 
-// optional tatic OAuth client information
+// optional static OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
+
+/**
+ * Azure Identity configuration options
+ */
+export interface AzureAuthOptions {
+  /** Azure tenant ID */
+  tenantId: string
+  /** Azure client/application ID */
+  clientId: string
+  /** Scopes to request (space or array separated) */
+  scopes: string[]
+  /** Optional redirect URI for interactive flows */
+  redirectUri?: string
+  /** Optional authority URL (defaults to public cloud) */
+  authority?: string
+}
+
+/**
+ * Authentication type configuration
+ */
+export type AuthType = 'oauth' | 'azure'

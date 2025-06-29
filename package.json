@@ -1,6 +1,6 @@
 {
   "name": "mcp-remote",
-  "version": "0.1.17",
+  "version": "0.2.0",
   "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
   "keywords": [
     "mcp",
@@ -31,6 +31,7 @@
     "test:unit:watch": "vitest"
   },
   "dependencies": {
+    "@azure/identity": "^4.4.1",
     "express": "^4.21.2",
     "open": "^10.1.0",
     "strict-url-sanitise": "^0.0.1"
