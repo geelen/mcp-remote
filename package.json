@@ -1,7 +1,7 @@
 {
-  "name": "mcp-remote",
-  "version": "0.1.14",
-  "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
+  "name": "mcp-remote-azure",
+  "version": "0.2.0",
+  "description": "Remote proxy for Model Context Protocol with Azure Identity support, allowing local-only clients to connect to remote servers using OAuth or Azure authentication",
   "keywords": [
     "mcp",
     "stdio",
@@ -19,8 +19,8 @@
   ],
   "main": "dist/index.js",
   "bin": {
-    "mcp-remote": "dist/proxy.js",
-    "mcp-remote-client": "dist/client.js"
+    "mcp-remote-azure": "dist/proxy.js",
+    "mcp-remote-azure-client": "dist/client.js"
   },
   "scripts": {
     "build": "tsup",
@@ -29,6 +29,7 @@
     "lint-fix": "prettier --check . --write"
   },
   "dependencies": {
+    "@azure/identity": "^4.4.1",
     "express": "^4.21.2",
     "open": "^10.1.0"
   },

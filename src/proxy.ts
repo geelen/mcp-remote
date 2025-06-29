@@ -20,7 +20,7 @@ import {
   getServerUrlHash,
   TransportStrategy,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata, AzureAuthOptions, AuthType } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
@@ -35,6 +35,8 @@ async function runProxy(
   host: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  authType: AuthType = 'oauth',
+  azureOptions?: AzureAuthOptions,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -45,7 +47,7 @@ async function runProxy(
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
 
-  // Create the OAuth client provider
+  // Create the OAuth client provider (supports both OAuth and Azure)
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
     callbackPort,
@@ -53,7 +55,7 @@ async function runProxy(
     clientName: 'MCP CLI Proxy',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
-  })
+  }, authType, azureOptions)
 
   // Create the STDIO transport for local connections
   const localTransport = new StdioServerTransport()
@@ -63,22 +65,38 @@ async function runProxy(
 
   // Define an auth initializer function
   const authInitializer = async () => {
-    const authState = await authCoordinator.initializeAuth()
+    if (authType === 'azure') {
+      // For Azure authentication, we handle it directly through the auth provider
+      log('Initializing Azure authentication...')
+      await authProvider.initializeAzureAuth()
+      
+      // Create a dummy server for consistency with the existing interface
+      const dummyServer = { close: () => {} }
+      server = dummyServer
 
-    // Store server in outer scope for cleanup
-    server = authState.server
+      return {
+        waitForAuthCode: () => Promise.resolve(''), // Not needed for Azure
+        skipBrowserAuth: true, // Azure handles auth directly
+      }
+    } else {
+      // Standard OAuth flow
+      const authState = await authCoordinator.initializeAuth()
 
-    // If auth was completed by another instance, just log that we'll use the auth from disk
-    if (authState.skipBrowserAuth) {
-      log('Authentication was completed by another instance - will use tokens from disk')
-      // TODO: remove, the callback is happening before the tokens are exchanged
-      //  so we're slightly too early
-      await new Promise((res) => setTimeout(res, 1_000))
-    }
+      // Store server in outer scope for cleanup
+      server = authState.server
 
-    return {
-      waitForAuthCode: authState.waitForAuthCode,
-      skipBrowserAuth: authState.skipBrowserAuth,
+      // If auth was completed by another instance, just log that we'll use the auth from disk
+      if (authState.skipBrowserAuth) {
+        log('Authentication was completed by another instance - will use tokens from disk')
+        // TODO: remove, the callback is happening before the tokens are exchanged
+        //  so we're slightly too early
+        await new Promise((res) => setTimeout(res, 1_000))
+      }
+
+      return {
+        waitForAuthCode: authState.waitForAuthCode,
+        skipBrowserAuth: authState.skipBrowserAuth,
+      }
     }
   }
 
@@ -142,8 +160,8 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 
 // Parse command-line arguments and run the proxy
 parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo }) => {
-    return runProxy(serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo)
+  .then(({ serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo, authType, azureOptions }) => {
+    return runProxy(serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo, authType, azureOptions)
   })
   .catch((error) => {
     log('Fatal error:', error)

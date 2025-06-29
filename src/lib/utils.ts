@@ -673,7 +673,57 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     })
   }
 
-  return { serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo }
+  // Parse Azure authentication options
+  let authType: 'oauth' | 'azure' = 'oauth' // Default to OAuth
+  let azureOptions: { tenantId: string; clientId: string; scopes: string[] } | undefined
+
+  const authTypeIndex = args.indexOf('--auth-type')
+  if (authTypeIndex !== -1 && authTypeIndex < args.length - 1) {
+    const type = args[authTypeIndex + 1]
+    if (type === 'azure' || type === 'oauth') {
+      authType = type
+      log(`Using authentication type: ${authType}`)
+    } else {
+      log(`Warning: Ignoring invalid auth type: ${type}. Valid values are: oauth, azure`)
+    }
+  }
+
+  if (authType === 'azure') {
+    // Parse Azure-specific options
+    const azureTenantIdIndex = args.indexOf('--azure-tenant-id')
+    const azureClientIdIndex = args.indexOf('--azure-client-id')
+    const azureScopesIndex = args.indexOf('--azure-scopes')
+
+    if (azureTenantIdIndex === -1 || azureTenantIdIndex >= args.length - 1) {
+      log('Error: --azure-tenant-id is required when using Azure authentication')
+      process.exit(1)
+    }
+
+    if (azureClientIdIndex === -1 || azureClientIdIndex >= args.length - 1) {
+      log('Error: --azure-client-id is required when using Azure authentication')
+      process.exit(1)
+    }
+
+    if (azureScopesIndex === -1 || azureScopesIndex >= args.length - 1) {
+      log('Error: --azure-scopes is required when using Azure authentication')
+      process.exit(1)
+    }
+
+    // Convert scopes string to array
+    const scopesString = args[azureScopesIndex + 1]
+    const scopesArray = scopesString.split(' ').filter(s => s.length > 0)
+
+    azureOptions = {
+      tenantId: args[azureTenantIdIndex + 1],
+      clientId: args[azureClientIdIndex + 1],
+      scopes: scopesArray
+    }
+
+    log(`Using Azure authentication with tenant: ${azureOptions.tenantId}, client: ${azureOptions.clientId}`)
+    log(`Azure scopes: ${azureOptions.scopes.join(' ')}`)
+  }
+
+  return { serverUrl, callbackPort, headers, transportStrategy, host, debug, staticOAuthClientMetadata, staticOAuthClientInfo, authType, azureOptions }
 }
 
 /**

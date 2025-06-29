@@ -72,6 +72,45 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 },
 ```
 
+### Azure Authentication
+
+For servers that require Azure AD/Entra ID authentication, you can use Azure Identity instead of OAuth:
+
+```json
+{
+  "mcpServers": {
+    "azure-mcp": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--auth-type", "azure",
+        "--azure-tenant-id", "${TENANT_ID}",
+        "--azure-client-id", "${CLIENT_ID}",
+        "--azure-scopes", "${SCOPES}"
+      ]
+    },
+    "env": {
+      "AZURE_TENANT_ID": "<Tenant id>",
+      "AZURE_CLIENT_ID": "<Azure SP Application ID>",
+      "AZURE_SCOPES": "<Scopes>"
+    }
+  }
+}
+```
+
+**Azure Authentication Features:**
+- Uses interactive browser authentication (no secrets required)
+- Automatic token refresh handled by Azure Identity SDK
+- Supports all Azure AD tenants and scopes
+- One-time authentication per session
+
+**Required Azure Parameters:**
+- `--auth-type azure`: Enable Azure authentication
+- `--azure-tenant-id`: Your Azure AD tenant ID
+- `--azure-client-id`: Your Azure application (client) ID
+- `--azure-scopes`: Space-separated scopes (e.g., "https://graph.microsoft.com/.default")
+
 ### Flags
 
 * If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.

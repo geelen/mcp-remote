@@ -6,15 +6,19 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
+import type { OAuthProviderOptions, StaticOAuthClientMetadata, AzureAuthOptions, AuthType } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
 import { randomUUID } from 'node:crypto'
 
+// Azure Identity imports
+import { InteractiveBrowserCredential, AccessToken } from '@azure/identity'
+
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
  * Handles OAuth flow and token storage for MCP clients.
+ * Also supports Azure Identity authentication.
  */
 export class NodeOAuthClientProvider implements OAuthClientProvider {
   private serverUrlHash: string
@@ -26,12 +30,20 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private _state: string
+  
+  // Azure Identity properties
+  private azureCredential?: InteractiveBrowserCredential
+  private azureScopes?: string[]
+  private azureOptions?: AzureAuthOptions
+  private authType: AuthType
 
   /**
    * Creates a new NodeOAuthClientProvider
    * @param options Configuration options for the provider
+   * @param authType Authentication type (oauth or azure)
+   * @param azureOptions Azure configuration options (if using Azure auth)
    */
-  constructor(readonly options: OAuthProviderOptions) {
+  constructor(readonly options: OAuthProviderOptions, authType: AuthType = 'oauth', azureOptions?: AzureAuthOptions) {
     this.serverUrlHash = getServerUrlHash(options.serverUrl)
     this.callbackPath = options.callbackPath || '/oauth/callback'
     this.clientName = options.clientName || 'MCP CLI Client'
@@ -41,6 +53,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this._state = randomUUID()
+    this.authType = authType
+    this.azureOptions = azureOptions
+
+    // Initialize Azure Identity if using Azure auth
+    if (this.authType === 'azure' && this.azureOptions) {
+      this.initializeAzureCredential()
+    }
   }
 
   get redirectUrl(): string {
@@ -98,6 +117,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The OAuth tokens or undefined
    */
   async tokens(): Promise<OAuthTokens | undefined> {
+    if (this.authType === 'azure') {
+      return await this.getAzureTokens()
+    }
+
     if (DEBUG) {
       debugLog('Reading OAuth tokens')
       debugLog('Token request stack trace:', new Error().stack)
@@ -235,5 +258,94 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       default:
         throw new Error(`Unknown credential scope: ${scope}`)
     }
+  }
+
+  /**
+   * Initializes the Azure credential for authentication
+   * @private
+   */
+  private initializeAzureCredential(): void {
+    if (!this.azureOptions) {
+      throw new Error('Azure options are required for Azure authentication')
+    }
+
+    if (DEBUG) debugLog('Initializing Azure credential', {
+      tenantId: this.azureOptions.tenantId,
+      clientId: this.azureOptions.clientId,
+      scopes: this.azureOptions.scopes
+    })
+
+    // Create the Interactive Browser Credential
+    this.azureCredential = new InteractiveBrowserCredential({
+      clientId: this.azureOptions.clientId,
+      tenantId: this.azureOptions.tenantId,
+      redirectUri: this.azureOptions.redirectUri || `http://localhost:${this.options.callbackPort}/azure/callback`
+    })
+
+    // Store scopes for token requests
+    this.azureScopes = this.azureOptions.scopes
+
+    if (DEBUG) debugLog('Azure credential initialized successfully')
+  }
+
+  /**
+   * Gets Azure tokens using the Azure Identity SDK
+   * @returns OAuth-compatible tokens from Azure
+   * @private
+   */
+  private async getAzureTokens(): Promise<OAuthTokens | undefined> {
+    if (!this.azureCredential || !this.azureScopes) {
+      throw new Error('Azure credential not initialized. Call initializeAzureCredential first.')
+    }
+
+    if (DEBUG) debugLog('Getting Azure tokens')
+
+    try {
+      // Get token from Azure Identity SDK
+      const azureToken: AccessToken = await this.azureCredential.getToken(this.azureScopes)
+
+      if (DEBUG) debugLog('Azure token obtained successfully', {
+        expiresOn: azureToken.expiresOnTimestamp,
+        timeUntilExpiry: Math.floor((azureToken.expiresOnTimestamp - Date.now()) / 1000)
+      })
+
+      // Convert Azure token to OAuth-compatible format
+      const oauthTokens: OAuthTokens = {
+        access_token: azureToken.token,
+        token_type: 'Bearer',
+        expires_in: Math.floor((azureToken.expiresOnTimestamp - Date.now()) / 1000),
+        // Azure tokens don't have refresh tokens in this flow
+        // The Azure Identity SDK handles refresh automatically
+      }
+
+      return oauthTokens
+    } catch (error) {
+      log('Error getting Azure token:', error)
+      if (DEBUG) debugLog('Azure token error details', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      })
+      throw error
+    }
+  }
+
+  /**
+   * Initializes Azure authentication if not already done
+   * This method can be called to ensure Azure auth is ready
+   */
+  public async initializeAzureAuth(): Promise<void> {
+    if (this.authType !== 'azure') {
+      return
+    }
+
+    if (!this.azureCredential) {
+      this.initializeAzureCredential()
+    }
+
+    // Trigger initial authentication by requesting a token
+    // This will open the browser for interactive authentication
+    await this.getAzureTokens()
+    
+    log('Azure authentication completed successfully')
   }
 }
