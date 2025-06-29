@@ -10,6 +10,7 @@ import type { OAuthProviderOptions, StaticOAuthClientMetadata, AzureAuthOptions,
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, DEBUG, MCP_REMOTE_VERSION } from './utils'
+import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 
 // Azure Identity imports
@@ -195,7 +196,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (DEBUG) debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
     try {
-      await open(authorizationUrl.toString())
+      await open(sanitizeUrl(authorizationUrl.toString()))
       log('Browser opened automatically.')
     } catch (error) {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')

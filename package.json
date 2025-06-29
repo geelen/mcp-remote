@@ -1,7 +1,7 @@
 {
-  "name": "mcp-remote-azure",
+  "name": "mcp-remote",
   "version": "0.2.0",
-  "description": "Remote proxy for Model Context Protocol with Azure Identity support, allowing local-only clients to connect to remote servers using OAuth or Azure authentication",
+  "description": "Remote proxy for Model Context Protocol, allowing local-only clients to connect to remote servers using oAuth",
   "keywords": [
     "mcp",
     "stdio",
@@ -9,7 +9,7 @@
     "remote",
     "oauth"
   ],
-  "author": "Glen Maddern <glen@cloudflare.com>",
+  "author": "Glen Maddern <glen@glenmaddern.com>",
   "repository": "https://github.com/geelen/mcp-remote",
   "type": "module",
   "files": [
@@ -19,19 +19,22 @@
   ],
   "main": "dist/index.js",
   "bin": {
-    "mcp-remote-azure": "dist/proxy.js",
-    "mcp-remote-azure-client": "dist/client.js"
+    "mcp-remote": "dist/proxy.js",
+    "mcp-remote-client": "dist/client.js"
   },
   "scripts": {
     "build": "tsup",
     "build:watch": "tsup --watch",
     "check": "prettier --check . && tsc",
-    "lint-fix": "prettier --check . --write"
+    "lint-fix": "prettier --check . --write",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest"
   },
   "dependencies": {
     "@azure/identity": "^4.4.1",
     "express": "^4.21.2",
-    "open": "^10.1.0"
+    "open": "^10.1.0",
+    "strict-url-sanitise": "^0.0.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "https://pkg.pr.new/geelen/typescript-sdk/@modelcontextprotocol/sdk@cdf3508",
@@ -40,7 +43,8 @@
     "prettier": "^3.5.3",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.3"
   },
   "tsup": {
     "entry": [
@@ -54,6 +58,13 @@
     "clean": true,
     "outDir": "dist",
     "external": []
+  },
+  "vitest": {
+    "environment": "node",
+    "globals": true,
+    "include": [
+      "src/**/*.test.ts"
+    ]
   },
   "packageManager": "pnpm@10.11.0+sha512.6540583f41cc5f628eb3d9773ecee802f4f9ef9923cc45b69890fb47991d4b092964694ec3a4f738a420c918a333062c8b925d312f42e4f0c263eb603551f977"
 }
