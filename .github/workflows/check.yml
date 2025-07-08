@@ -18,8 +18,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Run type checking and formatting
+        run: pnpm run check
+
+      - name: Run unit tests
+        run: pnpm run test:unit
+
       - name: Build
         run: pnpm build
-
-      - name: Run checks
-        run: pnpm run check

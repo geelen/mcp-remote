@@ -10,6 +10,7 @@ import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { getServerUrlHash, log, debugLog, MCP_REMOTE_VERSION } from './utils'
+import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 
 /**
@@ -25,6 +26,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private softwareVersion: string
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
+  private authorizeResource: string | undefined
   private _state: string
 
   /**
@@ -40,6 +42,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
+    this.authorizeResource = options.authorizeResource
     this._state = randomUUID()
   }
 
@@ -161,12 +164,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    if (this.authorizeResource) {
+      authorizationUrl.searchParams.set('resource', this.authorizeResource)
+    }
+
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
     try {
-      await open(authorizationUrl.toString())
+      await open(sanitizeUrl(authorizationUrl.toString()))
       log('Browser opened automatically.')
     } catch (error) {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
