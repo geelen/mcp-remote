@@ -36,6 +36,7 @@ async function runProxy(
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authorizeResource: string,
+  authTimeoutMs: number,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -44,7 +45,7 @@ async function runProxy(
   const serverUrlHash = getServerUrlHash(serverUrl)
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
@@ -155,6 +156,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authorizeResource,
+      authTimeoutMs,
     }) => {
       return runProxy(
         serverUrl,
@@ -165,6 +167,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authorizeResource,
+        authTimeoutMs,
       )
     },
   )

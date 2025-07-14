@@ -41,6 +41,8 @@ export interface OAuthCallbackServerOptions {
   path: string
   /** Event emitter to signal when auth code is received */
   events: EventEmitter
+  /** Timeout in milliseconds for the auth callback server's long poll */
+  authTimeoutMs?: number
 }
 
 // optional tatic OAuth client information

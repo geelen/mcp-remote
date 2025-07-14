@@ -391,7 +391,7 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     const longPollTimeout = setTimeout(() => {
       log('Long poll timeout reached, responding with 202')
       res.status(202).send('Authentication in progress')
-    }, 30000)
+    }, options.authTimeoutMs || 30000)
 
     // If auth completes while we're waiting, send the response immediately
     authCompletedPromise
@@ -617,6 +617,19 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
+  // Parse auth timeout
+  let authTimeoutMs = 30000 // Default 30 seconds
+  const authTimeoutIndex = args.indexOf('--auth-timeout')
+  if (authTimeoutIndex !== -1 && authTimeoutIndex < args.length - 1) {
+    const timeoutSeconds = parseInt(args[authTimeoutIndex + 1], 10)
+    if (!isNaN(timeoutSeconds) && timeoutSeconds > 0) {
+      authTimeoutMs = timeoutSeconds * 1000
+      log(`Using auth callback timeout: ${timeoutSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid auth timeout value: ${args[authTimeoutIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -691,6 +704,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    authTimeoutMs,
   }
 }
 
