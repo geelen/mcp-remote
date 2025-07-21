@@ -32,6 +32,9 @@ const pid = process.pid
 // Global debug flag
 export let DEBUG = false
 
+// Global no-log flag
+export let NO_LOG = false
+
 // Helper function for timestamp formatting
 function getTimestamp(): string {
   const now = new Date()
@@ -71,6 +74,10 @@ export function debugLog(message: string, ...args: any[]) {
 }
 
 export function log(str: string, ...rest: unknown[]) {
+  if(NO_LOG) {
+    return
+  }
+
   // Using stderr so that it doesn't interfere with stdout
   console.error(`[${pid}] ${str}`, ...rest)
 
