@@ -33,7 +33,8 @@
   "dependencies": {
     "express": "^4.21.2",
     "open": "^10.1.0",
-    "strict-url-sanitise": "^0.0.1"
+    "strict-url-sanitise": "^0.0.1",
+    "undici": "^7.12.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "https://pkg.pr.new/geelen/typescript-sdk/@modelcontextprotocol/sdk@877f4bf",
