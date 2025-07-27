@@ -14,6 +14,7 @@ import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
 import path from 'path'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
+import { fetch, setGlobalDispatcher, RequestInit, EnvHttpProxyAgent } from 'undici';
 
 // Global type declaration for typescript
 declare global {
@@ -31,6 +32,9 @@ export { MCP_REMOTE_VERSION }
 const pid = process.pid
 // Global debug flag
 export let DEBUG = false
+
+// Use env proxy
+setGlobalDispatcher(new EnvHttpProxyAgent());
 
 // Helper function for timestamp formatting
 function getTimestamp(): string {
