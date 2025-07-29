@@ -13,6 +13,7 @@ import crypto from 'crypto'
 import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
 import path from 'path'
+import https from 'https'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
 
 // Global type declaration for typescript
@@ -191,15 +192,40 @@ export async function connectToRemoteServer(
   authInitializer: AuthInitializer,
   transportStrategy: TransportStrategy = 'http-first',
   recursionReasons: Set<string> = new Set(),
+  insecure: boolean = false,
 ): Promise<Transport> {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
+  
+  // Handle NODE_TLS_REJECT_UNAUTHORIZED environment variable for insecure connections
+  const originalTlsReject = process.env.NODE_TLS_REJECT_UNAUTHORIZED
+  let shouldRestoreTlsEnv = false
+  
+  if (insecure && url.protocol === 'https:') {
+    if (originalTlsReject !== undefined) {
+      // Environment variable is already set, check for conflicts
+      if (originalTlsReject !== '0') {
+        // User has cert verification enabled but wants --insecure, this is a conflict
+        log('Error: Cannot use --insecure flag while NODE_TLS_REJECT_UNAUTHORIZED environment variable is set to enable certificate verification.')
+        log('Either remove the --insecure flag or set NODE_TLS_REJECT_UNAUTHORIZED=0')
+        process.exit(1)
+      }
+      // originalTlsReject === '0', compatible with --insecure, proceed without changes
+      if (DEBUG) debugLog('NODE_TLS_REJECT_UNAUTHORIZED already set to 0, compatible with --insecure flag')
+    } else {
+      // Environment variable is unset, we can safely set it temporarily
+      log('Setting NODE_TLS_REJECT_UNAUTHORIZED=0 for --insecure connection (will be restored after connection)')
+      if (DEBUG) debugLog('Setting NODE_TLS_REJECT_UNAUTHORIZED=0 for insecure connection')
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+      shouldRestoreTlsEnv = true
+    }
+  }
 
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
     fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
+      return Promise.resolve(authProvider?.tokens?.()).then((tokens) => {
+        const requestInit: RequestInit = {
           ...init,
           headers: {
             ...(init?.headers as Record<string, string> | undefined),
@@ -207,8 +233,12 @@ export async function connectToRemoteServer(
             ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
             Accept: 'text/event-stream',
           } as Record<string, string>,
-        }),
-      )
+        }
+
+        // Note: insecure TLS handling is done via NODE_TLS_REJECT_UNAUTHORIZED environment variable
+
+        return fetch(url, requestInit)
+      })
     },
   }
 
@@ -219,15 +249,19 @@ export async function connectToRemoteServer(
 
   // Create transport instance based on the strategy
   const sseTransport = transportStrategy === 'sse-only' || transportStrategy === 'sse-first'
+
+  // Create requestInit with headers
+  const requestInit: RequestInit = { headers }
+
   const transport = sseTransport
     ? new SSEClientTransport(url, {
         authProvider,
-        requestInit: { headers },
+        requestInit,
         eventSourceInit,
       })
     : new StreamableHTTPClientTransport(url, {
         authProvider,
-        requestInit: { headers },
+        requestInit,
       })
 
   try {
@@ -245,12 +279,18 @@ export async function connectToRemoteServer(
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
         if (DEBUG) debugLog('Creating test transport for HTTP-only connection test')
-        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit })
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`)
+
+    // Restore original TLS settings if we modified them
+    if (shouldRestoreTlsEnv) {
+      delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+      if (DEBUG) debugLog('Restored NODE_TLS_REJECT_UNAUTHORIZED to unset state')
+    }
 
     return transport
   } catch (error: any) {
@@ -269,6 +309,10 @@ export async function connectToRemoteServer(
       if (recursionReasons.has(REASON_TRANSPORT_FALLBACK)) {
         const errorMessage = `Already attempted transport fallback. Giving up.`
         log(errorMessage)
+        // Restore original TLS settings before throwing
+        if (shouldRestoreTlsEnv) {
+          delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+        }
         throw new Error(errorMessage)
       }
 
@@ -286,6 +330,7 @@ export async function connectToRemoteServer(
         authInitializer,
         sseTransport ? 'http-only' : 'sse-only',
         recursionReasons,
+        insecure,
       )
     } else if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
       log('Authentication required. Initializing auth...')
@@ -324,6 +369,14 @@ export async function connectToRemoteServer(
             debugLog('Already attempted auth reconnection, giving up', {
               recursionReasons: Array.from(recursionReasons),
             })
+          // Restore original TLS settings before throwing
+          if (insecure && url.protocol === 'https:') {
+            if (originalTlsReject !== undefined) {
+              process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalTlsReject
+            } else {
+              delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+            }
+          }
           throw new Error(errorMessage)
         }
 
@@ -333,7 +386,16 @@ export async function connectToRemoteServer(
         if (DEBUG) debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+        return connectToRemoteServer(
+          client,
+          serverUrl,
+          authProvider,
+          headers,
+          authInitializer,
+          transportStrategy,
+          recursionReasons,
+          insecure,
+        )
       } catch (authError: any) {
         log('Authorization error:', authError)
         if (DEBUG)
@@ -341,6 +403,10 @@ export async function connectToRemoteServer(
             errorMessage: authError.message,
             stack: authError.stack,
           })
+        // Restore original TLS settings before throwing
+        if (shouldRestoreTlsEnv) {
+          delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+        }
         throw authError
       }
     } else {
@@ -351,6 +417,10 @@ export async function connectToRemoteServer(
           stack: error.stack,
           transportType: transport.constructor.name,
         })
+      // Restore original TLS settings before throwing
+      if (shouldRestoreTlsEnv) {
+        delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+      }
       throw error
     }
   }
@@ -550,6 +620,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
   const allowHttp = args.includes('--allow-http')
+  const insecure = args.includes('--insecure')
 
   // Check for debug flag
   const debug = args.includes('--debug')
@@ -691,6 +762,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    insecure,
   }
 }
 
