@@ -1,0 +1,16 @@
+{
+  "packages": {
+    ".": {
+      "name": "mcp-remote",
+      "template": {
+        "name": "mcp-remote-example",
+        "label": "Try mcp-remote",
+        "description": "Test the mcp-remote package with this example"
+      }
+    }
+  },
+  "comment": {
+    "header": "📦 **Package Preview Available**",
+    "footer": "Install this preview: `npm install https://pkg.pr.new/mcp-remote@{{pr}}`"
+  }
+} 

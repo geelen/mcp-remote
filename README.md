@@ -1,5 +1,7 @@
 # `mcp-remote`
 
+[![pkg.pr.new](https://pkg.pr.new/badge/geelen/mcp-remote)](https://pkg.pr.new/~/geelen/mcp-remote)
+
 Connect an MCP Client that only supports local (stdio) servers to a Remote MCP Server, with auth support:
 
 **Note: this is a working proof-of-concept** but should be considered **experimental**.
@@ -134,6 +136,23 @@ To bypass authentication, or to emit custom headers on all requests to your remo
         "--debug"
       ]
 ```
+
+* To allow connections to servers with self-signed or invalid TLS certificates, add the `--insecure` flag. **⚠️ Warning**: This disables certificate verification and should only be used in development environments or trusted networks. Do not use this flag when connecting to untrusted servers as it makes your connection vulnerable to man-in-the-middle attacks.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://self-signed-server.example.com/sse",
+        "--insecure"
+      ]
+```
+
+**Important**: The `--insecure` flag will conflict with the `NODE_TLS_REJECT_UNAUTHORIZED` environment variable if it's set to enable certificate verification (any value other than `0`). If you encounter an error about this conflict, either:
+- Remove the `--insecure` flag, or  
+- Set `NODE_TLS_REJECT_UNAUTHORIZED=0` in your environment, or
+- Unset the `NODE_TLS_REJECT_UNAUTHORIZED` environment variable entirely
+
+When `NODE_TLS_REJECT_UNAUTHORIZED` is unset and you use `--insecure`, mcp-remote will temporarily set it to `0` during the connection and restore it afterwards.
 
 ### Transport Strategies
 
@@ -271,6 +290,10 @@ this might look like:
 }
 ```
 
+Alternatively, for development or trusted internal servers with self-signed certificates, you can use the `--insecure` flag to bypass certificate validation entirely. **Note**: This should only be used when you trust the server and network.
+
+If you have `NODE_TLS_REJECT_UNAUTHORIZED` set in your environment, ensure it's compatible with the `--insecure` flag (see the `--insecure` flag documentation above for details).
+
 ### Check the logs
 
 * [Follow Claude Desktop logs in real-time](https://modelcontextprotocol.io/docs/tools/debugging#debugging-in-claude-desktop)
@@ -293,6 +316,35 @@ For troubleshooting complex issues, especially with token refreshing or authenti
 ```
 
 This creates detailed logs in `~/.mcp-auth/{server_hash}_debug.log` with timestamps and complete information about every step of the connection and authentication process. When you find issues with token refreshing, laptop sleep/resume issues, or auth problems, provide these logs when seeking support.
+
+### NODE_TLS_REJECT_UNAUTHORIZED Conflicts
+
+If you see an error message like:
+
+```
+Error: Cannot use --insecure flag while NODE_TLS_REJECT_UNAUTHORIZED environment variable is set to enable certificate verification.
+```
+
+This means your environment has `NODE_TLS_REJECT_UNAUTHORIZED` set to a value other than `0`, which conflicts with the `--insecure` flag. To resolve this:
+
+1. **Remove the `--insecure` flag** if you want to keep certificate verification enabled, or
+2. **Set `NODE_TLS_REJECT_UNAUTHORIZED=0`** in your MCP client configuration to disable certificate verification globally, or 
+3. **Unset the environment variable** by removing it from your shell profile or MCP client configuration
+
+Example of setting it to `0` in Claude Desktop config:
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://example.com/sse", "--insecure"],
+      "env": {
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+      }
+    }
+  }
+}
+```
 
 ### Authentication Errors
 
