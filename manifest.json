@@ -11,25 +11,26 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/tuannvm/mcp-remote"
+    "url": "https://github.com/geelen/mcp-remote"
   },
-  "homepage": "https://github.com/tuannvm/mcp-remote",
-  "documentation": "https://github.com/tuannvm/mcp-remote/blob/main/README.md",
-  "support": "https://github.com/tuannvm/mcp-remote/issues",
+  "homepage": "https://github.com/geelen/mcp-remote",
+  "documentation": "https://github.com/geelen/mcp-remote/blob/main/README.md",
+  "support": "https://github.com/geelen/mcp-remote/issues",
   "license": "MIT",
   "compatibility": {
     "claude_desktop": ">=0.10.0",
-    "platforms": ["darwin", "win32", "linux"]
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   },
   "server": {
     "type": "node",
-    "entry_point": "dist/proxy.js",
+    "entry_point": "mcp-remote",
     "mcp_config": {
-      "command": "node",
-      "args": ["dist/proxy.js"],
-      "env": {
-        "DXT_SERVER_URL": "${user_config.server_url}"
-      }
+      "command": "npx",
+      "args": ["-y","mcp-remote", "${user_config.server_url}"]
     }
   },
   "user_config": {
