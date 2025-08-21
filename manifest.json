@@ -1,5 +1,4 @@
 {
-  "schema_version": "1.0",
   "dxt_version": "0.1",
   "name": "mcp-remote",
   "display_name": "Remote MCP Connector",
@@ -38,12 +37,7 @@
       "type": "string",
       "title": "Remote MCP Server URL",
       "description": "The complete URL of the remote MCP server (e.g., https://example.com/mcp)",
-      "placeholder": "https://mcp.example.com/mcp",
-      "required": true,
-      "validation": {
-        "pattern": "^https?://.*",
-        "message": "Please enter a valid HTTP or HTTPS URL"
-      }
+      "required": true
     }
   },
   "tools": [
@@ -51,14 +45,5 @@
       "name": "dynamic",
       "description": "Tools are dynamically loaded from the connected remote MCP server"
     }
-  ],
-  "features": [
-    "Universal remote MCP server connector",
-    "Works with any remote MCP server",
-    "OAuth authentication support",
-    "No local server installation required",
-    "SSL/TLS encrypted connections",
-    "One-time URL configuration",
-    "Compatible with all major MCP clients"
   ]
 }
