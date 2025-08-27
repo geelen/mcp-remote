@@ -11,6 +11,7 @@ vi.mock('./utils', () => ({
   DEBUG: false,
   MCP_REMOTE_VERSION: '1.0.0',
 }))
+vi.mock('open', () => ({ default: vi.fn() }))
 
 describe('NodeOAuthClientProvider', () => {
   let provider: NodeOAuthClientProvider
