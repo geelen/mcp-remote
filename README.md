@@ -226,6 +226,12 @@ As of version `0.48.0`, Cursor supports unauthed SSE servers directly. If your M
 
 [Official Docs](https://docs.codeium.com/windsurf/mcp). The configuration file is located at `~/.codeium/windsurf/mcp_config.json`.
 
+### JetBrains IntelliJ
+
+IntelliJ supports MCP servers however, you must disable logging (which this package does by default to STDERR). Do this
+by adding the `--no-log` argument.
+
+
 ## Building Remote MCP Servers
 
 For instructions on building & deploying remote MCP servers, including acting as a valid OAuth client, see the following resources:
