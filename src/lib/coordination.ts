@@ -1,10 +1,10 @@
-import { checkLockfile, createLockfile, deleteLockfile, getConfigFilePath, LockfileData } from './mcp-auth-config'
+import { checkLockfile, createLockfile, deleteLockfile, getConfigFilePath, LockfileData, deleteConfigFile } from './mcp-auth-config'
 import { EventEmitter } from 'events'
 import { Server } from 'http'
 import express from 'express'
 import { AddressInfo } from 'net'
 import { unlinkSync } from 'fs'
-import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
+import { log, debugLog, setupOAuthCallbackServerWithLongPoll, findAvailablePort } from './utils'
 
 export type AuthCoordinator = {
   initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
@@ -133,8 +133,9 @@ export function createLazyAuthCoordinator(
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
+  findAvailablePortFn?: (preferredPort?: number) => Promise<number>,
+): AuthCoordinator & { getActualPort: () => number | undefined } {
+  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number } | null = null
 
   return {
     initializeAuth: async () => {
@@ -148,10 +149,17 @@ export function createLazyAuthCoordinator(
       debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort })
 
       // Initialize auth using the existing coordinateAuth logic
-      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs)
-      debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
-      return authState
+      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs, findAvailablePortFn)
+      debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth, actualPort: authState.actualPort })
+      
+      // Return without actualPort for compatibility
+      return {
+        server: authState.server,
+        waitForAuthCode: authState.waitForAuthCode,
+        skipBrowserAuth: authState.skipBrowserAuth,
+      }
     },
+    getActualPort: () => authState?.actualPort,
   }
 }
 
@@ -160,14 +168,16 @@ export function createLazyAuthCoordinator(
  * @param serverUrlHash The hash of the server URL
  * @param callbackPort The port to use for the callback server
  * @param events The event emitter to use for signaling
- * @returns An object with the server, waitForAuthCode function, and a flag indicating if browser auth can be skipped
+ * @param findAvailablePortFn Optional function to find an available port
+ * @returns An object with the server, waitForAuthCode function, a flag indicating if browser auth can be skipped, and the actual port used
  */
 export async function coordinateAuth(
   serverUrlHash: string,
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+  findAvailablePortFn?: (preferredPort?: number) => Promise<number>,
+): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPort })
 
   // Check for a lockfile (disabled on Windows for the time being)
@@ -207,6 +217,7 @@ export async function coordinateAuth(
           server: dummyServer,
           waitForAuthCode: dummyWaitForAuthCode,
           skipBrowserAuth: true,
+          actualPort: callbackPort, // Use original port as we're not actually listening
         }
       } else {
         log('Taking over authentication process...')
@@ -227,16 +238,66 @@ export async function coordinateAuth(
 
   // Create our own lockfile
   debugLog('Setting up OAuth callback server', { port: callbackPort })
-  const { server, waitForAuthCode, authCompletedPromise } = await setupOAuthCallbackServerWithLongPoll({
-    port: callbackPort,
-    path: '/oauth/callback',
-    events,
-    authTimeoutMs,
-  })
+  
+  // Try to set up the OAuth callback server
+  let server: Server
+  let waitForAuthCode: () => Promise<string>
+  let authCompletedPromise: Promise<string>
+  let actualPort = callbackPort
+  
+  try {
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: callbackPort,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs,
+    })
+    server = result.server
+    waitForAuthCode = result.waitForAuthCode
+    authCompletedPromise = result.authCompletedPromise
+  } catch (error: any) {
+    // If we get an EADDRINUSE error, it means another process is using the port
+    if (error.code === 'EADDRINUSE' && findAvailablePortFn) {
+      log(`Port ${callbackPort} is already in use. Finding an alternative port...`)
+      debugLog('Port conflict detected, finding alternative', { originalPort: callbackPort, error: error.message })
+      
+      // Find a new available port
+      actualPort = await findAvailablePortFn()
+      log(`Using dynamically assigned port: ${actualPort}`)
+      
+      // Delete the old client info since the port has changed
+      // This will force re-registration with the new port
+      await deleteConfigFile(serverUrlHash, 'client_info.json')
+      log('Cleared existing client registration to force re-registration with new port')
+      
+      // Try again with the new port
+      const result = await setupOAuthCallbackServerWithLongPoll({
+        port: actualPort,
+        path: '/oauth/callback',
+        events,
+        authTimeoutMs,
+      })
+      server = result.server
+      waitForAuthCode = result.waitForAuthCode
+      authCompletedPromise = result.authCompletedPromise
+    } else if (error.code === 'EADDRINUSE') {
+      // No dynamic port function provided, fail with clear error
+      log(`Fatal error: Port ${callbackPort} is already in use by another process.`)
+      log(`This usually means another instance is already handling OAuth for this server.`)
+      log(`Please wait for the other instance to complete or terminate it.`)
+      debugLog('Port conflict detected, no dynamic port function', { port: callbackPort, error: error.message })
+      throw new Error(`Port ${callbackPort} is already in use. Cannot proceed with OAuth authentication.`)
+    } else {
+      // Re-throw other errors
+      throw error
+    }
+  }
 
-  // Get the actual port the server is running on
+  // Get the actual port the server is running on (in case port 0 was used)
   const address = server.address() as AddressInfo
-  const actualPort = address.port
+  if (actualPort === 0) {
+    actualPort = address.port
+  }
   debugLog('OAuth callback server running', { port: actualPort })
 
   log(`Creating lockfile for server ${serverUrlHash} with process ${process.pid} on port ${actualPort}`)
@@ -275,5 +336,6 @@ export async function coordinateAuth(
     server,
     waitForAuthCode,
     skipBrowserAuth: false,
+    actualPort,
   }
 }

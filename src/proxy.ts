@@ -19,6 +19,7 @@ import {
   setupSignalHandlers,
   getServerUrlHash,
   TransportStrategy,
+  findAvailablePort,
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
@@ -45,8 +46,8 @@ async function runProxy(
   // Get the server URL hash for lockfile operations
   const serverUrlHash = getServerUrlHash(serverUrl)
 
-  // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  // Create a lazy auth coordinator with dynamic port support
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, findAvailablePort)
 
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
