@@ -227,7 +227,7 @@ export async function coordinateAuth(
 
   // Create our own lockfile
   debugLog('Setting up OAuth callback server', { port: callbackPort })
-  const { server, waitForAuthCode, authCompletedPromise } = setupOAuthCallbackServerWithLongPoll({
+  const { server, waitForAuthCode, authCompletedPromise } = await setupOAuthCallbackServerWithLongPoll({
     port: callbackPort,
     path: '/oauth/callback',
     events,
