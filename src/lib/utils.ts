@@ -273,20 +273,41 @@ export async function connectToRemoteServer(
   const url = new URL(serverUrl)
 
   // Create transport with eventSourceInit to pass Authorization header if present
-  const eventSourceInit = {
-    fetch: (url: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
-          ...init,
-          headers: {
-            ...(init?.headers as Record<string, string> | undefined),
-            ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: 'text/event-stream',
-          } as Record<string, string>,
-        }),
-      )
-    },
+  // Check if we are connecting to localhost
+  const isLocalhost = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1"
+  
+  // Create transport with eventSourceInit to pass Authorization header if present
+  // For localhost connections with self-signed certs, we need to handle this differently
+  let eventSourceInit: any = {}
+  
+  if (isLocalhost && url.protocol === "https:") {
+    // For localhost HTTPS, use a simplified approach to avoid the headers symbol issue
+    // The NODE_TLS_REJECT_UNAUTHORIZED environment variable should handle cert validation
+    eventSourceInit = {
+      // Do not provide a custom fetch function for localhost HTTPS
+      // Instead, let the SSEClientTransport handle it directly
+      headers: {
+        ...headers,
+        Accept: "text/event-stream",
+      }
+    }
+  } else {
+    // For non-localhost or HTTP connections, use the original approach
+    eventSourceInit = {
+      fetch: (url: string | URL, init?: RequestInit) => {
+        return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
+          fetch(url, {
+            ...init,
+            headers: {
+              ...(init?.headers as Record<string, string> | undefined),
+              ...headers,
+              ...(tokens?.access_token ? { Authorization: `Bearer \${tokens.access_token}` } : {}),
+              Accept: "text/event-stream",
+            } as Record<string, string>,
+          }),
+        )
+      },
+    }
   }
 
   log(`Using transport strategy: ${transportStrategy}`)
