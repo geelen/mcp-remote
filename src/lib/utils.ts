@@ -113,6 +113,7 @@ export function createMessageTransformer({
     const messageId = message.id
     if (!messageId) return message
     const originalRequest = pendingRequests.get(messageId)
+    if (!originalRequest) return message
     pendingRequests.delete(messageId)
     return transformResponseFunction?.(originalRequest, message) ?? message
   }

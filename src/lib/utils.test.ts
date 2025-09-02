@@ -881,6 +881,104 @@ describe('Feature: MCP Proxy', () => {
       }),
     )
   })
+
+  it('Scenario: Handle server-initiated requests (without corresponding client request)', async () => {
+    // Given mock transports for client and server
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // When setting up the proxy
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // And when server sends a ping message (server-initiated, no corresponding client request)
+    const serverPingMessage = {
+      jsonrpc: '2.0' as const,
+      method: 'ping',
+      id: 'server-ping-1',
+    }
+
+    // Simulate server sending the message
+    if (mockTransportToServer.onmessage) {
+      mockTransportToServer.onmessage(serverPingMessage)
+    }
+
+    // Then the message should be forwarded to the client without errors
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonrpc: '2.0',
+        method: 'ping',
+        id: 'server-ping-1',
+      }),
+    )
+  })
+
+  it('Scenario: Handle server-initiated response messages without corresponding request', async () => {
+    // Given mock transports for client and server
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // When setting up the proxy
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // And when server sends a response with an ID that has no corresponding request
+    const orphanedResponse = {
+      jsonrpc: '2.0' as const,
+      id: 'unknown-request-id',
+      result: {},
+    }
+
+    // Simulate server sending a response without a matching request
+    if (mockTransportToServer.onmessage) {
+      mockTransportToServer.onmessage(orphanedResponse)
+    }
+
+    // Then the response should still be forwarded to the client
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonrpc: '2.0',
+        id: 'unknown-request-id',
+        result: {},
+      }),
+    )
+  })
 })
 
 describe('setupOAuthCallbackServerWithLongPoll', () => {
