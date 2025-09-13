@@ -34,7 +34,9 @@ All the most popular MCP clients (Claude Desktop, Cursor & Windsurf) use the fol
 
 ### Custom Headers
 
-To bypass authentication, or to emit custom headers on all requests to your remote server, pass `--header` CLI arguments:
+To bypass authentication, or to emit custom headers on all requests to your remote server, there are two options:
+
+#### Option 1: Using `--header` CLI arguments
 
 ```json
 {
@@ -70,6 +72,33 @@ To bypass authentication, or to emit custom headers on all requests to your remo
     "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
   }
 },
+```
+
+#### Option 2: Using `--headerFile` to read headers from a file
+
+You can also provide headers from a file using the `--headerFile` argument. The file should contain one header per line in the format `Name:Value`. Lines starting with `#` are treated as comments and ignored.
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--headerFile",
+        "/path/to/headers.txt"
+      ]
+    },
+  }
+}
+```
+
+Example headers file:
+```
+# Headers for MCP Remote
+Authorization:Bearer my-token
+X-Custom-Header:custom-value
 ```
 
 ### Flags
