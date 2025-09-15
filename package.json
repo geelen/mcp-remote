@@ -31,7 +31,7 @@
     "test:unit:watch": "vitest"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^5.1.0",
     "open": "^10.1.0",
     "strict-url-sanitise": "^0.0.1",
     "undici": "^7.12.0"
