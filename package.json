@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.17.3",
-    "@types/express": "^5.0.0",
+    "@types/express": "^5.0.3",
     "@types/node": "^22.13.10",
     "prettier": "^3.5.3",
     "tsup": "^8.4.0",
