@@ -14,6 +14,7 @@ import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
 import path from 'path'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
+import { EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
 
 // Global type declaration for typescript
 declare global {
@@ -75,8 +76,40 @@ export function log(str: string, ...rest: unknown[]) {
   console.error(`[${pid}] ${str}`, ...rest)
 
   // If debug mode is on, also log to debug file
-  if (DEBUG && global.currentServerUrlHash) {
-    debugLog(str, ...rest)
+  debugLog(str, ...rest)
+}
+
+type Message = any
+const MESSAGE_BLOCKED = Symbol('MessageBlocked')
+const isMessageBlocked = (value: any): value is typeof MESSAGE_BLOCKED => value === MESSAGE_BLOCKED
+
+export function createMessageTransformer({
+  transformRequestFunction,
+  transformResponseFunction,
+}: {
+  transformRequestFunction?: null | ((request: Message) => Message | typeof MESSAGE_BLOCKED)
+  transformResponseFunction?: null | ((request: Message, response: Message) => Message)
+} = {}) {
+  const pendingRequests = new Map<string, Message>()
+
+  const interceptRequest = (message: Message) => {
+    const messageId = message.id
+    if (!messageId) return message
+    pendingRequests.set(messageId, message)
+    return transformRequestFunction?.(message) ?? message
+  }
+
+  const interceptResponse = (message: Message) => {
+    const messageId = message.id
+    if (!messageId) return message
+    const originalRequest = pendingRequests.get(messageId)
+    pendingRequests.delete(messageId)
+    return transformResponseFunction?.(originalRequest, message) ?? message
+  }
+
+  return {
+    interceptRequest,
+    interceptResponse,
   }
 }
 
@@ -84,31 +117,77 @@ export function log(str: string, ...rest: unknown[]) {
  * Creates a bidirectional proxy between two transports
  * @param params The transport connections to proxy between
  */
-export function mcpProxy({ transportToClient, transportToServer }: { transportToClient: Transport; transportToServer: Transport }) {
+export function mcpProxy({
+  transportToClient,
+  transportToServer,
+  ignoredTools = [],
+}: {
+  transportToClient: Transport
+  transportToServer: Transport
+  ignoredTools?: string[]
+}) {
   let transportToClientClosed = false
   let transportToServerClosed = false
 
+  const messageTransformer = createMessageTransformer({
+    transformRequestFunction: (request: Message) => {
+      // Block tools/call for ignored tools
+      if (request.method === 'tools/call' && request.params?.name) {
+        const toolName = request.params.name
+        if (!shouldIncludeTool(ignoredTools, toolName)) {
+          // Send error response back to client immediately
+          const errorResponse = {
+            jsonrpc: '2.0' as const,
+            id: request.id,
+            error: {
+              code: -32603,
+              message: `Tool "${toolName}" is not available`,
+            },
+          }
+          transportToClient.send(errorResponse).catch(onClientError)
+          // Return symbol to indicate this request should not be forwarded
+          return MESSAGE_BLOCKED
+        }
+      }
+      return request
+    },
+    transformResponseFunction: (req: Message, res: Message) => {
+      if (req.method === 'tools/list') {
+        return {
+          ...res,
+          result: {
+            ...res.result,
+            tools: res.result.tools.filter((tool: any) => shouldIncludeTool(ignoredTools, tool.name)),
+          },
+        }
+      }
+      return res
+    },
+  })
+
   transportToClient.onmessage = (_message) => {
     // TODO: fix types
-    const message = _message as any
+    const message = messageTransformer.interceptRequest(_message as any)
+
+    // If interceptor returns MESSAGE_BLOCKED, don't forward the message
+    if (isMessageBlocked(message)) {
+      return
+    }
+
     log('[Local→Remote]', message.method || message.id)
 
-    if (DEBUG) {
-      debugLog('Local → Remote message', {
-        method: message.method,
-        id: message.id,
-        params: message.params ? JSON.stringify(message.params).substring(0, 500) : undefined,
-      })
-    }
+    debugLog('Local → Remote message', {
+      method: message.method,
+      id: message.id,
+      params: message.params ? JSON.stringify(message.params).substring(0, 500) : undefined,
+    })
 
     if (message.method === 'initialize') {
       const { clientInfo } = message.params
       if (clientInfo) clientInfo.name = `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})`
       log(JSON.stringify(message, null, 2))
 
-      if (DEBUG) {
-        debugLog('Initialize message with modified client info', { clientInfo })
-      }
+      debugLog('Initialize message with modified client info', { clientInfo })
     }
 
     transportToServer.send(message).catch(onServerError)
@@ -116,17 +195,15 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 
   transportToServer.onmessage = (_message) => {
     // TODO: fix types
-    const message = _message as any
+    const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
 
-    if (DEBUG) {
-      debugLog('Remote → Local message', {
-        method: message.method,
-        id: message.id,
-        result: message.result ? 'result-present' : undefined,
-        error: message.error,
-      })
-    }
+    debugLog('Remote → Local message', {
+      method: message.method,
+      id: message.id,
+      result: message.result ? 'result-present' : undefined,
+      error: message.error,
+    })
 
     transportToClient.send(message).catch(onClientError)
   }
@@ -137,7 +214,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
     }
 
     transportToClientClosed = true
-    if (DEBUG) debugLog('Local transport closed, closing remote transport')
+    debugLog('Local transport closed, closing remote transport')
     transportToServer.close().catch(onServerError)
   }
 
@@ -146,7 +223,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
       return
     }
     transportToServerClosed = true
-    if (DEBUG) debugLog('Remote transport closed, closing local transport')
+    debugLog('Remote transport closed, closing local transport')
     transportToClient.close().catch(onClientError)
   }
 
@@ -155,12 +232,12 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 
   function onClientError(error: Error) {
     log('Error from local client:', error)
-    if (DEBUG) debugLog('Error from local client', { stack: error.stack })
+    debugLog('Error from local client', { stack: error.stack })
   }
 
   function onServerError(error: Error) {
     log('Error from remote server:', error)
-    if (DEBUG) debugLog('Error from remote server', { stack: error.stack })
+    debugLog('Error from remote server', { stack: error.stack })
   }
 }
 
@@ -202,7 +279,9 @@ export async function connectToRemoteServer(
         fetch(url, {
           ...init,
           headers: {
-            ...(init?.headers as Record<string, string> | undefined),
+            ...(init?.headers instanceof Headers
+              ? Object.fromEntries(init?.headers.entries())
+              : (init?.headers as Record<string, string>) || {}),
             ...headers,
             ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
             Accept: 'text/event-stream',
@@ -231,20 +310,20 @@ export async function connectToRemoteServer(
       })
 
   try {
-    if (DEBUG) debugLog('Attempting to connect to remote server', { sseTransport })
+    debugLog('Attempting to connect to remote server', { sseTransport })
 
     if (client) {
-      if (DEBUG) debugLog('Connecting client to transport')
+      debugLog('Connecting client to transport')
       await client.connect(transport)
     } else {
-      if (DEBUG) debugLog('Starting transport directly')
+      debugLog('Starting transport directly')
       await transport.start()
       if (!sseTransport) {
         // Extremely hacky, but we didn't actually send a request when calling transport.start() above, so we don't
         // know if we're even talking to an HTTP server. But if we forced that now we'd get an error later saying that
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
-        if (DEBUG) debugLog('Creating test transport for HTTP-only connection test')
+        debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
@@ -289,16 +368,14 @@ export async function connectToRemoteServer(
       )
     } else if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
       log('Authentication required. Initializing auth...')
-      if (DEBUG) {
-        debugLog('Authentication error detected', {
-          errorCode: error instanceof OAuthError ? error.errorCode : undefined,
-          errorMessage: error.message,
-          stack: error.stack,
-        })
-      }
+      debugLog('Authentication error detected', {
+        errorCode: error instanceof OAuthError ? error.errorCode : undefined,
+        errorMessage: error.message,
+        stack: error.stack,
+      })
 
       // Initialize authentication on-demand
-      if (DEBUG) debugLog('Calling authInitializer to start auth flow')
+      debugLog('Calling authInitializer to start auth flow')
       const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
       if (skipBrowserAuth) {
@@ -308,49 +385,46 @@ export async function connectToRemoteServer(
       }
 
       // Wait for the authorization code from the callback
-      if (DEBUG) debugLog('Waiting for auth code from callback server')
+      debugLog('Waiting for auth code from callback server')
       const code = await waitForAuthCode()
-      if (DEBUG) debugLog('Received auth code from callback server')
+      debugLog('Received auth code from callback server')
 
       try {
         log('Completing authorization...')
         await transport.finishAuth(code)
-        if (DEBUG) debugLog('Authorization completed successfully')
+        debugLog('Authorization completed successfully')
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
           const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
           log(errorMessage)
-          if (DEBUG)
-            debugLog('Already attempted auth reconnection, giving up', {
-              recursionReasons: Array.from(recursionReasons),
-            })
+          debugLog('Already attempted auth reconnection, giving up', {
+            recursionReasons: Array.from(recursionReasons),
+          })
           throw new Error(errorMessage)
         }
 
         // Track this reason for recursion
         recursionReasons.add(REASON_AUTH_NEEDED)
         log(`Recursively reconnecting for reason: ${REASON_AUTH_NEEDED}`)
-        if (DEBUG) debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
+        debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
         return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
       } catch (authError: any) {
         log('Authorization error:', authError)
-        if (DEBUG)
-          debugLog('Authorization error during finishAuth', {
-            errorMessage: authError.message,
-            stack: authError.stack,
-          })
+        debugLog('Authorization error during finishAuth', {
+          errorMessage: authError.message,
+          stack: authError.stack,
+        })
         throw authError
       }
     } else {
       log('Connection error:', error)
-      if (DEBUG)
-        debugLog('Connection error', {
-          errorMessage: error.message,
-          stack: error.stack,
-          transportType: transport.constructor.name,
-        })
+      debugLog('Connection error', {
+        errorMessage: error.message,
+        stack: error.stack,
+        transportType: transport.constructor.name,
+      })
       throw error
     }
   }
@@ -391,7 +465,7 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     const longPollTimeout = setTimeout(() => {
       log('Long poll timeout reached, responding with 202')
       res.status(202).send('Authentication in progress')
-    }, 30000)
+    }, options.authTimeoutMs || 30000)
 
     // If auth completes while we're waiting, send the response immediately
     authCompletedPromise
@@ -534,7 +608,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   while (i < args.length) {
     if (args[i] === '--header' && i < args.length - 1) {
       const value = args[i + 1]
-      const match = value.match(/^([A-Za-z0-9_-]+):(.*)$/)
+      const match = value.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
       if (match) {
         headers[match[1]] = match[2]
       } else {
@@ -556,6 +630,13 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   if (debug) {
     DEBUG = true
     log('Debug mode enabled - detailed logs will be written to ~/.mcp-auth/')
+  }
+
+  const enableProxy = args.includes('--enable-proxy')
+  if (enableProxy) {
+    // Use env proxy
+    setGlobalDispatcher(new EnvHttpProxyAgent())
+    log('HTTP proxy support enabled - using system HTTP_PROXY/HTTPS_PROXY environment variables')
   }
 
   // Parse transport strategy
@@ -617,6 +698,34 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
+  // Parse ignored tools
+  const ignoredTools: string[] = []
+  let j = 0
+  while (j < args.length) {
+    if (args[j] === '--ignore-tool' && j < args.length - 1) {
+      const toolName = args[j + 1]
+      ignoredTools.push(toolName)
+      log(`Ignoring tool: ${toolName}`)
+      args.splice(j, 2)
+      // Do not increment j, as the array has shifted
+      continue
+    }
+    j++
+  }
+
+  // Parse auth timeout
+  let authTimeoutMs = 30000 // Default 30 seconds
+  const authTimeoutIndex = args.indexOf('--auth-timeout')
+  if (authTimeoutIndex !== -1 && authTimeoutIndex < args.length - 1) {
+    const timeoutSeconds = parseInt(args[authTimeoutIndex + 1], 10)
+    if (!isNaN(timeoutSeconds) && timeoutSeconds > 0) {
+      authTimeoutMs = timeoutSeconds * 1000
+      log(`Using auth callback timeout: ${timeoutSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid auth timeout value: ${args[authTimeoutIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -635,9 +744,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   // Set server hash globally for debug logging
   global.currentServerUrlHash = serverUrlHash
 
-  if (DEBUG) {
-    debugLog(`Starting mcp-remote with server URL: ${serverUrl}`)
-  }
+  debugLog(`Starting mcp-remote with server URL: ${serverUrl}`)
 
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
@@ -691,6 +798,8 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    ignoredTools,
+    authTimeoutMs,
   }
 }
 
@@ -721,4 +830,41 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
  */
 export function getServerUrlHash(serverUrl: string): string {
   return crypto.createHash('md5').update(serverUrl).digest('hex')
+}
+
+/**
+ * Converts a glob pattern to a regular expression
+ * @param pattern The glob pattern (e.g., "create*", "*account")
+ * @returns The corresponding regular expression
+ */
+function patternToRegex(pattern: string): RegExp {
+  // Split by asterisks, escape each part, then join with .*
+  const parts = pattern.split('*')
+  const escapedParts = parts.map((part) => part.replace(/\W/g, '\\$&'))
+  const regexPattern = escapedParts.join('.*')
+  // Match the entire string from start to end, case-insensitive
+  return new RegExp(`^${regexPattern}$`, 'i')
+}
+
+/**
+ * Determines if a tool name should be ignored based on ignore patterns
+ * @param ignorePatterns Array of patterns to ignore (supports wildcards with *)
+ * @param toolName The name of the tool to check
+ * @returns false if the tool should be ignored (matches a pattern), true if it should be included
+ */
+export function shouldIncludeTool(ignorePatterns: string[], toolName: string): boolean {
+  // If no patterns are provided, include all tools
+  if (!ignorePatterns || ignorePatterns.length === 0) {
+    return true
+  }
+
+  // Check if the tool name matches any ignore pattern
+  for (const pattern of ignorePatterns) {
+    const regex = patternToRegex(pattern)
+    if (regex.test(toolName)) {
+      return false // Tool matches an ignore pattern, so exclude it
+    }
+  }
+
+  return true // Tool doesn't match any ignore pattern, so include it
 }

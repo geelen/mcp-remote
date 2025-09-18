@@ -147,6 +147,49 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+* To enable an outbound HTTP(S) proxy for mcp-remote, add the `--enable-proxy` flag. When enabled, mcp-remote will use the proxy settings from common environment variables (for example `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`).
+
+```json
+    "args": [
+      "mcp-remote",
+      "https://remote.mcp.server/sse",
+      "--enable-proxy"
+    ],
+    "env": {
+      "HTTPS_PROXY": "http://127.0.0.1:3128",
+      "NO_PROXY": "localhost,127.0.0.1"
+    }
+```
+
+* To ignore specific tools from the remote server, add the `--ignore-tool` flag. This will filter out tools matching the specified patterns from both `tools/list` responses and block `tools/call` requests. Supports wildcard patterns with `*`.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--ignore-tool",
+        "delete*",
+        "--ignore-tool",
+        "remove*"
+      ]
+```
+
+You can specify multiple `--ignore-tool` flags to ignore different patterns. Examples:
+- `delete*` - ignores all tools starting with "delete" (e.g., `deleteTask`, `deleteUser`)
+- `*account` - ignores all tools ending with "account" (e.g., `getAccount`, `updateAccount`)
+- `exactTool` - ignores only the tool named exactly "exactTool"
+
+* To change the timeout for the OAuth callback (by default `30` seconds), add the `--auth-timeout` flag with a value in seconds. This is useful if the authentication process on the server side takes a long time.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--auth-timeout",
+        "60"
+      ]
+```
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.

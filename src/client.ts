@@ -36,6 +36,7 @@ async function runClient(
   host: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  authTimeoutMs: number,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -44,7 +45,7 @@ async function runClient(
   const serverUrlHash = getServerUrlHash(serverUrl)
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
@@ -159,9 +160,20 @@ async function runClient(
 
 // Parse command-line arguments and run the client
 parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://server-url> [callback-port] [--debug]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo }) => {
-    return runClient(serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo)
-  })
+  .then(
+    ({ serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo, authTimeoutMs }) => {
+      return runClient(
+        serverUrl,
+        callbackPort,
+        headers,
+        transportStrategy,
+        host,
+        staticOAuthClientMetadata,
+        staticOAuthClientInfo,
+        authTimeoutMs,
+      )
+    },
+  )
   .catch((error) => {
     console.error('Fatal error:', error)
     process.exit(1)
