@@ -418,6 +418,19 @@ describe('Feature: Command Line Arguments Parsing', () => {
 
     consoleSpy.mockRestore()
   })
+
+  it('Scenario: Suppresses LOG when using --silent', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--auth-timeout', '45', '--silent']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.authTimeoutMs).toBe(45000)
+    expect(consoleSpy).not.toHaveBeenCalled()
+
+    consoleSpy.mockRestore()
+  })
 })
 
 describe('Feature: Tool Filtering with Ignore Patterns', () => {
