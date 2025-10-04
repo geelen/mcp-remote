@@ -166,6 +166,16 @@ Each unique combination of server URL, resource, and custom headers will maintai
       ]
 ```
 
+* To suppress default logs, add the `--silent` flag. This will prevent logs from being emitted, except in the case where `--debug` is also passed.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--silent"
+      ]
+```
+
 * To enable an outbound HTTP(S) proxy for mcp-remote, add the `--enable-proxy` flag. When enabled, mcp-remote will use the proxy settings from common environment variables (for example `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`).
 
 ```json

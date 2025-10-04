@@ -764,7 +764,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log('Debug mode enabled - detailed logs will be written to ~/.mcp-auth/')
   }
 
-    // Check for silent flag
+  // Check for silent flag
   const silent = args.includes('--silent')
   if (silent) {
     SILENT = true
