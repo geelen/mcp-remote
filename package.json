@@ -10,6 +10,7 @@
     "oauth"
   ],
   "author": "Glen Maddern <glen@glenmaddern.com>",
+  "license": "MIT",
   "repository": "https://github.com/geelen/mcp-remote",
   "type": "module",
   "files": [
