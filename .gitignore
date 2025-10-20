@@ -1,3 +1,5 @@
 node_modules
 .mcp-cli
 dist
+.claude/
+*.log

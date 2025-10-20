@@ -435,7 +435,7 @@ export async function connectToRemoteServer(
  * @param options The server options
  * @returns An object with the server, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
+export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
   let authCode: string | null = null
   const app = express()
 
@@ -512,24 +512,31 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
-  })
+  // Wrap server.listen in a Promise to ensure it's listening before we return
+  return new Promise((resolve, reject) => {
+    const server = app.listen(options.port, () => {
+      log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+      
+      const waitForAuthCode = (): Promise<string> => {
+        return new Promise((resolve) => {
+          if (authCode) {
+            resolve(authCode)
+            return
+          }
 
-  const waitForAuthCode = (): Promise<string> => {
-    return new Promise((resolve) => {
-      if (authCode) {
-        resolve(authCode)
-        return
+          options.events.once('auth-code-received', (code) => {
+            resolve(code)
+          })
+        })
       }
 
-      options.events.once('auth-code-received', (code) => {
-        resolve(code)
-      })
+      // Resolve with the server and related functions once it's listening
+      resolve({ server, authCode, waitForAuthCode, authCompletedPromise })
     })
-  }
-
-  return { server, authCode, waitForAuthCode, authCompletedPromise }
+    
+    // Handle server errors
+    server.on('error', reject)
+  })
 }
 
 /**
@@ -537,8 +544,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
  * @param options The server options
  * @returns An object with the server, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
-  const { server, authCode, waitForAuthCode } = setupOAuthCallbackServerWithLongPoll(options)
+export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
+  const { server, authCode, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll(options)
   return { server, authCode, waitForAuthCode }
 }
 
