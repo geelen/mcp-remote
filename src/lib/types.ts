@@ -29,6 +29,8 @@ export interface OAuthProviderOptions {
   staticOAuthClientInfo?: StaticOAuthClientInformationFull
   /** Resource parameter to send to the authorization server */
   authorizeResource?: string
+  /** Pre-calculated server URL hash for cache isolation */
+  serverUrlHash: string
 }
 
 /**

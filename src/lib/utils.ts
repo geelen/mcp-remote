@@ -739,7 +739,8 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(usage)
     process.exit(1)
   }
-  const serverUrlHash = getServerUrlHash(serverUrl)
+  // Calculate hash with all parsed parameters for cache isolation
+  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers)
 
   // Set server hash globally for debug logging
   global.currentServerUrlHash = serverUrlHash
@@ -800,6 +801,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     authorizeResource,
     ignoredTools,
     authTimeoutMs,
+    serverUrlHash,
   }
 }
 
@@ -824,12 +826,24 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
 }
 
 /**
- * Generates a hash for the server URL to use in filenames
- * @param serverUrl The server URL to hash
- * @returns The hashed server URL
+ * Generates a hash for the server URL configuration
+ * Includes resource and headers to isolate OAuth sessions per unique
+ * server configuration (fixes #25: multi-instance support)
+ * @param serverUrl The server URL
+ * @param authorizeResource Optional resource parameter for OAuth
+ * @param headers Optional custom headers
+ * @returns MD5 hash of the configuration
  */
-export function getServerUrlHash(serverUrl: string): string {
-  return crypto.createHash('md5').update(serverUrl).digest('hex')
+export function getServerUrlHash(serverUrl: string, authorizeResource?: string, headers?: Record<string, string>): string {
+  // Include resource and headers in hash to isolate OAuth sessions
+  // per unique server configuration (fixes #25)
+  const parts = [serverUrl]
+  if (authorizeResource) parts.push(authorizeResource)
+  if (headers && Object.keys(headers).length > 0) {
+    const sortedKeys = Object.keys(headers).sort()
+    parts.push(JSON.stringify(headers, sortedKeys))
+  }
+  return crypto.createHash('md5').update(parts.join('|')).digest('hex')
 }
 
 /**

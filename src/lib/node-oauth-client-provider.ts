@@ -9,7 +9,7 @@ import {
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
-import { getServerUrlHash, log, debugLog, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 
@@ -34,7 +34,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param options Configuration options for the provider
    */
   constructor(readonly options: OAuthProviderOptions) {
-    this.serverUrlHash = getServerUrlHash(options.serverUrl)
+    this.serverUrlHash = options.serverUrlHash
     this.callbackPath = options.callbackPath || '/oauth/callback'
     this.clientName = options.clientName || 'MCP CLI Client'
     this.clientUri = options.clientUri || 'https://github.com/modelcontextprotocol/mcp-cli'
