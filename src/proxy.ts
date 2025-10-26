@@ -11,15 +11,7 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import {
-  connectToRemoteServer,
-  log,
-  mcpProxy,
-  parseCommandLineArgs,
-  setupSignalHandlers,
-  getServerUrlHash,
-  TransportStrategy,
-} from './lib/utils'
+import { connectToRemoteServer, log, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
@@ -38,12 +30,10 @@ async function runProxy(
   authorizeResource: string,
   ignoredTools: string[],
   authTimeoutMs: number,
+  serverUrlHash: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
-
-  // Get the server URL hash for lockfile operations
-  const serverUrlHash = getServerUrlHash(serverUrl)
 
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
@@ -57,6 +47,7 @@ async function runProxy(
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    serverUrlHash,
   })
 
   // Create the STDIO transport for local connections
@@ -160,6 +151,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       authorizeResource,
       ignoredTools,
       authTimeoutMs,
+      serverUrlHash,
     }) => {
       return runProxy(
         serverUrl,
@@ -172,6 +164,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         authorizeResource,
         ignoredTools,
         authTimeoutMs,
+        serverUrlHash,
       )
     },
   )

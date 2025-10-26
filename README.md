@@ -72,6 +72,37 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 },
 ```
 
+### Multiple Instances
+
+To run multiple instances of the same remote server with different configurations (e.g., different Atlassian tenants), use the `--resource` flag to isolate OAuth sessions:
+
+```json
+{
+  "mcpServers": {
+    "atlassian_tenant1": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.atlassian.com/v1/sse",
+        "--resource",
+        "https://tenant1.atlassian.net/"
+      ]
+    },
+    "atlassian_tenant2": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.atlassian.com/v1/sse",
+        "--resource",
+        "https://tenant2.atlassian.net/"
+      ]
+    }
+  }
+}
+```
+
+Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
+
 ### Flags
 
 * If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.

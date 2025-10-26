@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll } from './utils'
+import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
@@ -913,5 +913,43 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+})
+
+describe('Feature: Server URL Hash Generation', () => {
+  it('Scenario: Generate consistent hash for same config', () => {
+    const hash1 = getServerUrlHash('https://example.com', 'resource1', { Auth: 'token' })
+    const hash2 = getServerUrlHash('https://example.com', 'resource1', { Auth: 'token' })
+    expect(hash1).toBe(hash2)
+  })
+
+  it('Scenario: Generate different hash for different resources', () => {
+    const hash1 = getServerUrlHash('https://example.com', 'resource1')
+    const hash2 = getServerUrlHash('https://example.com', 'resource2')
+    expect(hash1).not.toBe(hash2)
+  })
+
+  it('Scenario: Generate different hash for different headers', () => {
+    const hash1 = getServerUrlHash('https://example.com', '', { Auth: 'token1' })
+    const hash2 = getServerUrlHash('https://example.com', '', { Auth: 'token2' })
+    expect(hash1).not.toBe(hash2)
+  })
+
+  it('Scenario: Handle header key ordering consistently', () => {
+    const hash1 = getServerUrlHash('https://example.com', '', { B: '2', A: '1' })
+    const hash2 = getServerUrlHash('https://example.com', '', { A: '1', B: '2' })
+    expect(hash1).toBe(hash2)
+  })
+
+  it('Scenario: Backward compatible with no resource or headers', () => {
+    const hash1 = getServerUrlHash('https://example.com')
+    const hash2 = getServerUrlHash('https://example.com', '', {})
+    expect(hash1).toBe(hash2)
+  })
+
+  it('Scenario: Empty string resource same as undefined', () => {
+    const hash1 = getServerUrlHash('https://example.com', '')
+    const hash2 = getServerUrlHash('https://example.com')
+    expect(hash1).toBe(hash2)
   })
 })

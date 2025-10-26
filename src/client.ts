@@ -13,15 +13,7 @@ import { EventEmitter } from 'events'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ListResourcesResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
-import {
-  parseCommandLineArgs,
-  setupSignalHandlers,
-  log,
-  MCP_REMOTE_VERSION,
-  getServerUrlHash,
-  connectToRemoteServer,
-  TransportStrategy,
-} from './lib/utils'
+import { parseCommandLineArgs, setupSignalHandlers, log, MCP_REMOTE_VERSION, connectToRemoteServer, TransportStrategy } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
@@ -37,12 +29,10 @@ async function runClient(
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
+  serverUrlHash: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
-
-  // Get the server URL hash for lockfile operations
-  const serverUrlHash = getServerUrlHash(serverUrl)
 
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
@@ -55,6 +45,7 @@ async function runClient(
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
+    serverUrlHash,
   })
 
   // Create the client
@@ -161,7 +152,17 @@ async function runClient(
 // Parse command-line arguments and run the client
 parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://server-url> [callback-port] [--debug]')
   .then(
-    ({ serverUrl, callbackPort, headers, transportStrategy, host, staticOAuthClientMetadata, staticOAuthClientInfo, authTimeoutMs }) => {
+    ({
+      serverUrl,
+      callbackPort,
+      headers,
+      transportStrategy,
+      host,
+      staticOAuthClientMetadata,
+      staticOAuthClientInfo,
+      authTimeoutMs,
+      serverUrlHash,
+    }) => {
       return runClient(
         serverUrl,
         callbackPort,
@@ -171,6 +172,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authTimeoutMs,
+        serverUrlHash,
       )
     },
   )
