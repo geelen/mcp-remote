@@ -31,20 +31,20 @@
     "test:unit:watch": "vitest"
   },
   "dependencies": {
-    "express": "^4.21.2",
-    "open": "^10.1.0",
-    "strict-url-sanitise": "^0.0.1",
-    "undici": "^7.12.0"
+    "express": "4.21.2",
+    "open": "10.1.0",
+    "strict-url-sanitise": "0.0.1",
+    "undici": "7.12.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.3",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.13.10",
-    "prettier": "^3.5.3",
-    "tsup": "^8.4.0",
-    "tsx": "^4.19.3",
-    "typescript": "^5.8.2",
-    "vitest": "^3.2.3"
+    "@modelcontextprotocol/sdk": "1.17.3",
+    "@types/express": "5.0.0",
+    "@types/node": "22.13.10",
+    "prettier": "3.5.3",
+    "tsup": "8.4.0",
+    "tsx": "4.19.3",
+    "typescript": "5.8.2",
+    "vitest": "3.2.3"
   },
   "tsup": {
     "entry": [
