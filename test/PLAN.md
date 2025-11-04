@@ -17,6 +17,7 @@ This document outlines the testing strategy for `mcp-remote`, a proxy and client
 ### Recommended: Simple Test Client with MCP SDK
 
 **Build a minimal test client using `@modelcontextprotocol/sdk`** that:
+
 - Spawns `mcp-remote` as a stdio subprocess (testing the real CLI)
 - Connects via `StdioClientTransport` (how real MCP clients use it)
 - Makes multiple requests in one session (tools/list, resources/list, prompts/list)
@@ -27,7 +28,7 @@ This tests the **actual user flow**: spawning the proxy via CLI and communicatin
 
 ### Why Not Existing Tools?
 
-- **client.ts**: Tests connecting *to* remote servers, not *invoking* mcp-remote as a CLI tool
+- **client.ts**: Tests connecting _to_ remote servers, not _invoking_ mcp-remote as a CLI tool
 - **MCP Inspector CLI**: Requires separate invocations per method (spawns process each time, unrealistic)
 - **fast-agent**: Requires Go, real inference provider (Groq), and API keys - too complex
 
@@ -59,12 +60,14 @@ This tests the **actual user flow**: spawning the proxy via CLI and communicatin
 To enable CI without secrets:
 
 1. **Hugging Face MCP Server** (`@huggingface/mcp-server`)
+
    - Public, no auth required
    - Provides tools for model/dataset search
    - SSE transport
    - Can be run locally via `npx`
 
 2. **Local Test Server** (custom)
+
    - Minimal Bun + `@hono/mcp` server
    - Controllable transport types (SSE-only, HTTP-only, both)
    - Controllable responses for error testing
@@ -80,6 +83,7 @@ To enable CI without secrets:
 Once basic tests pass:
 
 1. **OAuth Simulator** (custom, in-repo)
+
    - Minimal OAuth2 server for testing dynamic registration, token exchange, refresh
    - Controllable errors and timeouts
    - Runs locally in tests
@@ -146,7 +150,7 @@ test/e2e/
 ### Priority 1: Core Connectivity
 
 - [ ] **HTTP-first transport** connects to HTTP-only server
-- [ ] **SSE-first transport** connects to SSE-only server  
+- [ ] **SSE-first transport** connects to SSE-only server
 - [ ] **HTTP-first fallback** to SSE when HTTP unavailable
 - [ ] **SSE-first fallback** to HTTP when SSE unavailable
 - [ ] **Client mode** lists tools and resources successfully
@@ -207,12 +211,14 @@ test/e2e/
 ### Deliverables
 
 1. **Test Infrastructure**
+
    - [ ] Create `test/` directory structure
    - [ ] Add test script to package.json
    - [ ] Configure TypeScript for tests
    - [ ] Add test dependencies (vitest or node:test)
 
 2. **Minimal Test Server**
+
    - [ ] Implement local MCP server (Bun + @hono/mcp or Node.js)
    - [ ] Supports SSE and/or HTTP transports
    - [ ] Returns fixed tools/resources/prompts lists
@@ -221,6 +227,7 @@ test/e2e/
    - [ ] Start/stop from tests
 
 3. **Simple Test Client**
+
    - [ ] Spawns `mcp-remote` as subprocess with server URL
    - [ ] Connects via StdioClientTransport from MCP SDK
    - [ ] Requests tools/list, resources/list, prompts/list
@@ -228,6 +235,7 @@ test/e2e/
    - [ ] Handles cleanup (kill subprocess)
 
 4. **Basic E2E Test**
+
    - [ ] Build mcp-remote: `pnpm build`
    - [ ] Start local test server (get URL)
    - [ ] Spawn `node dist/proxy.js <url>` as stdio
@@ -257,6 +265,7 @@ test/e2e/
 ### Deliverables
 
 1. **OAuth Simulator**
+
    - [ ] Minimal OAuth2 server (registration, authorize, token, refresh endpoints)
    - [ ] Controllable errors and delays
    - [ ] In-process for fast tests
@@ -274,6 +283,7 @@ test/e2e/
 ### Deliverables
 
 1. **Full Test Matrix**
+
    - [ ] All CLI parsing scenarios
    - [ ] All transport fallback combinations
    - [ ] Multi-instance coordination
@@ -292,17 +302,20 @@ test/e2e/
 For comprehensive testing, we need servers that can:
 
 1. **Transport Variants**
+
    - SSE-only mode
-   - HTTP-only mode  
+   - HTTP-only mode
    - Both SSE and HTTP (for fallback testing)
 
 2. **Auth Variants**
+
    - No auth
    - OAuth with dynamic registration
    - OAuth with static client info
    - Auth errors (401, invalid tokens)
 
 3. **Response Control**
+
    - Fixed tools/resources lists
    - Error responses (500, schema violations)
    - Connection drops, timeouts
@@ -315,11 +328,11 @@ For comprehensive testing, we need servers that can:
 
 ### Known Public Servers (for reference)
 
-| Server | Transport | Auth | Tools | Use Case |
-|--------|-----------|------|-------|----------|
-| Hugging Face | SSE | None | Model/dataset search | Phase 1 basic connectivity |
-| Cloudflare | HTTP | None | Various | Phase 1 HTTP transport |
-| Example Server | SSE | OAuth? | Unknown | Phase 2 OAuth (needs investigation) |
+| Server         | Transport | Auth   | Tools                | Use Case                            |
+| -------------- | --------- | ------ | -------------------- | ----------------------------------- |
+| Hugging Face   | SSE       | None   | Model/dataset search | Phase 1 basic connectivity          |
+| Cloudflare     | HTTP      | None   | Various              | Phase 1 HTTP transport              |
+| Example Server | SSE       | OAuth? | Unknown              | Phase 2 OAuth (needs investigation) |
 
 ## Out of Scope (for now)
 
@@ -330,13 +343,59 @@ For comprehensive testing, we need servers that can:
 - Real TLS/VPN scenarios
 - Performance/load testing
 
-## Next Steps
+## Implemented
 
-1. ✅ Create test directory and plan (this document)
-2. Create minimal local test server
-3. Write first E2E test (client.ts → local server)
-4. Set up GitHub Actions workflow
-5. Incrementally add unit and integration tests
+### Phase 1a: Public Server E2E Tests (✅ Complete)
+
+- ✅ Test infrastructure with vitest in isolated test directory
+- ✅ Test utilities for creating MCP clients and verifying connections
+- ✅ Safe capability listing (tools/prompts/resources) with fallback handling
+- ✅ E2E tests connecting to Hugging Face and Cloudflare public servers
+- ✅ Build script integration (runs `pnpm build` before tests)
+- ✅ Concise test syntax using utils.ts helpers
+
+**Test Coverage:**
+
+- Hugging Face MCP server connection
+- Cloudflare MCP server connection
+- Tool listing with graceful handling of unsupported capabilities
+
+## Future Work
+
+### Phase 1b: Local Test Server
+
+1. Create minimal local test server
+
+   - Bun + @hono/mcp or Node.js implementation
+   - Controllable transport types (SSE-only, HTTP-only, both)
+   - Fixed tools/resources/prompts lists
+   - Start/stop programmatically
+   - Random port assignment
+
+2. Local server E2E tests
+   - Test transport fallback logic (SSE → HTTP, HTTP → SSE)
+   - Test proxy mode (STDIO bridge)
+   - Test message filtering (ignored tools, clientInfo rewrite)
+
+### Phase 2: GitHub Actions
+
+1. Set up CI workflow
+   - Run `pnpm build` and `pnpm test` in test directory
+   - Execute on PRs and main branch
+   - No secrets required (uses public servers)
+
+### Phase 3: OAuth Testing
+
+1. OAuth simulator implementation
+2. OAuth flow tests (DCR, token exchange, refresh)
+3. Multi-instance coordination tests
+
+### Phase 4: Comprehensive Coverage
+
+1. Unit tests (CLI parsing, utils, coordination)
+2. Integration tests (transport, proxy, multi-instance)
+3. Error injection and handling
+4. Full test matrix from Oracle analysis
 
 ## Notes
 
