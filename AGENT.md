@@ -5,8 +5,21 @@
 - **Build**: `pnpm build` (or `pnpm build:watch` for development)
 - **Type check**: `pnpm check` (runs prettier and tsc)
 - **Lint/Format**: `pnpm lint-fix` (prettier with write)
-- **Test**: `pnpm test:unit` (or `pnpm test:unit:watch` for watch mode)
+- **Test Unit**: `pnpm test:unit` (or `pnpm test:unit:watch` for watch mode)
+- **Test E2E**: `cd test && pnpm test` (or `pnpm test:watch` for watch mode)
 - **Run dev**: `npx tsx src/client.ts` or `npx tsx src/proxy.ts`
+
+## Pre-Commit Workflow
+
+**CRITICAL**: Always run these commands in order before committing and pushing:
+
+1. `pnpm lint-fix` - Format all files with Prettier
+2. `pnpm check` - Verify formatting and run TypeScript type checking
+3. `git add <files>` - Stage your changes
+4. `git commit -m "message"` - Commit with descriptive message
+5. `git push` - Push to remote
+
+**Never commit without running both `pnpm lint-fix` AND `pnpm check` first.**
 
 ## Architecture
 
