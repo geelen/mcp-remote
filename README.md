@@ -110,7 +110,7 @@ Each unique combination of server URL, resource, and custom headers will maintai
 ```json
       "command": "npx",
       "args": [
-        "-y"
+        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
       ]
