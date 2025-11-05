@@ -164,7 +164,7 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
@@ -198,7 +198,7 @@ export async function writeTextFile(serverUrlHash: string, filename: string, tex
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, text, 'utf-8')
+    await fs.writeFile(filePath, text, { encoding: 'utf-8', mode: 0o600 })
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
