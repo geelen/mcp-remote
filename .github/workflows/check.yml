@@ -26,3 +26,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Run E2E tests
+        run: cd test && pnpm install && pnpm test
