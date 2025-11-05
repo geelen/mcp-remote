@@ -32,6 +32,7 @@ export { MCP_REMOTE_VERSION }
 const pid = process.pid
 // Global debug flag
 export let DEBUG = false
+export let SILENT = false
 
 // Helper function for timestamp formatting
 function getTimestamp(): string {
@@ -72,8 +73,10 @@ export function debugLog(message: string, ...args: any[]) {
 }
 
 export function log(str: string, ...rest: unknown[]) {
-  // Using stderr so that it doesn't interfere with stdout
-  console.error(`[${pid}] ${str}`, ...rest)
+  if (!SILENT) {
+    // Using stderr so that it doesn't interfere with stdout
+    console.error(`[${pid}] ${str}`, ...rest)
+  }
 
   // If debug mode is on, also log to debug file
   debugLog(str, ...rest)
@@ -630,6 +633,13 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   if (debug) {
     DEBUG = true
     log('Debug mode enabled - detailed logs will be written to ~/.mcp-auth/')
+  }
+
+    // Check for silent flag
+  const silent = args.includes('--silent')
+  if (silent) {
+    SILENT = true
+    log('Silent mode enabled - stderr output will be suppressed, except when --debug is also enabled')
   }
 
   const enableProxy = args.includes('--enable-proxy')
