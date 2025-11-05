@@ -19,7 +19,7 @@ export async function createMCPClient(serverUrl: string, args: string[] = []): P
   const transport = new StdioClientTransport({
     command: 'node',
     args: [resolve(__dirname, '../dist/proxy.js'), serverUrl, ...args],
-    env: process.env,
+    env: process.env as Record<string, string>,
   })
 
   const client = new Client(
