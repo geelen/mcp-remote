@@ -1,26 +1,24 @@
-import { spawn } from 'child_process'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import type { ChildProcess } from 'child_process'
+import { ListToolsResultSchema, ListResourcesResultSchema, ListPromptsResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import { fileURLToPath } from 'url'
+import { dirname, resolve } from 'path'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
 export interface MCPClient {
   client: Client
-  process: ChildProcess
   cleanup: () => Promise<void>
 }
 
 /**
- * Spawns the mcp-remote client and connects via stdio
+ * Spawns the mcp-remote proxy and connects via stdio
  */
 export async function createMCPClient(serverUrl: string, args: string[] = []): Promise<MCPClient> {
-  const clientProcess = spawn('node', ['../dist/client.js', serverUrl, ...args], {
-    cwd: __dirname,
-    stdio: ['pipe', 'pipe', 'inherit'],
-  })
-
   const transport = new StdioClientTransport({
     command: 'node',
-    args: ['../dist/client.js', serverUrl, ...args],
+    args: [resolve(__dirname, '../dist/proxy.js'), serverUrl, ...args],
     env: process.env,
   })
 
@@ -42,10 +40,9 @@ export async function createMCPClient(serverUrl: string, args: string[] = []): P
     } catch (e) {
       // Ignore cleanup errors
     }
-    clientProcess.kill()
   }
 
-  return { client, process: clientProcess, cleanup }
+  return { client, cleanup }
 }
 
 /**
@@ -53,7 +50,7 @@ export async function createMCPClient(serverUrl: string, args: string[] = []): P
  */
 export async function listTools(client: Client) {
   try {
-    const response = await client.request({ method: 'tools/list' }, { timeout: 5000 })
+    const response = await client.request({ method: 'tools/list' }, ListToolsResultSchema)
     return response.tools || []
   } catch (err: any) {
     if (err.message?.includes('not supported') || err.code === -32601) {
@@ -68,7 +65,7 @@ export async function listTools(client: Client) {
  */
 export async function listPrompts(client: Client) {
   try {
-    const response = await client.request({ method: 'prompts/list' }, { timeout: 5000 })
+    const response = await client.request({ method: 'prompts/list' }, ListPromptsResultSchema)
     return response.prompts || []
   } catch (err: any) {
     if (err.message?.includes('not supported') || err.code === -32601) {
@@ -83,7 +80,7 @@ export async function listPrompts(client: Client) {
  */
 export async function listResources(client: Client) {
   try {
-    const response = await client.request({ method: 'resources/list' }, { timeout: 5000 })
+    const response = await client.request({ method: 'resources/list' }, ListResourcesResultSchema)
     return response.resources || []
   } catch (err: any) {
     if (err.message?.includes('not supported') || err.code === -32601) {

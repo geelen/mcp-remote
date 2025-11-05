@@ -18,8 +18,8 @@ describe('MCP Remote E2E', () => {
     expect(result.hasTools || result.hasResources || result.hasPrompts).toBe(true)
   }, 30000)
 
-  it('connects to Cloudflare MCP server', async () => {
-    client = await createMCPClient('https://mcp.cloudflare.com')
+  it('connects to Cloudflare docs MCP server', async () => {
+    client = await createMCPClient('https://docs.mcp.cloudflare.com/mcp')
     const result = await verifyConnection(client.client)
     expect(result.hasTools || result.hasResources || result.hasPrompts).toBe(true)
   }, 30000)
