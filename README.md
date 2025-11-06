@@ -24,7 +24,7 @@ All the most popular MCP clients (Claude Desktop, Cursor & Windsurf) use the fol
     "remote-example": {
       "command": "npx",
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse"
       ]
     }
@@ -42,7 +42,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
     "remote-example": {
       "command": "npx",
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "--header",
         "Authorization: Bearer ${AUTH_TOKEN}"
@@ -61,7 +61,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 {
   // rest of config...
   "args": [
-    "mcp-remote",
+    "@trayio/mcp-remote",
     "https://remote.mcp.server/sse",
     "--header",
     "Authorization:${AUTH_HEADER}" // note no spaces around ':'
@@ -74,41 +74,41 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 
 ### Flags
 
-* If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.
+* If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `@trayio/mcp-remote` package.
 
 ```json
       "command": "npx",
       "args": [
         "-y"
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse"
       ]
 ```
 
-* To force `npx` to always check for an updated version of `mcp-remote`, add the `@latest` flag:
+* To force `npx` to always check for an updated version of `@trayio/mcp-remote`, add the `@latest` flag:
 
 ```json
       "args": [
-        "mcp-remote@latest",
+        "@trayio/mcp-remote@latest",
         "https://remote.mcp.server/sse"
       ]
 ```
 
-* To change which port `mcp-remote` listens for an OAuth redirect (by default `3334`), add an additional argument after the server URL. Note that whatever port you specify, if it is unavailable an open port will be chosen at random.
+* To change which port `@trayio/mcp-remote` listens for an OAuth redirect (by default `3334`), add an additional argument after the server URL. Note that whatever port you specify, if it is unavailable an open port will be chosen at random.
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "9696"
       ]
 ```
 
-* To change which host `mcp-remote` registers as the OAuth callback URL (by default `localhost`), add the `--host` flag.
+* To change which host `@trayio/mcp-remote` registers as the OAuth callback URL (by default `localhost`), add the `--host` flag.
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "--host",
         "127.0.0.1"
@@ -119,7 +119,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "http://internal-service.vpc/sse",
         "--allow-http"
       ]
@@ -129,17 +129,17 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "--debug"
       ]
 ```
 
-* To enable an outbound HTTP(S) proxy for mcp-remote, add the `--enable-proxy` flag. When enabled, mcp-remote will use the proxy settings from common environment variables (for example `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`).
+* To enable an outbound HTTP(S) proxy for @trayio/mcp-remote, add the `--enable-proxy` flag. When enabled, @trayio/mcp-remote will use the proxy settings from common environment variables (for example `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`).
 
 ```json
     "args": [
-      "mcp-remote",
+      "@trayio/mcp-remote",
       "https://remote.mcp.server/sse",
       "--enable-proxy"
     ],
@@ -153,7 +153,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "--ignore-tool",
         "delete*",
@@ -171,7 +171,7 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
 
 ```json
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse",
         "--auth-timeout",
         "60"
@@ -185,7 +185,7 @@ MCP Remote supports different transport strategies when connecting to an MCP ser
 Specify the transport strategy with the `--transport` flag:
 
 ```bash
-npx mcp-remote https://example.remote/server --transport sse-only
+npx @trayio/mcp-remote https://example.remote/server --transport sse-only
 ```
 
 **Available Strategies:**
@@ -197,15 +197,15 @@ npx mcp-remote https://example.remote/server --transport sse-only
 
 ### Static OAuth Client Metadata
 
-MCP Remote supports providing static OAuth client metadata instead of using the mcp-remote defaults.
+MCP Remote supports providing static OAuth client metadata instead of using the @trayio/mcp-remote defaults.
 This is useful when connecting to OAuth servers that expect specific client/software IDs or scopes.
 
 Provide the client metadata as a JSON string or as a `@` prefixed filepath with the `--static-oauth-client-metadata` flag:
 
 ```bash
-npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "scope": "space separated scopes" }'
+npx @trayio/mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "scope": "space separated scopes" }'
 # uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
-npx mcp-remote https://example.remote/server --static-oauth-client-metadata '@/Users/username/Library/Application Support/Claude/oauth_client_metadata.json'
+npx @trayio/mcp-remote https://example.remote/server --static-oauth-client-metadata '@/Users/username/Library/Application Support/Claude/oauth_client_metadata.json'
 ```
 
 ### Static OAuth Client Information
@@ -221,9 +221,9 @@ Provide the client metadata as a JSON string or as a `@` prefixed filepath with 
 ```bash
 export MCP_REMOTE_CLIENT_ID=xxx
 export MCP_REMOTE_CLIENT_SECRET=yyy
-npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"client_id\": \"$MCP_REMOTE_CLIENT_ID\", \"client_secret\": \"$MCP_REMOTE_CLIENT_SECRET\" }"
+npx @trayio/mcp-remote https://example.remote/server --static-oauth-client-info "{ \"client_id\": \"$MCP_REMOTE_CLIENT_ID\", \"client_secret\": \"$MCP_REMOTE_CLIENT_SECRET\" }"
 # uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
-npx mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
+npx @trayio/mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
 ```
 
 ### Claude Desktop
@@ -303,7 +303,7 @@ this might look like:
     "remote-example": {
       "command": "npx",
       "args": [
-        "mcp-remote",
+        "@trayio/mcp-remote",
         "https://remote.mcp.server/sse"
       ],
       "env": {
@@ -329,7 +329,7 @@ For troubleshooting complex issues, especially with token refreshing or authenti
 
 ```json
 "args": [
-  "mcp-remote",
+  "@trayio/mcp-remote",
   "https://remote.mcp.server/sse",
   "--debug"
 ]
@@ -353,7 +353,7 @@ You can run `rm -rf ~/.mcp-auth` to clear any locally stored state and tokens.
 Run the following on the command line (not from an MCP server):
 
 ```shell
-npx -p mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
+npx -p @trayio/mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
 ```
 
 This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Try this after running `rm -rf ~/.mcp-auth` to see if stale credentials are your problem, otherwise hopefully the issue will be more obvious in these logs than those in your MCP client.
