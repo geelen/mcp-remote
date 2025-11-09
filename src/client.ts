@@ -13,9 +13,18 @@ import { EventEmitter } from 'events'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ListResourcesResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
-import { parseCommandLineArgs, setupSignalHandlers, log, MCP_REMOTE_VERSION, connectToRemoteServer, TransportStrategy } from './lib/utils'
+import {
+  parseCommandLineArgs,
+  setupSignalHandlers,
+  log,
+  MCP_REMOTE_VERSION,
+  connectToRemoteServer,
+  TransportStrategy,
+  AutoRefreshOptions,
+} from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { TokenRefreshManager } from './lib/token-refresh-manager'
 
 /**
  * Main function to run the client
@@ -30,6 +39,7 @@ async function runClient(
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
   serverUrlHash: string,
+  autoRefresh: AutoRefreshOptions,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -47,6 +57,14 @@ async function runClient(
     staticOAuthClientInfo,
     serverUrlHash,
   })
+
+  const refreshManager = new TokenRefreshManager({
+    enabled: autoRefresh.enabled,
+    intervalMs: autoRefresh.intervalMs,
+    leadTimeMs: autoRefresh.leadTimeMs,
+    failureBackoffMs: autoRefresh.backoffMs,
+  })
+  refreshManager.start()
 
   // Create the client
   const client = new Client(
@@ -103,6 +121,7 @@ async function runClient(
 
     // Set up cleanup handler
     const cleanup = async () => {
+      refreshManager.stop()
       log('\nClosing connection...')
       await client.close()
       // If auth was initialized and server was created, close it
@@ -134,6 +153,7 @@ async function runClient(
 
     // log('Listening for messages. Press Ctrl+C to exit.')
     log('Exiting OK...')
+    refreshManager.stop()
     // Only close the server if it was initialized
     if (server) {
       server.close()
@@ -141,6 +161,7 @@ async function runClient(
     process.exit(0)
   } catch (error) {
     log('Fatal error:', error)
+    refreshManager.stop()
     // Only close the server if it was initialized
     if (server) {
       server.close()
@@ -162,6 +183,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
       staticOAuthClientInfo,
       authTimeoutMs,
       serverUrlHash,
+      autoRefresh,
     }) => {
       return runClient(
         serverUrl,
@@ -173,6 +195,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
         staticOAuthClientInfo,
         authTimeoutMs,
         serverUrlHash,
+        autoRefresh,
       )
     },
   )
