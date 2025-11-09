@@ -209,6 +209,27 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* To automatically refresh access tokens before they expire, use the auto-refresh flags:
+  * `--enable-auto-refresh` / `--disable-auto-refresh` – turn the background refresher on or off (enabled by default for both the proxy and the CLI so they keep working in the background, opt out when you explicitly need to disable it).
+  * `--refresh-lead <seconds>` – how early to refresh before expiry (default `600`, i.e. 10 minutes).
+  * `--refresh-interval <seconds>` – how often to scan stored tokens (default `60`).
+  * `--refresh-backoff <seconds>` – how long to wait before retrying after a failure (default `300`).
+
+
+```json
+  "args": [
+    "mcp-remote",
+    "https://remote.mcp.server/sse",
+    "--enable-auto-refresh",
+    "--refresh-lead",
+    "300",
+    "--refresh-interval",
+    "30"
+  ]
+```
+
+The refresher scans all OAuth sessions stored under `~/.mcp-auth`, renews access tokens using their refresh tokens, and logs the outcome so long-running hosts keep working without forcing a browser re-auth.
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.

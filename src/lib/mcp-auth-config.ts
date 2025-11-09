@@ -2,6 +2,7 @@ import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
 import { log, MCP_REMOTE_VERSION } from './utils'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 
 /**
  * MCP Remote Authentication Configuration
@@ -17,6 +18,11 @@ import { log, MCP_REMOTE_VERSION } from './utils'
  *   - Format: OAuthClientInformation object with client_id and other registration details
  * - {server_hash}_tokens.json: Contains OAuth access and refresh tokens
  *   - Format: OAuthTokens object with access_token, refresh_token, and expiration information
+ * - {server_hash}_token_state.json: Derived metadata such as issuedAt/expiresAt and refresh attempt status
+ *   - Format: TokenState object maintained by the auto-refresh feature
+ * - {server_hash}_server.json: Registration metadata (server URL, callback host/port, static client info)
+ *   - Used by background processes like the token refresh manager to reconstruct providers
+ * - {server_hash}_refresh_lock.json: Lightweight lock file ensuring only one process refreshes tokens at a time
  * - {server_hash}_code_verifier.txt: Contains the PKCE code verifier for the current OAuth flow
  *   - Format: Plain text string used for PKCE verification
  *
@@ -30,6 +36,91 @@ export interface LockfileData {
   pid: number
   port: number
   timestamp: number
+}
+
+/**
+ * Tracks derived token metadata so we know when tokens were issued/expires and the status of
+ * the most recent refresh attempt.
+ */
+export interface TokenState {
+  issuedAt: number
+  expiresAt?: number
+  lastRefreshAttempt?: number
+  lastRefreshError?: string
+}
+
+/**
+ * Persistent registration details for a specific server configuration. Stored in `{hash}_server.json`
+ * so background tasks (like the refresh manager) know how to reconstruct the OAuth client provider.
+ */
+export interface ServerRegistration {
+  serverUrl: string
+  host: string
+  callbackPort?: number
+  authorizeResource?: string
+  staticOAuthClientMetadata?: StaticOAuthClientMetadata
+  staticOAuthClientInfo?: StaticOAuthClientInformationFull
+}
+
+/**
+ * Representation of the refresh lock file, ensuring only one process attempts a token refresh at a time.
+ */
+export interface RefreshLockData {
+  pid: number
+  expiresAt: number
+}
+
+/**
+ * Zod-like schema used to validate persisted token state objects.
+ */
+const tokenStateSchema = {
+  async parseAsync(data: any) {
+    if (typeof data !== 'object' || data === null) return undefined
+    if (typeof data.issuedAt !== 'number') return undefined
+
+    const state: TokenState = {
+      issuedAt: data.issuedAt,
+      expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : undefined,
+      lastRefreshAttempt: typeof data.lastRefreshAttempt === 'number' ? data.lastRefreshAttempt : undefined,
+      lastRefreshError: typeof data.lastRefreshError === 'string' ? data.lastRefreshError : undefined,
+    }
+
+    return state
+  },
+}
+
+/**
+ * Schema for validating stored server registration payloads.
+ */
+const serverRegistrationSchema = {
+  async parseAsync(data: any) {
+    if (typeof data !== 'object' || data === null) return undefined
+    if (typeof data.serverUrl !== 'string' || typeof data.host !== 'string') {
+      return undefined
+    }
+
+    const registration: ServerRegistration = {
+      serverUrl: data.serverUrl,
+      host: data.host,
+      callbackPort: typeof data.callbackPort === 'number' ? data.callbackPort : undefined,
+      authorizeResource: typeof data.authorizeResource === 'string' ? data.authorizeResource : undefined,
+      staticOAuthClientMetadata: data.staticOAuthClientMetadata,
+      staticOAuthClientInfo: data.staticOAuthClientInfo,
+    }
+
+    return registration
+  },
+}
+
+/**
+ * Schema for validating refresh lock files.
+ */
+const refreshLockSchema = {
+  async parseAsync(data: any) {
+    if (typeof data !== 'object' || data === null) return undefined
+    if (typeof data.pid !== 'number' || typeof data.expiresAt !== 'number') return undefined
+    return data as RefreshLockData
+  },
 }
 
 /**
@@ -75,6 +166,45 @@ export async function checkLockfile(serverUrlHash: string): Promise<LockfileData
  */
 export async function deleteLockfile(serverUrlHash: string): Promise<void> {
   await deleteConfigFile(serverUrlHash, 'lock.json')
+}
+
+/**
+ * Saves persistent information about a registered server
+ * @param serverUrlHash The hash identifying the server configuration
+ * @param registration The registration metadata to store
+ */
+export async function saveServerRegistration(serverUrlHash: string, registration: ServerRegistration): Promise<void> {
+  await writeJsonFile(serverUrlHash, 'server.json', registration)
+}
+
+/**
+ * Reads server registration data if available
+ * @param serverUrlHash The hash identifying the server configuration
+ * @returns The stored registration metadata, if present
+ */
+export async function readServerRegistration(serverUrlHash: string): Promise<ServerRegistration | undefined> {
+  return await readJsonFile<ServerRegistration>(serverUrlHash, 'server.json', serverRegistrationSchema)
+}
+
+/**
+ * Lists server hashes that currently have token files on disk
+ * @returns An array of server hashes with stored tokens
+ */
+export async function listServerHashesWithTokens(): Promise<string[]> {
+  try {
+    const configDir = getConfigDir()
+    const entries = await fs.readdir(configDir)
+
+    return entries
+      .filter((filename) => filename.endsWith('_tokens.json'))
+      .map((filename) => filename.replace(/_tokens\.json$/, ''))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
+    log('Error listing stored tokens:', error)
+    return []
+  }
 }
 
 /**
@@ -172,6 +302,31 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
 }
 
 /**
+ * Writes token metadata for a server (e.g., issued/expiry timestamps)
+ * @param serverUrlHash The hash identifying the server configuration
+ * @param state The token state fields to persist/merge
+ */
+export async function writeTokenState(serverUrlHash: string, state: Partial<TokenState>): Promise<void> {
+  const current = await readTokenState(serverUrlHash)
+  const nextState: TokenState = {
+    issuedAt: state.issuedAt ?? current?.issuedAt ?? Date.now(),
+    expiresAt: state.expiresAt ?? current?.expiresAt,
+    lastRefreshAttempt: state.lastRefreshAttempt ?? current?.lastRefreshAttempt,
+    lastRefreshError: state.lastRefreshError ?? current?.lastRefreshError,
+  }
+  await writeJsonFile(serverUrlHash, 'token_state.json', nextState)
+}
+
+/**
+ * Reads token metadata for a server
+ * @param serverUrlHash The hash identifying the server configuration
+ * @returns The stored token state, if available
+ */
+export async function readTokenState(serverUrlHash: string): Promise<TokenState | undefined> {
+  return await readJsonFile<TokenState>(serverUrlHash, 'token_state.json', tokenStateSchema)
+}
+
+/**
  * Reads a text file
  * @param serverUrlHash The hash of the server URL
  * @param filename The name of the file to read
@@ -203,4 +358,34 @@ export async function writeTextFile(serverUrlHash: string, filename: string, tex
     log(`Error writing ${filename}:`, error)
     throw error
   }
+}
+
+/**
+ * Attempts to acquire a refresh lock for a server. Returns true if acquired.
+ * @param serverUrlHash The hash identifying the server configuration
+ * @param ttlMs The duration in milliseconds before the lock expires automatically
+ */
+export async function tryAcquireRefreshLock(serverUrlHash: string, ttlMs: number): Promise<boolean> {
+  const existingLock = await readJsonFile<RefreshLockData>(serverUrlHash, 'refresh_lock.json', refreshLockSchema)
+  const now = Date.now()
+
+  if (existingLock && existingLock.expiresAt > now && existingLock.pid !== process.pid) {
+    return false
+  }
+
+  const newLock: RefreshLockData = {
+    pid: process.pid,
+    expiresAt: now + ttlMs,
+  }
+
+  await writeJsonFile(serverUrlHash, 'refresh_lock.json', newLock)
+  return true
+}
+
+/**
+ * Releases the refresh lock for a server
+ * @param serverUrlHash The hash identifying the server configuration
+ */
+export async function releaseRefreshLock(serverUrlHash: string): Promise<void> {
+  await deleteConfigFile(serverUrlHash, 'refresh_lock.json')
 }

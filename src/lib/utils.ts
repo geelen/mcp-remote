@@ -6,7 +6,7 @@ import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
-import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import { getConfigDir, getConfigFilePath, readJsonFile, saveServerRegistration } from './mcp-auth-config'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
@@ -596,12 +596,39 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
 }
 
 /**
+ * Normalized token refresh configuration returned from CLI parsing. We keep this separate from
+ * `parseCommandLineArgs`' internal state so the caller (client/proxy entrypoint) can pass the values
+ * directly into `TokenRefreshManager` without knowing the individual CLI flag names.
+ */
+export interface AutoRefreshOptions {
+  enabled: boolean
+  intervalMs: number
+  leadTimeMs: number
+  backoffMs: number
+}
+
+/**
+ * Optional knobs that control how `parseCommandLineArgs` behaves depending on the binary that calls it.
+ * We expose this as a typed interface instead of hard-coding defaults inside the function so both
+ * `client.ts` and `proxy.ts` can choose different default behaviors (e.g., opt-out vs. opt-in refresh)
+ * while still sharing the same parser implementation.
+ */
+export interface ParseCommandLineArgsOptions {
+  
+  /**
+   * Whether background token refresh should be enabled by default.
+   * Defaults to true.
+   */
+  defaultAutoRefreshEnabled?: boolean
+}
+
+/**
  * Parses command line arguments for MCP clients and proxies
  * @param args Command line arguments
  * @param usage Usage message to show on error
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
-export async function parseCommandLineArgs(args: string[], usage: string) {
+export async function parseCommandLineArgs(args: string[], usage: string, defaults: ParseCommandLineArgsOptions = {}) {
   // Process headers
   const headers: Record<string, string> = {}
   let i = 0
@@ -624,6 +651,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const serverUrl = args[0]
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
   const allowHttp = args.includes('--allow-http')
+
+  let enableAutoRefresh = defaults.defaultAutoRefreshEnabled ?? true
+  if (args.includes('--enable-auto-refresh')) {
+    enableAutoRefresh = true
+  }
+  if (args.includes('--disable-auto-refresh')) {
+    enableAutoRefresh = false
+  }
 
   // Check for debug flag
   const debug = args.includes('--debug')
@@ -726,6 +761,42 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  let refreshLeadMs = 10 * 60 * 1000
+  const refreshLeadIndex = args.indexOf('--refresh-lead')
+  if (refreshLeadIndex !== -1 && refreshLeadIndex < args.length - 1) {
+    const leadSeconds = parseInt(args[refreshLeadIndex + 1], 10)
+    if (!isNaN(leadSeconds) && leadSeconds > 0) {
+      refreshLeadMs = leadSeconds * 1000
+      log(`Using token refresh lead time: ${leadSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid refresh lead value: ${args[refreshLeadIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let refreshIntervalMs = 60 * 1000
+  const refreshIntervalIndex = args.indexOf('--refresh-interval')
+  if (refreshIntervalIndex !== -1 && refreshIntervalIndex < args.length - 1) {
+    const intervalSeconds = parseInt(args[refreshIntervalIndex + 1], 10)
+    if (!isNaN(intervalSeconds) && intervalSeconds > 0) {
+      refreshIntervalMs = intervalSeconds * 1000
+      log(`Using token refresh interval: ${intervalSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid refresh interval value: ${args[refreshIntervalIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let refreshBackoffMs = 5 * 60 * 1000
+  const refreshBackoffIndex = args.indexOf('--refresh-backoff')
+  if (refreshBackoffIndex !== -1 && refreshBackoffIndex < args.length - 1) {
+    const backoffSeconds = parseInt(args[refreshBackoffIndex + 1], 10)
+    if (!isNaN(backoffSeconds) && backoffSeconds > 0) {
+      refreshBackoffMs = backoffSeconds * 1000
+      log(`Using token refresh backoff: ${backoffSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid refresh backoff value: ${args[refreshBackoffIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -789,6 +860,19 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     })
   }
 
+  try {
+    await saveServerRegistration(serverUrlHash, {
+      serverUrl,
+      host,
+      callbackPort,
+      authorizeResource: authorizeResource || undefined,
+      staticOAuthClientMetadata,
+      staticOAuthClientInfo,
+    })
+  } catch (error) {
+    log('Warning: Unable to persist server registration data:', error)
+  }
+
   return {
     serverUrl,
     callbackPort,
@@ -802,6 +886,12 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    autoRefresh: {
+      enabled: enableAutoRefresh,
+      intervalMs: refreshIntervalMs,
+      leadTimeMs: refreshLeadMs,
+      backoffMs: refreshBackoffMs,
+    } satisfies AutoRefreshOptions,
   }
 }
 

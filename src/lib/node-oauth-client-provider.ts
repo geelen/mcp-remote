@@ -7,7 +7,7 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
+import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, writeTokenState } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -28,6 +28,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
   private _state: string
+  addClientAuthentication?: OAuthClientProvider['addClientAuthentication']
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -157,6 +158,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     })
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+
+    const issuedAt = Date.now()
+    const expiresAt = typeof tokens.expires_in === 'number' ? issuedAt + tokens.expires_in * 1000 : undefined
+    await writeTokenState(this.serverUrlHash, {
+      issuedAt,
+      expiresAt,
+    })
   }
 
   /**
@@ -213,6 +221,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'token_state.json'),
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
         ])
         debugLog('All credentials invalidated')
@@ -224,7 +233,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'tokens':
-        await deleteConfigFile(this.serverUrlHash, 'tokens.json')
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'token_state.json'),
+        ])
         debugLog('OAuth tokens invalidated')
         break
 

@@ -11,10 +11,19 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { connectToRemoteServer, log, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy } from './lib/utils'
+import {
+  connectToRemoteServer,
+  log,
+  mcpProxy,
+  parseCommandLineArgs,
+  setupSignalHandlers,
+  TransportStrategy,
+  AutoRefreshOptions,
+} from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { TokenRefreshManager } from './lib/token-refresh-manager'
 
 /**
  * Main function to run the proxy
@@ -31,6 +40,7 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  autoRefresh: AutoRefreshOptions,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -49,6 +59,14 @@ async function runProxy(
     authorizeResource,
     serverUrlHash,
   })
+
+  const refreshManager = new TokenRefreshManager({
+    enabled: autoRefresh.enabled,
+    intervalMs: autoRefresh.intervalMs,
+    leadTimeMs: autoRefresh.leadTimeMs,
+    failureBackoffMs: autoRefresh.backoffMs,
+  })
+  refreshManager.start()
 
   // Create the STDIO transport for local connections
   const localTransport = new StdioServerTransport()
@@ -96,6 +114,7 @@ async function runProxy(
 
     // Setup cleanup handler
     const cleanup = async () => {
+      refreshManager.stop()
       await remoteTransport.close()
       await localTransport.close()
       // Only close the server if it was initialized
@@ -106,6 +125,7 @@ async function runProxy(
     setupSignalHandlers(cleanup)
   } catch (error) {
     log('Fatal error:', error)
+    refreshManager.stop()
     if (error instanceof Error && error.message.includes('self-signed certificate in certificate chain')) {
       log(`You may be behind a VPN!
 
@@ -152,6 +172,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      autoRefresh,
     }) => {
       return runProxy(
         serverUrl,
@@ -165,6 +186,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        autoRefresh,
       )
     },
   )
