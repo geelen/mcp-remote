@@ -27,8 +27,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
-  private _scopes: string | undefined
   private _state: string
+  private _clientInfo: OAuthClientInformationFull | undefined
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -44,8 +44,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this.authorizeResource = options.authorizeResource
-    this._scopes = undefined
     this._state = randomUUID()
+    this._clientInfo = undefined
   }
 
   get redirectUrl(): string {
@@ -76,17 +76,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (this.staticOAuthClientMetadata?.scope) {
       return this.staticOAuthClientMetadata.scope
     }
-    if (this._scopes) {
-      return this._scopes
+    if (this._clientInfo?.scope) {
+      return this._clientInfo.scope
     }
-    return 'openid email profile'
-  }
-
-  private extractScopesFromRegistration(clientInfo: any): string {
-    if (clientInfo.scope) return clientInfo.scope
-    if (clientInfo.default_scope) return clientInfo.default_scope
-    if (Array.isArray(clientInfo.scopes)) return clientInfo.scopes.join(' ')
-    if (Array.isArray(clientInfo.default_scopes)) return clientInfo.default_scopes.join(' ')
     return 'openid email profile'
   }
 
@@ -98,6 +90,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Reading client info')
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
+      this._clientInfo = this.staticOAuthClientInfo
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -106,14 +99,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       OAuthClientInformationFullSchema,
     )
 
-    if (clientInfo && !this.staticOAuthClientMetadata?.scope) {
-      const scopesData = await readJsonFile<{ scopes: string }>(this.serverUrlHash, 'scopes.json', {
-        parseAsync: async (data: any) => data,
-      })
-      if (scopesData?.scopes) {
-        this._scopes = scopesData.scopes
-        debugLog('Loaded stored scopes from registration', { scopes: this._scopes })
-      }
+    if (clientInfo) {
+      this._clientInfo = clientInfo
     }
 
     debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
@@ -126,14 +113,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
     debugLog('Saving client info', { client_id: clientInformation.client_id })
-
-    if (!this.staticOAuthClientMetadata?.scope) {
-      const scopes = this.extractScopesFromRegistration(clientInformation as any)
-      debugLog('Extracted scopes from registration response', { scopes })
-      this._scopes = scopes
-      await writeJsonFile(this.serverUrlHash, 'scopes.json', { scopes })
-    }
-
+    this._clientInfo = clientInformation
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -259,15 +239,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
-          deleteConfigFile(this.serverUrlHash, 'scopes.json'),
         ])
-        this._scopes = undefined
+        this._clientInfo = undefined
         debugLog('All credentials invalidated')
         break
 
       case 'client':
-        await Promise.all([deleteConfigFile(this.serverUrlHash, 'client_info.json'), deleteConfigFile(this.serverUrlHash, 'scopes.json')])
-        this._scopes = undefined
+        await deleteConfigFile(this.serverUrlHash, 'client_info.json')
+        this._clientInfo = undefined
         debugLog('Client information invalidated')
         break
 
