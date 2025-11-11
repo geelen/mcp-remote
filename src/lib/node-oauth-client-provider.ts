@@ -28,6 +28,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
   private _state: string
+  private _clientInfo: OAuthClientInformationFull | undefined
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -44,6 +45,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this.authorizeResource = options.authorizeResource
     this._state = randomUUID()
+    this._clientInfo = undefined
   }
 
   get redirectUrl(): string {
@@ -51,6 +53,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get clientMetadata() {
+    const effectiveScope = this.getEffectiveScope()
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: 'none',
@@ -60,12 +63,23 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
+      scope: effectiveScope,
       ...this.staticOAuthClientMetadata,
     }
   }
 
   state(): string {
     return this._state
+  }
+
+  private getEffectiveScope(): string {
+    if (this.staticOAuthClientMetadata?.scope) {
+      return this.staticOAuthClientMetadata.scope
+    }
+    if (this._clientInfo?.scope) {
+      return this._clientInfo.scope
+    }
+    return 'openid email profile'
   }
 
   /**
@@ -76,6 +90,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Reading client info')
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
+      this._clientInfo = this.staticOAuthClientInfo
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -83,6 +98,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       'client_info.json',
       OAuthClientInformationFullSchema,
     )
+
+    if (clientInfo) {
+      this._clientInfo = clientInfo
+    }
+
     debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
     return clientInfo
   }
@@ -93,6 +113,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
     debugLog('Saving client info', { client_id: clientInformation.client_id })
+    this._clientInfo = clientInformation
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -168,6 +189,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       authorizationUrl.searchParams.set('resource', this.authorizeResource)
     }
 
+    const effectiveScope = this.getEffectiveScope()
+    authorizationUrl.searchParams.set('scope', effectiveScope)
+    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
@@ -215,11 +240,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
         ])
+        this._clientInfo = undefined
         debugLog('All credentials invalidated')
         break
 
       case 'client':
         await deleteConfigFile(this.serverUrlHash, 'client_info.json')
+        this._clientInfo = undefined
         debugLog('Client information invalidated')
         break
 
