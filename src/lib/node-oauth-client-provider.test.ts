@@ -23,6 +23,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     serverUrl: 'https://example.com',
     callbackPort: 8080,
     host: 'localhost',
+    serverUrlHash: 'test-hash',
   }
 
   beforeEach(() => {
