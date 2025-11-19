@@ -13,9 +13,18 @@ import { EventEmitter } from 'events'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ListResourcesResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
-import { parseCommandLineArgs, setupSignalHandlers, log, MCP_REMOTE_VERSION, connectToRemoteServer, TransportStrategy } from './lib/utils'
+import {
+  parseCommandLineArgs,
+  setupSignalHandlers,
+  log,
+  debugLog,
+  MCP_REMOTE_VERSION,
+  connectToRemoteServer,
+  TransportStrategy,
+} from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { fetchAuthorizationServerMetadata } from './lib/authorization-server-metadata'
 
 /**
  * Main function to run the client
@@ -37,6 +46,19 @@ async function runClient(
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
+  // Pre-fetch authorization server metadata for scope validation
+  let authorizationServerMetadata
+  try {
+    authorizationServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
+    if (authorizationServerMetadata?.scopes_supported) {
+      debugLog('Pre-fetched authorization server metadata', {
+        scopes_supported: authorizationServerMetadata.scopes_supported,
+      })
+    }
+  } catch (error) {
+    debugLog('Failed to pre-fetch authorization server metadata', error)
+  }
+
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
@@ -46,6 +68,7 @@ async function runClient(
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     serverUrlHash,
+    authorizationServerMetadata,
   })
 
   // Create the client
