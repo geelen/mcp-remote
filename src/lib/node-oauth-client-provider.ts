@@ -57,8 +57,6 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
   get clientMetadata() {
     const effectiveScope = this.getEffectiveScope()
-    // Exclude scope from staticOAuthClientMetadata to avoid overriding effectiveScope
-    const { scope: _ignoredScope, ...staticMetadataWithoutScope } = this.staticOAuthClientMetadata || {}
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: 'none',
@@ -68,7 +66,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
-      ...staticMetadataWithoutScope,
+      ...this.staticOAuthClientMetadata,
       scope: effectiveScope,
     }
   }
