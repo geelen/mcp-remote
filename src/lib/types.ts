@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { OAuthClientInformationFull, OAuthClientMetadata } from '@modelcontextprotocol/sdk/shared/auth.js'
+import type { AuthorizationServerMetadata } from './authorization-server-metadata'
 
 /**
  * Options for creating an OAuth client provider
@@ -31,6 +32,8 @@ export interface OAuthProviderOptions {
   authorizeResource?: string
   /** Pre-calculated server URL hash for cache isolation */
   serverUrlHash: string
+  /** Authorization server metadata (optional, fetched if not provided) */
+  authorizationServerMetadata?: AuthorizationServerMetadata
 }
 
 /**

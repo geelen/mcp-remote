@@ -11,10 +11,11 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { connectToRemoteServer, log, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy } from './lib/utils'
+import { connectToRemoteServer, log, debugLog, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { fetchAuthorizationServerMetadata } from './lib/authorization-server-metadata'
 
 /**
  * Main function to run the proxy
@@ -38,6 +39,19 @@ async function runProxy(
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
+  // Pre-fetch authorization server metadata for scope validation
+  let authorizationServerMetadata
+  try {
+    authorizationServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
+    if (authorizationServerMetadata?.scopes_supported) {
+      debugLog('Pre-fetched authorization server metadata', {
+        scopes_supported: authorizationServerMetadata.scopes_supported,
+      })
+    }
+  } catch (error) {
+    debugLog('Failed to pre-fetch authorization server metadata', error)
+  }
+
   // Create the OAuth client provider
   const authProvider = new NodeOAuthClientProvider({
     serverUrl,
@@ -48,6 +62,7 @@ async function runProxy(
     staticOAuthClientInfo,
     authorizeResource,
     serverUrlHash,
+    authorizationServerMetadata,
   })
 
   // Create the STDIO transport for local connections
