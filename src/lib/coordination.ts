@@ -235,7 +235,16 @@ export async function coordinateAuth(
   })
 
   // Get the actual port the server is running on
-  const address = server.address() as AddressInfo
+  let address = server.address() as AddressInfo | null
+  if (!address) {
+    await new Promise<void>((resolve) => server.once('listening', resolve))
+    address = server.address() as AddressInfo | null
+  }
+
+  if (!address) {
+    throw new Error('Failed to get server address after listening event')
+  }
+
   const actualPort = address.port
   debugLog('OAuth callback server running', { port: actualPort })
 
