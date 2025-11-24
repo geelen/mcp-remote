@@ -308,7 +308,8 @@ export async function connectToRemoteServer(
         authProvider,
         requestInit: { headers },
       })
-
+  
+  let rememberedTestTransport: any | null = null
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
 
@@ -325,6 +326,7 @@ export async function connectToRemoteServer(
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        rememberedTestTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
@@ -373,6 +375,21 @@ export async function connectToRemoteServer(
         errorMessage: error.message,
         stack: error.stack,
       })
+
+      // Preserve the resource metadata URL if we discovered it during the test connection
+      try {
+        // Because we have this "Extremely hacky" test transport above, which with we have discovered the 
+        // resource metadata URL if it was available, we need to "inject" the resourceMetadataUrl into the
+        // actual transportso used for the oauth login so it has the correct URL to use when fetching tokens.
+        // This is important for cases where the authorization server is on a different URL than the MCP server.
+        // A better solution would use only a single transport for everything and not need recursion!
+        let injectableTransport: any = transport;
+        if (!injectableTransport._resourceMetadataUrl) {//only if it wasn't already set
+          injectableTransport._resourceMetadataUrl = rememberedTestTransport?._resourceMetadataUrl;//will break when the transport's internals are refactored
+        }
+      } catch (e) {
+        debugLog('Unable to preserve resource metadata URL from testTransport')
+      }
 
       // Initialize authentication on-demand
       debugLog('Calling authInitializer to start auth flow')
