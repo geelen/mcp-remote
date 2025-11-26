@@ -9,7 +9,7 @@
     "build:parent": "cd .. && pnpm build"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.23.0",
     "@types/node": "^22.10.2",
     "vitest": "^2.1.8"
   }
