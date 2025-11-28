@@ -21,10 +21,10 @@ import {
   MCP_REMOTE_VERSION,
   connectToRemoteServer,
   TransportStrategy,
+  discoverOAuthServerInfo,
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
-import { fetchAuthorizationServerMetadata } from './lib/authorization-server-metadata'
 
 /**
  * Main function to run the client
@@ -46,29 +46,34 @@ async function runClient(
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
-  // Pre-fetch authorization server metadata for scope validation
-  let authorizationServerMetadata
-  try {
-    authorizationServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
-    if (authorizationServerMetadata?.scopes_supported) {
-      debugLog('Pre-fetched authorization server metadata', {
-        scopes_supported: authorizationServerMetadata.scopes_supported,
+  // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
+  // This probes the MCP server for WWW-Authenticate header and fetches PRM
+  log('Discovering OAuth server configuration...')
+  const discoveryResult = await discoverOAuthServerInfo(serverUrl, headers)
+
+  if (discoveryResult.protectedResourceMetadata) {
+    log(`Discovered authorization server: ${discoveryResult.authorizationServerUrl}`)
+    if (discoveryResult.protectedResourceMetadata.scopes_supported) {
+      debugLog('Protected Resource Metadata scopes', {
+        scopes_supported: discoveryResult.protectedResourceMetadata.scopes_supported,
       })
     }
-  } catch (error) {
-    debugLog('Failed to pre-fetch authorization server metadata', error)
+  } else {
+    debugLog('No Protected Resource Metadata found, using server URL as authorization server')
   }
 
-  // Create the OAuth client provider
+  // Create the OAuth client provider with discovered server info
   const authProvider = new NodeOAuthClientProvider({
-    serverUrl,
+    serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     serverUrlHash,
-    authorizationServerMetadata,
+    authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
+    protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
+    wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
   })
 
   // Create the client
