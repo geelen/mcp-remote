@@ -13,6 +13,7 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
+import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -31,6 +32,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
+  private protectedResourceMetadata: ProtectedResourceMetadata | undefined
+  private wwwAuthenticateScope: string | undefined
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -49,6 +52,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this._state = randomUUID()
     this._clientInfo = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
+    this.protectedResourceMetadata = options.protectedResourceMetadata
+    this.wwwAuthenticateScope = options.wwwAuthenticateScope
   }
 
   get redirectUrl(): string {
@@ -104,21 +109,44 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private getEffectiveScope(): string {
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
+      debugLog('Using scope from staticOAuthClientMetadata', { scope: this.staticOAuthClientMetadata.scope })
       return this.staticOAuthClientMetadata.scope
     }
 
-    // Priority 2: Scope from client registration response
+    // Priority 2: Scope from WWW-Authenticate header (per MCP spec)
+    if (this.wwwAuthenticateScope && this.wwwAuthenticateScope.trim().length > 0) {
+      debugLog('Using scope from WWW-Authenticate header', { scope: this.wwwAuthenticateScope })
+      return this.wwwAuthenticateScope
+    }
+
+    // Priority 3: Scopes from Protected Resource Metadata (RFC 9728)
+    if (this.protectedResourceMetadata?.scopes_supported?.length) {
+      const scope = this.protectedResourceMetadata.scopes_supported.join(' ')
+      debugLog('Using scopes from Protected Resource Metadata', {
+        scopes_supported: this.protectedResourceMetadata.scopes_supported,
+        scope,
+      })
+      return scope
+    }
+
+    // Priority 4: Scope from client registration response
     if (this._clientInfo?.scope && this._clientInfo.scope.trim().length > 0) {
+      debugLog('Using scope from client registration response', { scope: this._clientInfo.scope })
       return this._clientInfo.scope
     }
 
-    // Priority 3: Use server's supported scopes if available
+    // Priority 5: Use authorization server's supported scopes if available
     if (this.authorizationServerMetadata?.scopes_supported?.length) {
-      debugLog(`authorizationServerMetadata.scopes_supported: ${JSON.stringify(this.authorizationServerMetadata.scopes_supported)}`)
-      return this.authorizationServerMetadata.scopes_supported.join(' ')
+      const scope = this.authorizationServerMetadata.scopes_supported.join(' ')
+      debugLog('Using scopes from Authorization Server Metadata', {
+        scopes_supported: this.authorizationServerMetadata.scopes_supported,
+        scope,
+      })
+      return scope
     }
 
-    // Priority 4: Fallback to hardcoded default
+    // Priority 6: Fallback to hardcoded default
+    debugLog('Using fallback default scope')
     return 'openid email profile'
   }
 
