@@ -1,0 +1,35 @@
+name: Check Changeset
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  check-changeset:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check for changeset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Checking for changeset in PR #$PR_NUMBER..."
+
+          # List files in the PR
+          files=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)
+
+          # Count changeset files (excluding README.md)
+          count=$(echo "$files" | grep "^.changeset/.*\.md$" | grep -v "README.md" | wc -l)
+
+          if [ "$count" -gt 0 ]; then
+            echo "✅ Changeset found."
+            exit 0
+          else
+            echo "❌ No changeset found."
+            echo "Please run 'pnpm changeset' to add a changeset."
+            echo "If this is a documentation-only change or doesn't require a release, you can add an empty changeset."
+            exit 1
+          fi
