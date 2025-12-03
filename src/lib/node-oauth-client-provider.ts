@@ -76,6 +76,71 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   /**
+   * Custom client authentication handler that adds scope parameter to token requests.
+   * This is critical for OAuth providers (like Databricks) that require scope to be
+   * explicitly included in the token exchange request, even though RFC 6749 makes it optional.
+   *
+   * @param headers - HTTP headers for the token request
+   * @param params - URL search params for the token request body
+   * @param authorizationServerUrl - The authorization server URL (unused in this implementation)
+   * @param metadata - Authorization server metadata (unused in this implementation)
+   */
+  addClientAuthentication = (
+    headers: Headers,
+    params: URLSearchParams,
+    authorizationServerUrl: URL,
+    metadata?: AuthorizationServerMetadata,
+  ): void => {
+    // Get the effective client information (either static or from storage)
+    const clientInfo = this._clientInfo || this.staticOAuthClientInfo
+
+    if (!clientInfo) {
+      debugLog('⚠️ WARNING: No client info available for authentication')
+      return
+    }
+
+    // Apply client authentication based on the method
+    const authMethod = clientInfo.token_endpoint_auth_method || 'none'
+
+    debugLog('Applying client authentication', {
+      method: authMethod,
+      client_id: clientInfo.client_id,
+    })
+
+    switch (authMethod) {
+      case 'client_secret_basic':
+        if (!clientInfo.client_secret) {
+          throw new Error('client_secret_basic authentication requires a client_secret')
+        }
+        const credentials = Buffer.from(`${clientInfo.client_id}:${clientInfo.client_secret}`).toString('base64')
+        headers.set('Authorization', `Basic ${credentials}`)
+        break
+
+      case 'client_secret_post':
+        params.set('client_id', clientInfo.client_id)
+        if (clientInfo.client_secret) {
+          params.set('client_secret', clientInfo.client_secret)
+        }
+        break
+
+      case 'none':
+      default:
+        // Public client - just include client_id
+        params.set('client_id', clientInfo.client_id)
+        break
+    }
+
+    // Add scope parameter - this is the key fix for Databricks compatibility
+    const effectiveScope = this.getEffectiveScope()
+    params.set('scope', effectiveScope)
+
+    debugLog('Added scope to token exchange request', {
+      scope: effectiveScope,
+      allParams: Array.from(params.entries()),
+    })
+  }
+
+  /**
    * Gets the authorization server metadata, fetching it if not already available
    * @returns The authorization server metadata, or undefined if unavailable
    */
