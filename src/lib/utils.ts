@@ -7,6 +7,13 @@ import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import {
+  discoverProtectedResourceMetadata,
+  parseWWWAuthenticateHeader,
+  getAuthorizationServerUrl,
+  type ProtectedResourceMetadata,
+} from './protected-resource-metadata'
+import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
@@ -238,6 +245,122 @@ export function mcpProxy({
   function onServerError(error: Error) {
     log('Error from remote server:', error)
     debugLog('Error from remote server', { stack: error.stack })
+  }
+}
+
+/**
+ * Result of OAuth server discovery
+ */
+export interface OAuthServerDiscoveryResult {
+  /** The URL of the authorization server to use for OAuth */
+  authorizationServerUrl: string
+  /** Authorization server metadata (if successfully fetched) */
+  authorizationServerMetadata?: AuthorizationServerMetadata
+  /** Protected resource metadata (if discovered) */
+  protectedResourceMetadata?: ProtectedResourceMetadata
+  /** Scope extracted from WWW-Authenticate header */
+  wwwAuthenticateScope?: string
+}
+
+/**
+ * Probes the MCP server to discover the authorization server via Protected Resource Metadata.
+ *
+ * This implements the MCP Authorization Server Discovery flow:
+ * 1. Make a request to the MCP server
+ * 2. If we get a 401, extract the WWW-Authenticate header
+ * 3. Use the resource_metadata URL from the header (if present) or well-known URIs
+ * 4. Fetch Protected Resource Metadata to get the authorization server URL
+ * 5. Fetch Authorization Server Metadata from the discovered server
+ *
+ * @param serverUrl The MCP server URL
+ * @param headers Optional headers to include in the probe request
+ * @returns Discovery result with authorization server URL and metadata
+ */
+export async function discoverOAuthServerInfo(
+  serverUrl: string,
+  headers: Record<string, string> = {},
+): Promise<OAuthServerDiscoveryResult> {
+  debugLog('Starting OAuth server discovery', { serverUrl })
+
+  let wwwAuthenticateHeader: string | undefined
+  let wwwAuthenticateScope: string | undefined
+
+  // Step 1: Probe the MCP server to get WWW-Authenticate header
+  try {
+    debugLog('Probing MCP server for WWW-Authenticate header')
+    const response = await fetch(serverUrl, {
+      method: 'GET',
+      headers: {
+        ...headers,
+        Accept: 'application/json, text/event-stream',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+
+    // If we get a successful response, the server doesn't require auth
+    // Fall back to using serverUrl as authorization server
+    if (response.ok) {
+      debugLog('Server responded OK without auth, using server URL as authorization server')
+      const authServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
+      return {
+        authorizationServerUrl: serverUrl,
+        authorizationServerMetadata: authServerMetadata,
+      }
+    }
+
+    // Check for 401 Unauthorized
+    if (response.status === 401) {
+      wwwAuthenticateHeader = response.headers.get('WWW-Authenticate') || undefined
+      debugLog('Received 401 with WWW-Authenticate header', {
+        hasHeader: !!wwwAuthenticateHeader,
+        header: wwwAuthenticateHeader,
+      })
+
+      // Parse scope from WWW-Authenticate header if present
+      if (wwwAuthenticateHeader) {
+        const params = parseWWWAuthenticateHeader(wwwAuthenticateHeader)
+        wwwAuthenticateScope = params.scope
+      }
+    }
+  } catch (error) {
+    debugLog('Error probing MCP server', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    // Continue with discovery even if probe fails
+  }
+
+  // Step 2: Discover Protected Resource Metadata
+  const protectedResourceMetadata = await discoverProtectedResourceMetadata(serverUrl, wwwAuthenticateHeader)
+
+  // Step 3: Determine authorization server URL
+  let authorizationServerUrl: string
+
+  if (protectedResourceMetadata) {
+    const discoveredUrl = getAuthorizationServerUrl(protectedResourceMetadata)
+    if (discoveredUrl) {
+      authorizationServerUrl = discoveredUrl
+      debugLog('Using authorization server from Protected Resource Metadata', {
+        authorizationServerUrl,
+      })
+    } else {
+      // PRM found but no authorization_servers - fall back to server URL
+      authorizationServerUrl = serverUrl
+      debugLog('PRM found but no authorization_servers, falling back to server URL')
+    }
+  } else {
+    // No PRM found - fall back to server URL (current behavior)
+    authorizationServerUrl = serverUrl
+    debugLog('No Protected Resource Metadata found, falling back to server URL as authorization server')
+  }
+
+  // Step 4: Fetch Authorization Server Metadata
+  const authorizationServerMetadata = await fetchAuthorizationServerMetadata(authorizationServerUrl)
+
+  return {
+    authorizationServerUrl,
+    authorizationServerMetadata,
+    protectedResourceMetadata,
+    wwwAuthenticateScope,
   }
 }
 

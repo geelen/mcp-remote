@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { OAuthClientInformationFull, OAuthClientMetadata } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
+import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
  * Options for creating an OAuth client provider
@@ -34,6 +35,10 @@ export interface OAuthProviderOptions {
   serverUrlHash: string
   /** Authorization server metadata (optional, fetched if not provided) */
   authorizationServerMetadata?: AuthorizationServerMetadata
+  /** Protected resource metadata (optional, discovered from 401 response) */
+  protectedResourceMetadata?: ProtectedResourceMetadata
+  /** Scope extracted from WWW-Authenticate header */
+  wwwAuthenticateScope?: string
 }
 
 /**
