@@ -299,6 +299,30 @@ For more information about testing these servers, see also:
 
 Know of more resources you'd like to share? Please add them to this Readme and send a PR!
 
+## Contributing
+
+### Changesets
+
+This project uses [changesets](https://github.com/changesets/changesets) to manage versioning and releases.
+
+When you make a change that should be included in the next release, you must include a changeset.
+
+1. **Make your changes** in your branch.
+2. **Run `pnpm changeset`** (or `npx changeset`) in the root of the repository.
+3. **Follow the prompts**:
+    - Select the package(s) you changed.
+    - Choose the update type (`patch`, `minor`, or `major`).
+        - `patch`: Bug fixes.
+        - `minor`: New features.
+        - `major`: Breaking changes.
+    - Write a summary of the changes.
+4. **Commit the generated changeset file** (in `.changeset/`) along with your code.
+
+The CI will automatically:
+- Check that a changeset exists for every Pull Request.
+- Open a "Version Packages" PR when changesets are merged to `main`.
+- Publish a new version to npm when the "Version Packages" PR is merged.
+
 ## Troubleshooting
 
 ### Clear your `~/.mcp-auth` directory

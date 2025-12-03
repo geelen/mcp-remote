@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: wyvox/action-setup-pnpm@v3
+        with:
+          node-version: 22
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Enable Provenance
+        run: echo "provenance=true" >> .npmrc
+
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # This expects you to have a script called release which does a build for your packages and calls changeset publish
+          publish: pnpm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # For Trusted Publishing, we don't need an NPM_TOKEN, but changesets might expect one or we rely on setup-node
+          # which sets NODE_AUTH_TOKEN. With Trusted Publishing, npm publish handles the token exchange.
+
+

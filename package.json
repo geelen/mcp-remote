@@ -29,7 +29,8 @@
     "check": "prettier --check . && tsc",
     "lint-fix": "prettier --check . --write",
     "test:unit": "vitest run",
-    "test:unit:watch": "vitest"
+    "test:unit:watch": "vitest",
+    "release": "pnpm build && changeset publish"
   },
   "dependencies": {
     "express": "^4.21.2",
@@ -38,6 +39,8 @@
     "undici": "^7.12.0"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.5.1",
+    "@changesets/cli": "^2.29.7",
     "@modelcontextprotocol/sdk": "^1.17.3",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
