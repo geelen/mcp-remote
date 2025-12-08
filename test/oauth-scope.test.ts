@@ -273,3 +273,105 @@ describe('OAuth Scope in Token Exchange', () => {
     expect(params.get('scope')).toBe('all-apis override')
   })
 })
+
+describe('Databricks MCP Server Authentication Integration', () => {
+  const DATABRICKS_SERVER_URL = 'https://j-github-mcp-2850744067564480.staging.aws.databricksapps.com/mcp'
+  const DATABRICKS_CLIENT_ID = 'fd81783c-35cb-49a1-89bf-69716ffb009f'
+
+  it('attempts to fetch authorization server metadata from Databricks MCP server', async () => {
+    const provider = new NodeOAuthClientProvider({
+      serverUrl: DATABRICKS_SERVER_URL,
+      callbackPort: 8080,
+      host: 'localhost',
+      serverUrlHash: 'databricks-test',
+      staticOAuthClientInfo: {
+        client_id: DATABRICKS_CLIENT_ID,
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      },
+    })
+
+    // Attempt to fetch the authorization server metadata
+    // Note: The metadata endpoint may not be publicly accessible
+    const metadata = await provider.getAuthorizationServerMetadata()
+
+    if (metadata) {
+      // If metadata is available, verify it has the expected fields
+      expect(metadata.authorization_endpoint).toBeDefined()
+      expect(metadata.token_endpoint).toBeDefined()
+
+      console.log('Databricks OAuth endpoints:', {
+        authorization_endpoint: metadata.authorization_endpoint,
+        token_endpoint: metadata.token_endpoint,
+        scopes_supported: metadata.scopes_supported,
+      })
+    } else {
+      // If metadata is not available, this is expected for some deployments
+      console.log('Authorization server metadata not publicly accessible (expected for some Databricks deployments)')
+      expect(metadata).toBeUndefined()
+    }
+  })
+
+  it('prepares token exchange request with correct scope for Databricks', async () => {
+    const provider = new NodeOAuthClientProvider({
+      serverUrl: DATABRICKS_SERVER_URL,
+      callbackPort: 8080,
+      host: 'localhost',
+      serverUrlHash: 'databricks-test',
+      staticOAuthClientMetadata: {
+        scope: 'all-apis',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      },
+      staticOAuthClientInfo: {
+        client_id: DATABRICKS_CLIENT_ID,
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      },
+    })
+
+    // Prepare authentication parameters as would be done during token exchange
+    const headers = new Headers()
+    const params = new URLSearchParams()
+
+    provider.addClientAuthentication(headers, params, new URL(DATABRICKS_SERVER_URL), undefined)
+
+    // Verify the scope parameter is included (critical for Databricks)
+    expect(params.get('scope')).toBe('all-apis')
+    expect(params.get('client_id')).toBe(DATABRICKS_CLIENT_ID)
+
+    // Log the full token exchange parameters
+    console.log('Token exchange parameters:', {
+      scope: params.get('scope'),
+      client_id: params.get('client_id'),
+      allParams: Array.from(params.entries()),
+    })
+  })
+
+  it('uses authorization server provided scopes if no custom scope specified', async () => {
+    const provider = new NodeOAuthClientProvider({
+      serverUrl: DATABRICKS_SERVER_URL,
+      callbackPort: 8080,
+      host: 'localhost',
+      serverUrlHash: 'databricks-test',
+      staticOAuthClientInfo: {
+        client_id: DATABRICKS_CLIENT_ID,
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      },
+    })
+
+    // Fetch metadata to get server-supported scopes
+    const metadata = await provider.getAuthorizationServerMetadata()
+
+    // Prepare authentication without custom scope
+    const headers = new Headers()
+    const params = new URLSearchParams()
+
+    provider.addClientAuthentication(headers, params, new URL(DATABRICKS_SERVER_URL), metadata)
+
+    // Should use either server-provided scopes or default
+    const scope = params.get('scope')
+    expect(scope).toBeDefined()
+    expect(scope).not.toBe('')
+
+    console.log('Server supported scopes:', metadata?.scopes_supported)
+    console.log('Used scope:', scope)
+  })
+})

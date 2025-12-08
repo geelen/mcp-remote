@@ -167,23 +167,33 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   private getEffectiveScope(): string {
+    debugLog('getEffectiveScope called', {
+      staticOAuthClientMetadata: this.staticOAuthClientMetadata,
+      staticOAuthClientMetadataScope: this.staticOAuthClientMetadata?.scope,
+      clientInfoScope: this._clientInfo?.scope,
+      serverMetadataScopes: this.authorizationServerMetadata?.scopes_supported,
+    })
+
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
+      debugLog('Using staticOAuthClientMetadata scope:', this.staticOAuthClientMetadata.scope)
       return this.staticOAuthClientMetadata.scope
     }
 
     // Priority 2: Scope from client registration response
     if (this._clientInfo?.scope && this._clientInfo.scope.trim().length > 0) {
+      debugLog('Using client info scope:', this._clientInfo.scope)
       return this._clientInfo.scope
     }
 
     // Priority 3: Use server's supported scopes if available
     if (this.authorizationServerMetadata?.scopes_supported?.length) {
-      debugLog(`authorizationServerMetadata.scopes_supported: ${JSON.stringify(this.authorizationServerMetadata.scopes_supported)}`)
+      debugLog(`Using authorizationServerMetadata.scopes_supported: ${JSON.stringify(this.authorizationServerMetadata.scopes_supported)}`)
       return this.authorizationServerMetadata.scopes_supported.join(' ')
     }
 
     // Priority 4: Fallback to hardcoded default
+    debugLog('Using fallback default scope: openid email profile')
     return 'openid email profile'
   }
 
