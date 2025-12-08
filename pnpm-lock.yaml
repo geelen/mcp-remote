@@ -14,9 +14,6 @@ importers:
       open:
         specifier: ^10.1.0
         version: 10.1.0
-      pnpm:
-        specifier: ^10.24.0
-        version: 10.24.0
       strict-url-sanitise:
         specifier: ^0.0.1
         version: 0.0.1
@@ -991,11 +988,6 @@ packages:
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
-
-  pnpm@10.24.0:
-    resolution: {integrity: sha512-Af+K5xtEGZA7ZcYPstydNM+LtuBtA73hEu8496NNaQTEJLpmvqXNzxKJAjC/OflYBHMUDtnJRv7zKLblI4o0Wg==}
-    engines: {node: '>=18.12'}
-    hasBin: true
 
   postcss-load-config@6.0.1:
     resolution: {integrity: sha512-oPtTM4oerL+UXmx+93ytZVN82RrlY/wPUV8IeDxFrzIjXOLF1pN+EmKPLbubvKHT2HC20xXsCAH2Z+CKV6Oz/g==}
@@ -2251,8 +2243,6 @@ snapshots:
   pirates@4.0.6: {}
 
   pkce-challenge@5.0.1: {}
-
-  pnpm@10.24.0: {}
 
   postcss-load-config@6.0.1(postcss@8.5.4)(tsx@4.19.3):
     dependencies:

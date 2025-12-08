@@ -698,29 +698,6 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
-  // Parse --scope parameter (convenience shorthand for --static-oauth-client-metadata)
-  const scopeIndex = args.indexOf('--scope')
-  if (scopeIndex !== -1 && scopeIndex < args.length - 1) {
-    const scope = args[scopeIndex + 1]
-    if (!staticOAuthClientMetadata) {
-      staticOAuthClientMetadata = {}
-    }
-    staticOAuthClientMetadata.scope = scope
-    log(`Using OAuth scope: ${scope}`)
-  }
-
-  // Parse --client-id parameter (convenience shorthand for --static-oauth-client-info)
-  const clientIdIndex = args.indexOf('--client-id')
-  if (clientIdIndex !== -1 && clientIdIndex < args.length - 1) {
-    const clientId = args[clientIdIndex + 1]
-    if (!staticOAuthClientInfo) {
-      staticOAuthClientInfo = { client_id: clientId, redirect_uris: [] }
-    } else {
-      staticOAuthClientInfo.client_id = clientId
-    }
-    log(`Using OAuth client ID: ${clientId}`)
-  }
-
   // Parse ignored tools
   const ignoredTools: string[] = []
   let j = 0

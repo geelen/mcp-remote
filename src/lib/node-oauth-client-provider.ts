@@ -6,13 +6,13 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
+import type { OAuthProviderOptions, StaticOAuthClientMetadata, OAuthMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
-import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
+import { type AuthorizationServerMetadata } from './authorization-server-metadata'
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -30,7 +30,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizeResource: string | undefined
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
-  private authorizationServerMetadata: AuthorizationServerMetadata | undefined
+  private oauthMetadata: OAuthMetadata
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -48,7 +48,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizeResource = options.authorizeResource
     this._state = randomUUID()
     this._clientInfo = undefined
-    this.authorizationServerMetadata = options.authorizationServerMetadata
+
+    // Prefer new oauthMetadata field, fallback to deprecated authorizationServerMetadata
+    this.oauthMetadata = options.oauthMetadata || {
+      authorizationServerMetadata: options.authorizationServerMetadata,
+      discoverySource: options.authorizationServerMetadata ? 'authorization-server' : 'none',
+    }
   }
 
   get redirectUrl(): string {
@@ -76,124 +81,50 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   /**
-   * Custom client authentication handler that adds scope parameter to token requests.
-   * This is critical for OAuth providers (like Databricks) that require scope to be
-   * explicitly included in the token exchange request, even though RFC 6749 makes it optional.
-   *
-   * @param headers - HTTP headers for the token request
-   * @param params - URL search params for the token request body
-   * @param authorizationServerUrl - The authorization server URL (unused in this implementation)
-   * @param metadata - Authorization server metadata (unused in this implementation)
-   */
-  addClientAuthentication = (
-    headers: Headers,
-    params: URLSearchParams,
-    authorizationServerUrl: URL,
-    metadata?: AuthorizationServerMetadata,
-  ): void => {
-    // Get the effective client information (either static or from storage)
-    const clientInfo = this._clientInfo || this.staticOAuthClientInfo
-
-    if (!clientInfo) {
-      debugLog('⚠️ WARNING: No client info available for authentication')
-      return
-    }
-
-    // Apply client authentication based on the method
-    const authMethod = clientInfo.token_endpoint_auth_method || 'none'
-
-    debugLog('Applying client authentication', {
-      method: authMethod,
-      client_id: clientInfo.client_id,
-    })
-
-    switch (authMethod) {
-      case 'client_secret_basic':
-        if (!clientInfo.client_secret) {
-          throw new Error('client_secret_basic authentication requires a client_secret')
-        }
-        const credentials = Buffer.from(`${clientInfo.client_id}:${clientInfo.client_secret}`).toString('base64')
-        headers.set('Authorization', `Basic ${credentials}`)
-        break
-
-      case 'client_secret_post':
-        params.set('client_id', clientInfo.client_id)
-        if (clientInfo.client_secret) {
-          params.set('client_secret', clientInfo.client_secret)
-        }
-        break
-
-      case 'none':
-      default:
-        // Public client - just include client_id
-        params.set('client_id', clientInfo.client_id)
-        break
-    }
-
-    // Add scope parameter - this is the key fix for Databricks compatibility
-    const effectiveScope = this.getEffectiveScope()
-    params.set('scope', effectiveScope)
-
-    debugLog('Added scope to token exchange request', {
-      scope: effectiveScope,
-      allParams: Array.from(params.entries()),
-    })
-  }
-
-  /**
-   * Gets the authorization server metadata, fetching it if not already available
+   * Gets the authorization server metadata (for backward compatibility)
    * @returns The authorization server metadata, or undefined if unavailable
    */
   async getAuthorizationServerMetadata(): Promise<AuthorizationServerMetadata | undefined> {
-    // Already have metadata? Return it
-    debugLog(`authorizationServerMetadata: ${JSON.stringify(this.authorizationServerMetadata)}`)
-    if (this.authorizationServerMetadata) {
-      return this.authorizationServerMetadata
-    }
-
-    // Fetch metadata and cache in memory for this session
-    try {
-      this.authorizationServerMetadata = await fetchAuthorizationServerMetadata(this.options.serverUrl)
-      if (this.authorizationServerMetadata?.scopes_supported) {
-        debugLog('Authorization server supports scopes', {
-          scopes_supported: this.authorizationServerMetadata.scopes_supported,
-        })
-      }
-      return this.authorizationServerMetadata
-    } catch (error) {
-      debugLog('Failed to fetch authorization server metadata', error)
-      return undefined
-    }
+    return this.oauthMetadata?.authorizationServerMetadata
   }
 
   private getEffectiveScope(): string {
     debugLog('getEffectiveScope called', {
-      staticOAuthClientMetadata: this.staticOAuthClientMetadata,
       staticOAuthClientMetadataScope: this.staticOAuthClientMetadata?.scope,
       clientInfoScope: this._clientInfo?.scope,
-      serverMetadataScopes: this.authorizationServerMetadata?.scopes_supported,
+      protectedResourceScopes: this.oauthMetadata?.protectedResourceMetadata?.scopes_supported,
+      authServerScopes: this.oauthMetadata?.authorizationServerMetadata?.scopes_supported,
+      discoverySource: this.oauthMetadata?.discoverySource,
     })
 
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
-      debugLog('Using staticOAuthClientMetadata scope:', this.staticOAuthClientMetadata.scope)
+      debugLog('Using staticOAuthClientMetadata scope (Priority 1):', this.staticOAuthClientMetadata.scope)
       return this.staticOAuthClientMetadata.scope
     }
 
     // Priority 2: Scope from client registration response
     if (this._clientInfo?.scope && this._clientInfo.scope.trim().length > 0) {
-      debugLog('Using client info scope:', this._clientInfo.scope)
+      debugLog('Using client info scope (Priority 2):', this._clientInfo.scope)
       return this._clientInfo.scope
     }
 
-    // Priority 3: Use server's supported scopes if available
-    if (this.authorizationServerMetadata?.scopes_supported?.length) {
-      debugLog(`Using authorizationServerMetadata.scopes_supported: ${JSON.stringify(this.authorizationServerMetadata.scopes_supported)}`)
-      return this.authorizationServerMetadata.scopes_supported.join(' ')
+    // Priority 3: Protected resource metadata scopes (RFC 9728)
+    if (this.oauthMetadata?.protectedResourceMetadata?.scopes_supported?.length) {
+      const scope = this.oauthMetadata.protectedResourceMetadata.scopes_supported.join(' ')
+      debugLog('Using protected resource metadata scopes (Priority 3):', scope)
+      return scope
     }
 
-    // Priority 4: Fallback to hardcoded default
-    debugLog('Using fallback default scope: openid email profile')
+    // Priority 4: Authorization server metadata scopes (RFC 8414)
+    if (this.oauthMetadata?.authorizationServerMetadata?.scopes_supported?.length) {
+      const scope = this.oauthMetadata.authorizationServerMetadata.scopes_supported.join(' ')
+      debugLog('Using authorization server metadata scopes (Priority 4):', scope)
+      return scope
+    }
+
+    // Priority 5: Fallback to hardcoded default
+    debugLog('Using fallback default scope (Priority 5): openid email profile')
     return 'openid email profile'
   }
 
@@ -300,11 +231,6 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
-    // Optionally fetch metadata for debugging/informational purposes (non-blocking)
-    this.getAuthorizationServerMetadata().catch(() => {
-      // Ignore errors, metadata is optional
-    })
-
     if (this.authorizeResource) {
       authorizationUrl.searchParams.set('resource', this.authorizeResource)
     }
