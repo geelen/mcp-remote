@@ -1,6 +1,46 @@
 import { debugLog } from './utils'
 
 /**
+ * Generic helper to fetch OAuth metadata from a well-known endpoint
+ * @param metadataUrl The well-known metadata URL to fetch from
+ * @param debugContext Additional context for debug logging
+ * @returns The parsed metadata or undefined if fetch fails
+ */
+async function fetchOAuthMetadataJson<T>(
+  metadataUrl: string,
+  debugContext: Record<string, unknown>,
+): Promise<T | undefined> {
+  debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
+
+  try {
+    const response = await fetch(metadataUrl, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5000),
+    })
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        debugLog('OAuth metadata endpoint not found (404)', { metadataUrl })
+      } else {
+        debugLog('Failed to fetch OAuth metadata', {
+          status: response.status,
+          statusText: response.statusText,
+        })
+      }
+      return undefined
+    }
+
+    return (await response.json()) as T
+  } catch (error) {
+    debugLog('Error fetching OAuth metadata', {
+      error: error instanceof Error ? error.message : String(error),
+      metadataUrl,
+    })
+    return undefined
+  }
+}
+
+/**
  * OAuth 2.0 Protected Resource Metadata as defined in RFC 9728
  * https://datatracker.ietf.org/doc/html/rfc9728
  */
@@ -137,46 +177,22 @@ export async function fetchProtectedResourceMetadata(
 ): Promise<ProtectedResourceMetadata | undefined> {
   const metadataUrl = getProtectedResourceMetadataUrl(resourceUrl)
 
-  debugLog('Fetching protected resource metadata', { resourceUrl, metadataUrl })
+  // RFC 9728 Section 7.7: SSRF protection
+  const url = new URL(metadataUrl)
+  if (isInternalIP(url)) {
+    debugLog('Blocked request to internal IP (SSRF protection)', { url: metadataUrl })
+    return undefined
+  }
 
-  try {
-    const url = new URL(metadataUrl)
+  // RFC 9728 Section 7.3: TLS certificate checking MUST be performed (automatic with fetch API)
+  const metadata = await fetchOAuthMetadataJson<ProtectedResourceMetadata>(metadataUrl, { resourceUrl })
 
-    // RFC 9728 Section 7.7: SSRF protection
-    if (isInternalIP(url)) {
-      debugLog('Blocked request to internal IP (SSRF protection)', { url: metadataUrl })
-      return undefined
-    }
+  // RFC 9728 Section 3.3: Validate metadata
+  if (metadata && !validateProtectedResourceMetadata(metadata, resourceUrl)) {
+    return undefined
+  }
 
-    // RFC 9728 Section 7.3: TLS certificate checking MUST be performed
-    // (automatic with fetch API)
-    const response = await fetch(metadataUrl, {
-      headers: {
-        Accept: 'application/json',
-      },
-      // Short timeout to avoid blocking
-      signal: AbortSignal.timeout(5000),
-    })
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        debugLog('Protected resource metadata endpoint not found (404)', { metadataUrl })
-      } else {
-        debugLog('Failed to fetch protected resource metadata', {
-          status: response.status,
-          statusText: response.statusText,
-        })
-      }
-      return undefined
-    }
-
-    const metadata = (await response.json()) as ProtectedResourceMetadata
-
-    // RFC 9728 Section 3.3: Validate metadata
-    if (!validateProtectedResourceMetadata(metadata, resourceUrl)) {
-      return undefined
-    }
-
+  if (metadata) {
     debugLog('Successfully fetched protected resource metadata', {
       resource: metadata.resource,
       authorization_servers: metadata.authorization_servers,
@@ -184,13 +200,7 @@ export async function fetchProtectedResourceMetadata(
       authServerCount: metadata.authorization_servers?.length || 0,
       scopeCount: metadata.scopes_supported?.length || 0,
     })
-
-    return metadata
-  } catch (error) {
-    debugLog('Error fetching protected resource metadata', {
-      error: error instanceof Error ? error.message : String(error),
-      metadataUrl,
-    })
-    return undefined
   }
+
+  return metadata
 }

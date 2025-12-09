@@ -97,33 +97,26 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       discoverySource: this.oauthMetadata?.discoverySource,
     })
 
-    // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
-    if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
-      debugLog('Using staticOAuthClientMetadata scope (Priority 1):', this.staticOAuthClientMetadata.scope)
-      return this.staticOAuthClientMetadata.scope
+    const scopeSources = [
+      { name: 'staticOAuthClientMetadata', value: this.staticOAuthClientMetadata?.scope },
+      { name: 'clientInfo', value: this._clientInfo?.scope },
+      {
+        name: 'protectedResourceMetadata',
+        value: this.oauthMetadata?.protectedResourceMetadata?.scopes_supported?.join(' ')
+      },
+      {
+        name: 'authorizationServerMetadata',
+        value: this.oauthMetadata?.authorizationServerMetadata?.scopes_supported?.join(' ')
+      },
+    ]
+
+    for (const [priority, source] of scopeSources.entries()) {
+      if (source.value?.trim()) {
+        debugLog(`Using ${source.name} scope (Priority ${priority + 1}):`, source.value)
+        return source.value
+      }
     }
 
-    // Priority 2: Scope from client registration response
-    if (this._clientInfo?.scope && this._clientInfo.scope.trim().length > 0) {
-      debugLog('Using client info scope (Priority 2):', this._clientInfo.scope)
-      return this._clientInfo.scope
-    }
-
-    // Priority 3: Protected resource metadata scopes (RFC 9728)
-    if (this.oauthMetadata?.protectedResourceMetadata?.scopes_supported?.length) {
-      const scope = this.oauthMetadata.protectedResourceMetadata.scopes_supported.join(' ')
-      debugLog('Using protected resource metadata scopes (Priority 3):', scope)
-      return scope
-    }
-
-    // Priority 4: Authorization server metadata scopes (RFC 8414)
-    if (this.oauthMetadata?.authorizationServerMetadata?.scopes_supported?.length) {
-      const scope = this.oauthMetadata.authorizationServerMetadata.scopes_supported.join(' ')
-      debugLog('Using authorization server metadata scopes (Priority 4):', scope)
-      return scope
-    }
-
-    // Priority 5: Fallback to hardcoded default
     debugLog('Using fallback default scope (Priority 5): openid email profile')
     return 'openid email profile'
   }
