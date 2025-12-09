@@ -6,10 +6,7 @@ import { debugLog } from './utils'
  * @param debugContext Additional context for debug logging
  * @returns The parsed metadata or undefined if fetch fails
  */
-async function fetchOAuthMetadataJson<T>(
-  metadataUrl: string,
-  debugContext: Record<string, unknown>,
-): Promise<T | undefined> {
+async function fetchOAuthMetadataJson<T>(metadataUrl: string, debugContext: Record<string, unknown>): Promise<T | undefined> {
   debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
 
   try {
@@ -128,10 +125,7 @@ function isInternalIP(url: URL): boolean {
  * @param expectedResource The expected resource URL
  * @returns true if validation passes, false otherwise
  */
-function validateProtectedResourceMetadata(
-  metadata: any,
-  expectedResource: string,
-): boolean {
+function validateProtectedResourceMetadata(metadata: any, expectedResource: string): boolean {
   // Check that resource field exists and is a string
   if (!metadata.resource || typeof metadata.resource !== 'string') {
     debugLog('Protected resource metadata validation failed: missing or invalid resource field')
@@ -172,9 +166,7 @@ function validateProtectedResourceMetadata(
  * @param resourceUrl The resource server URL to fetch metadata for
  * @returns The protected resource metadata, or undefined if fetch fails
  */
-export async function fetchProtectedResourceMetadata(
-  resourceUrl: string,
-): Promise<ProtectedResourceMetadata | undefined> {
+export async function fetchProtectedResourceMetadata(resourceUrl: string): Promise<ProtectedResourceMetadata | undefined> {
   const metadataUrl = getProtectedResourceMetadataUrl(resourceUrl)
 
   // RFC 9728 Section 7.7: SSRF protection

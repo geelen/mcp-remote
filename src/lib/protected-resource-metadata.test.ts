@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import {
-  fetchProtectedResourceMetadata,
-  getProtectedResourceMetadataUrl,
-} from './protected-resource-metadata'
+import { fetchProtectedResourceMetadata, getProtectedResourceMetadataUrl } from './protected-resource-metadata'
 
 describe('protected-resource-metadata', () => {
   describe('getProtectedResourceMetadataUrl', () => {

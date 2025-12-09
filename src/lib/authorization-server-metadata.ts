@@ -1,8 +1,5 @@
 import { debugLog } from './utils'
-import {
-  fetchProtectedResourceMetadata,
-  type ProtectedResourceMetadata,
-} from './protected-resource-metadata'
+import { fetchProtectedResourceMetadata, type ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
  * Generic helper to fetch OAuth metadata from a well-known endpoint
@@ -10,10 +7,7 @@ import {
  * @param debugContext Additional context for debug logging
  * @returns The parsed metadata or undefined if fetch fails
  */
-async function fetchOAuthMetadataJson<T>(
-  metadataUrl: string,
-  debugContext: Record<string, unknown>,
-): Promise<T | undefined> {
+async function fetchOAuthMetadataJson<T>(metadataUrl: string, debugContext: Record<string, unknown>): Promise<T | undefined> {
   debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
 
   try {
@@ -123,9 +117,7 @@ export async function fetchAuthorizationServerMetadata(serverUrl: string): Promi
  * @param issuerUrl The authorization server's issuer identifier URL
  * @returns The authorization server metadata, or undefined if fetch fails
  */
-export async function fetchAuthorizationServerMetadataFromIssuer(
-  issuerUrl: string,
-): Promise<AuthorizationServerMetadata | undefined> {
+export async function fetchAuthorizationServerMetadataFromIssuer(issuerUrl: string): Promise<AuthorizationServerMetadata | undefined> {
   // Construct the well-known metadata URL from the issuer
   const { origin, pathname } = new URL(issuerUrl)
   const path = pathname === '/' ? '' : pathname
@@ -180,9 +172,10 @@ export async function discoverOAuthMetadata(resourceUrl: string): Promise<OAuthM
 
         if (authServerMetadata) {
           // Success! We have both protected resource and auth server metadata
+          // Treat empty arrays as undefined per RFC 9728/8414 (should be omitted if empty)
           const effectiveScopes =
-            protectedResourceMetadata.scopes_supported ||
-            authServerMetadata.scopes_supported
+            (protectedResourceMetadata.scopes_supported?.length ? protectedResourceMetadata.scopes_supported : undefined) ||
+            (authServerMetadata.scopes_supported?.length ? authServerMetadata.scopes_supported : undefined)
 
           debugLog('OAuth metadata discovery successful via protected resource', {
             discoverySource: 'protected-resource',
@@ -209,14 +202,17 @@ export async function discoverOAuthMetadata(resourceUrl: string): Promise<OAuthM
   const authServerMetadata = await fetchAuthorizationServerMetadata(resourceUrl)
 
   if (authServerMetadata) {
+    // Treat empty arrays as undefined per RFC 9728/8414 (should be omitted if empty)
+    const effectiveScopes = authServerMetadata.scopes_supported?.length ? authServerMetadata.scopes_supported : undefined
+
     debugLog('OAuth metadata discovery successful via authorization server fallback', {
       discoverySource: 'authorization-server',
-      effectiveScopes: authServerMetadata.scopes_supported,
+      effectiveScopes,
     })
 
     return {
       authorizationServerMetadata: authServerMetadata,
-      effectiveScopes: authServerMetadata.scopes_supported,
+      effectiveScopes,
       discoverySource: 'authorization-server',
     }
   }

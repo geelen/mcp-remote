@@ -88,6 +88,17 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     return this.oauthMetadata?.authorizationServerMetadata
   }
 
+  /**
+   * Determines the OAuth scope to use based on a priority hierarchy.
+   * Scopes are selected in the following priority order:
+   * 1. User-provided staticOAuthClientMetadata.scope (highest priority)
+   * 2. Scope from client registration response (_clientInfo.scope)
+   * 3. Protected resource metadata scopes (RFC 9728)
+   * 4. Authorization server metadata scopes (RFC 8414)
+   * 5. Fallback to 'openid email profile' (lowest priority)
+   *
+   * @returns The effective scope string to use for authorization
+   */
   private getEffectiveScope(): string {
     debugLog('getEffectiveScope called', {
       staticOAuthClientMetadataScope: this.staticOAuthClientMetadata?.scope,
@@ -102,11 +113,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       { name: 'clientInfo', value: this._clientInfo?.scope },
       {
         name: 'protectedResourceMetadata',
-        value: this.oauthMetadata?.protectedResourceMetadata?.scopes_supported?.join(' ')
+        value: this.oauthMetadata?.protectedResourceMetadata?.scopes_supported?.join(' '),
       },
       {
         name: 'authorizationServerMetadata',
-        value: this.oauthMetadata?.authorizationServerMetadata?.scopes_supported?.join(' ')
+        value: this.oauthMetadata?.authorizationServerMetadata?.scopes_supported?.join(' '),
       },
     ]
 

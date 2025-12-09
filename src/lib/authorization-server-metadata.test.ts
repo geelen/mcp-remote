@@ -194,10 +194,7 @@ describe('authorization-server-metadata', () => {
 
       const metadata = await fetchAuthorizationServerMetadataFromIssuer('https://auth.example.com/oauth')
       expect(metadata).toEqual(mockMetadata)
-      expect(global.fetch).toHaveBeenCalledWith(
-        'https://auth.example.com/oauth/.well-known/oauth-authorization-server',
-        expect.anything(),
-      )
+      expect(global.fetch).toHaveBeenCalledWith('https://auth.example.com/oauth/.well-known/oauth-authorization-server', expect.anything())
     })
 
     it('should construct well-known URL correctly from issuer', async () => {
@@ -208,10 +205,7 @@ describe('authorization-server-metadata', () => {
       })
 
       await fetchAuthorizationServerMetadataFromIssuer('https://auth.example.com/v1')
-      expect(global.fetch).toHaveBeenCalledWith(
-        'https://auth.example.com/v1/.well-known/oauth-authorization-server',
-        expect.anything(),
-      )
+      expect(global.fetch).toHaveBeenCalledWith('https://auth.example.com/v1/.well-known/oauth-authorization-server', expect.anything())
     })
 
     it('should return undefined on 404', async () => {
@@ -640,7 +634,7 @@ describe('authorization-server-metadata', () => {
         const result = await discoverOAuthMetadata('https://example.com/api')
 
         expect(result.discoverySource).toBe('authorization-server')
-        expect(result.effectiveScopes).toEqual([])
+        expect(result.effectiveScopes).toBeUndefined()
       })
 
       it('should call resource server metadata endpoint for fallback', async () => {
@@ -659,10 +653,7 @@ describe('authorization-server-metadata', () => {
 
         await discoverOAuthMetadata('https://example.com/api')
 
-        expect(global.fetch).toHaveBeenCalledWith(
-          'https://example.com/.well-known/oauth-authorization-server',
-          expect.anything(),
-        )
+        expect(global.fetch).toHaveBeenCalledWith('https://example.com/.well-known/oauth-authorization-server', expect.anything())
       })
     })
 
@@ -772,8 +763,8 @@ describe('authorization-server-metadata', () => {
 
         const result = await discoverOAuthMetadata('https://example.com/api')
 
-        // Empty array is truthy, so it's used as-is (not falling back)
-        expect(result.effectiveScopes).toEqual([])
+        // Empty arrays are treated as undefined, so falls back to auth server scopes
+        expect(result.effectiveScopes).toEqual(['openid'])
       })
 
       it('should handle empty auth server scopes array', async () => {
@@ -796,7 +787,8 @@ describe('authorization-server-metadata', () => {
 
         const result = await discoverOAuthMetadata('https://example.com/api')
 
-        expect(result.effectiveScopes).toEqual([])
+        // Empty arrays are treated as undefined, so no scopes available
+        expect(result.effectiveScopes).toBeUndefined()
       })
 
       it('should populate effectiveScopes correctly for protected resource discovery', async () => {
@@ -968,11 +960,7 @@ describe('authorization-server-metadata', () => {
       it('should handle complex multi-stage scenario with retries', async () => {
         const protectedMetadata = {
           resource: 'https://example.com/api',
-          authorization_servers: [
-            'https://auth1.example.com',
-            'https://auth2.example.com',
-            'https://auth3.example.com',
-          ],
+          authorization_servers: ['https://auth1.example.com', 'https://auth2.example.com', 'https://auth3.example.com'],
           scopes_supported: ['api:read'],
         }
 
