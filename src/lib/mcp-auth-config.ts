@@ -78,14 +78,79 @@ export async function deleteLockfile(serverUrlHash: string): Promise<void> {
 }
 
 /**
- * Gets the configuration directory path
+ * Gets the configuration directory path.
+ *
+ * By default, uses version-agnostic storage so auth tokens persist across updates.
+ * Set MCP_REMOTE_VERSIONED_CONFIG=1 to use version-specific directories
+ * (useful for development/testing isolation).
+ *
  * @returns The path to the configuration directory
  */
 export function getConfigDir(): string {
   const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
-  // Add a version subdirectory so we don't need to worry about backwards/forwards compatibility yet
-  return path.join(baseConfigDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+
+  // Use version-specific directories only if explicitly requested
+  if (process.env.MCP_REMOTE_VERSIONED_CONFIG === '1') {
+    return path.join(baseConfigDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+  }
+
+  // Default: version-agnostic subdirectory (namespaced to avoid conflicts with other tools)
+  return path.join(baseConfigDir, 'mcp-remote')
 }
+
+/**
+ * Migrates config files from version-specific directories to the version-agnostic directory.
+ * Called once on startup to ensure existing users don't lose their tokens.
+ */
+export async function migrateFromVersionedDirs(): Promise<void> {
+  if (process.env.MCP_REMOTE_VERSIONED_CONFIG === '1') {
+    return
+  }
+
+  const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
+  const targetDir = path.join(baseConfigDir, 'mcp-remote')
+
+  try {
+    const entries = await fs.readdir(baseConfigDir, { withFileTypes: true })
+    const versionDirs = entries.filter((entry) => entry.isDirectory() && entry.name.startsWith('mcp-remote-'))
+
+    if (versionDirs.length === 0) return
+
+    // Ensure target directory exists
+    await fs.mkdir(targetDir, { recursive: true })
+
+    // Sort descending to prefer newer versions
+    versionDirs.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }))
+
+    log(`Migrating auth from ${versionDirs.length} version-specific directories...`)
+
+    for (const dir of versionDirs) {
+      const versionDir = path.join(baseConfigDir, dir.name)
+      const files = await fs.readdir(versionDir)
+
+      for (const file of files) {
+        const srcPath = path.join(versionDir, file)
+        const destPath = path.join(targetDir, file)
+
+        try {
+          await fs.access(destPath)
+          // Destination exists, skip
+        } catch {
+          await fs.copyFile(srcPath, destPath)
+          log(`Migrated ${file} from ${dir.name}`)
+        }
+      }
+    }
+
+    log(`Migration complete. You can remove old directories: ${versionDirs.map((d) => d.name).join(', ')}`)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log('Migration warning:', error)
+    }
+  }
+}
+
+let migrationRun = false
 
 /**
  * Ensures the configuration directory exists
@@ -94,6 +159,12 @@ export async function ensureConfigDir(): Promise<void> {
   try {
     const configDir = getConfigDir()
     await fs.mkdir(configDir, { recursive: true })
+
+    // Run migration once per process
+    if (!migrationRun) {
+      migrationRun = true
+      await migrateFromVersionedDirs()
+    }
   } catch (error) {
     log('Error creating config directory:', error)
     throw error
