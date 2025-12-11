@@ -1,42 +1,5 @@
-import { debugLog } from './utils'
+import { debugLog, fetchOAuthMetadataJson } from './utils'
 import { fetchProtectedResourceMetadata, type ProtectedResourceMetadata } from './protected-resource-metadata'
-
-/**
- * Generic helper to fetch OAuth metadata from a well-known endpoint
- * @param metadataUrl The well-known metadata URL to fetch from
- * @param debugContext Additional context for debug logging
- * @returns The parsed metadata or undefined if fetch fails
- */
-async function fetchOAuthMetadataJson<T>(metadataUrl: string, debugContext: Record<string, unknown>): Promise<T | undefined> {
-  debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
-
-  try {
-    const response = await fetch(metadataUrl, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(5000),
-    })
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        debugLog('OAuth metadata endpoint not found (404)', { metadataUrl })
-      } else {
-        debugLog('Failed to fetch OAuth metadata', {
-          status: response.status,
-          statusText: response.statusText,
-        })
-      }
-      return undefined
-    }
-
-    return (await response.json()) as T
-  } catch (error) {
-    debugLog('Error fetching OAuth metadata', {
-      error: error instanceof Error ? error.message : String(error),
-      metadataUrl,
-    })
-    return undefined
-  }
-}
 
 /**
  * OAuth 2.0 Authorization Server Metadata as defined in RFC 8414
@@ -120,7 +83,8 @@ export async function fetchAuthorizationServerMetadata(serverUrl: string): Promi
 export async function fetchAuthorizationServerMetadataFromIssuer(issuerUrl: string): Promise<AuthorizationServerMetadata | undefined> {
   // Construct the well-known metadata URL from the issuer
   const { origin, pathname } = new URL(issuerUrl)
-  const path = pathname === '/' ? '' : pathname
+  // Remove trailing slash from pathname to avoid double slashes
+  const path = pathname === '/' ? '' : pathname.replace(/\/$/, '')
   const metadataUrl = `${origin}${path}/.well-known/oauth-authorization-server`
 
   const metadata = await fetchOAuthMetadataJson<AuthorizationServerMetadata>(metadataUrl, { issuerUrl })

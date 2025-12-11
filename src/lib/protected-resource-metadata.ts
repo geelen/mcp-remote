@@ -1,41 +1,4 @@
-import { debugLog } from './utils'
-
-/**
- * Generic helper to fetch OAuth metadata from a well-known endpoint
- * @param metadataUrl The well-known metadata URL to fetch from
- * @param debugContext Additional context for debug logging
- * @returns The parsed metadata or undefined if fetch fails
- */
-async function fetchOAuthMetadataJson<T>(metadataUrl: string, debugContext: Record<string, unknown>): Promise<T | undefined> {
-  debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
-
-  try {
-    const response = await fetch(metadataUrl, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(5000),
-    })
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        debugLog('OAuth metadata endpoint not found (404)', { metadataUrl })
-      } else {
-        debugLog('Failed to fetch OAuth metadata', {
-          status: response.status,
-          statusText: response.statusText,
-        })
-      }
-      return undefined
-    }
-
-    return (await response.json()) as T
-  } catch (error) {
-    debugLog('Error fetching OAuth metadata', {
-      error: error instanceof Error ? error.message : String(error),
-      metadataUrl,
-    })
-    return undefined
-  }
-}
+import { debugLog, fetchOAuthMetadataJson } from './utils'
 
 /**
  * OAuth 2.0 Protected Resource Metadata as defined in RFC 9728
@@ -132,13 +95,15 @@ function validateProtectedResourceMetadata(metadata: any, expectedResource: stri
     return false
   }
 
-  // RFC 9728 Section 3.3: Use exact Unicode code-point equality (no normalization)
-  // We normalize both URLs to ensure consistent comparison
+  // RFC 9728 Section 3.3: The resource field MUST match exactly using Unicode code-point equality
+  // While the spec requires no normalization of the strings themselves, we parse both URLs
+  // to extract and compare their canonical components (origin + pathname) to handle any
+  // differences in URL encoding or formatting that don't affect the actual resource identity
   try {
     const metadataResourceUrl = new URL(metadata.resource)
     const expectedResourceUrl = new URL(expectedResource)
 
-    // Compare normalized URLs (origin + pathname)
+    // Compare canonical URL components (origin + pathname)
     const metadataResourceNormalized = `${metadataResourceUrl.origin}${metadataResourceUrl.pathname}`
     const expectedResourceNormalized = `${expectedResourceUrl.origin}${expectedResourceUrl.pathname}`
 
