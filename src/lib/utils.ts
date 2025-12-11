@@ -882,3 +882,41 @@ export function shouldIncludeTool(ignorePatterns: string[], toolName: string): b
 
   return true // Tool doesn't match any ignore pattern, so include it
 }
+
+/**
+ * Generic helper to fetch OAuth metadata from a well-known endpoint
+ * @param metadataUrl The well-known metadata URL to fetch from
+ * @param debugContext Additional context for debug logging
+ * @returns The parsed metadata or undefined if fetch fails
+ */
+export async function fetchOAuthMetadataJson<T>(metadataUrl: string, debugContext: Record<string, unknown>): Promise<T | undefined> {
+  debugLog('Fetching OAuth metadata', { metadataUrl, ...debugContext })
+
+  try {
+    // Use globalThis.fetch to allow tests to mock it
+    const response = await globalThis.fetch(metadataUrl, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5000),
+    })
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        debugLog('OAuth metadata endpoint not found (404)', { metadataUrl })
+      } else {
+        debugLog('Failed to fetch OAuth metadata', {
+          status: response.status,
+          statusText: response.statusText,
+        })
+      }
+      return undefined
+    }
+
+    return (await response.json()) as T
+  } catch (error) {
+    debugLog('Error fetching OAuth metadata', {
+      error: error instanceof Error ? error.message : String(error),
+      metadataUrl,
+    })
+    return undefined
+  }
+}

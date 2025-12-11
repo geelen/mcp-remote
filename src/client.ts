@@ -24,7 +24,7 @@ import {
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
-import { fetchAuthorizationServerMetadata } from './lib/authorization-server-metadata'
+import { discoverOAuthMetadata } from './lib/authorization-server-metadata'
 
 /**
  * Main function to run the client
@@ -46,17 +46,18 @@ async function runClient(
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
 
-  // Pre-fetch authorization server metadata for scope validation
-  let authorizationServerMetadata
+  // Pre-discover OAuth metadata (RFC 9728 + RFC 8414)
+  let oauthMetadata
   try {
-    authorizationServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
-    if (authorizationServerMetadata?.scopes_supported) {
-      debugLog('Pre-fetched authorization server metadata', {
-        scopes_supported: authorizationServerMetadata.scopes_supported,
+    oauthMetadata = await discoverOAuthMetadata(serverUrl)
+    if (oauthMetadata.effectiveScopes) {
+      debugLog('Discovered OAuth metadata', {
+        source: oauthMetadata.discoverySource,
+        scopes: oauthMetadata.effectiveScopes,
       })
     }
   } catch (error) {
-    debugLog('Failed to pre-fetch authorization server metadata', error)
+    debugLog('Failed to discover OAuth metadata', error)
   }
 
   // Create the OAuth client provider
@@ -68,7 +69,7 @@ async function runClient(
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     serverUrlHash,
-    authorizationServerMetadata,
+    oauthMetadata,
   })
 
   // Create the client
