@@ -27,6 +27,16 @@ export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
+
+// Reconnection types
+export type ReconnectFunction = () => Promise<Transport>
+export interface ReconnectOptions {
+  enabled: boolean
+  maxAttempts: number
+  baseDelayMs: number
+  maxDelayMs?: number // Maximum delay between attempts (default: 30000)
+  connectionTimeoutMs?: number // Timeout for each connection attempt (default: 10000)
+}
 export { MCP_REMOTE_VERSION }
 
 const pid = process.pid
@@ -114,20 +124,252 @@ export function createMessageTransformer({
 }
 
 /**
- * Creates a bidirectional proxy between two transports
+ * Creates a bidirectional proxy between two transports with optional auto-reconnect
  * @param params The transport connections to proxy between
  */
 export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  reconnectFn,
+  reconnectOptions = { enabled: false, maxAttempts: 5, baseDelayMs: 1000 },
 }: {
   transportToClient: Transport
   transportToServer: Transport
   ignoredTools?: string[]
+  reconnectFn?: ReconnectFunction
+  reconnectOptions?: ReconnectOptions
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let currentTransportToServer = transportToServer
+  let isReconnecting = false
+  let reconnectAttempts = 0
+  let connectionHealthy = true
+  const pendingMessages: { message: Message; timestamp: number }[] = []
+  const queuedMessageIds = new Set<string | number>() // Track queued message IDs to prevent duplicates
+  const maxDelayMs = reconnectOptions.maxDelayMs ?? 15000
+  const connectionTimeoutMs = reconnectOptions.connectionTimeoutMs ?? 5000
+  const messageTimeoutMs = 60000 // Messages older than 60s will get error response
+  const requestTimeoutMs = 5000 // If no response in 5s, assume connection is dead (reasonable for local gateway)
+  const maxConsecutiveTimeouts = 3 // Exit process after this many consecutive timeouts
+  let consecutiveTimeouts = 0
+  const pendingRequests = new Map<string | number, { timeout: NodeJS.Timeout; message: Message }>()
+
+  // Store the original initialize message to re-send after reconnection
+  let savedInitializeMessage: Message | null = null
+  let initializeIdCounter = 1000000 // Use high IDs for internal initialize messages to avoid conflicts
+
+  // Helper to re-initialize MCP session after reconnection
+  async function reinitializeMcpSession(transport: Transport): Promise<boolean> {
+    if (!savedInitializeMessage) {
+      log('[Reinit] No saved initialize message, skipping MCP re-initialization')
+      return true // No initialize to send, consider it success
+    }
+
+    return new Promise((resolve) => {
+      const initId = initializeIdCounter++
+      const timeoutMs = 10000 // 10 second timeout for initialize
+
+      log(`[Reinit] Re-initializing MCP session with ID ${initId}...`)
+
+      // Create a new initialize message with our internal ID
+      const initMessage = {
+        jsonrpc: '2.0' as const,
+        id: initId,
+        method: 'initialize',
+        params: savedInitializeMessage.params,
+      }
+
+      let resolved = false
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          log('[Reinit] Initialize timeout - MCP session re-initialization failed')
+          resolve(false)
+        }
+      }, timeoutMs)
+
+      // Temporarily intercept the response
+      const originalOnMessage = transport.onmessage
+      transport.onmessage = (response: any) => {
+        // Check if this is the response to our initialize
+        if (response.id === initId) {
+          clearTimeout(timeout)
+          if (!resolved) {
+            resolved = true
+
+            if (response.error) {
+              log(`[Reinit] Initialize failed: ${response.error.message}`)
+              transport.onmessage = originalOnMessage
+              resolve(false)
+              return
+            }
+
+            log('[Reinit] Initialize successful, sending notifications/initialized...')
+
+            // Send notifications/initialized
+            const initializedNotification = {
+              jsonrpc: '2.0' as const,
+              method: 'notifications/initialized',
+            }
+
+            transport.send(initializedNotification).then(() => {
+              log('[Reinit] MCP session re-initialized successfully!')
+              transport.onmessage = originalOnMessage
+              resolve(true)
+            }).catch((err) => {
+              log('[Reinit] Failed to send initialized notification:', err)
+              transport.onmessage = originalOnMessage
+              resolve(false)
+            })
+          }
+        } else {
+          // Pass through other messages to original handler
+          originalOnMessage?.(response)
+        }
+      }
+
+      // Send the initialize message
+      transport.send(initMessage).catch((err) => {
+        clearTimeout(timeout)
+        if (!resolved) {
+          resolved = true
+          log('[Reinit] Failed to send initialize:', err)
+          transport.onmessage = originalOnMessage
+          resolve(false)
+        }
+      })
+    })
+  }
+
+  // Helper to send error response for a pending message
+  function sendErrorForPendingMessage(pending: { message: Message; timestamp: number }, errorMessage: string) {
+    if (pending.message.id) {
+      const errorResponse = {
+        jsonrpc: '2.0' as const,
+        id: pending.message.id,
+        error: {
+          code: -32603,
+          message: errorMessage,
+        },
+      }
+      log(`[Error→Local] Sending error for message ${pending.message.id}: ${errorMessage}`)
+      transportToClient.send(errorResponse).catch(onClientError)
+    }
+  }
+
+  // Helper to flush expired messages with error responses
+  function flushExpiredMessages() {
+    const now = Date.now()
+    const expiredIndices: number[] = []
+
+    pendingMessages.forEach((pending, index) => {
+      if (now - pending.timestamp > messageTimeoutMs) {
+        if (pending.message.id) {
+          queuedMessageIds.delete(pending.message.id)
+        }
+        sendErrorForPendingMessage(pending, 'Request timed out while waiting for server reconnection')
+        expiredIndices.push(index)
+      }
+    })
+
+    // Remove expired messages (in reverse to maintain indices)
+    for (let i = expiredIndices.length - 1; i >= 0; i--) {
+      pendingMessages.splice(expiredIndices[i], 1)
+    }
+  }
+
+  // Helper to send errors for all pending messages
+  function flushAllPendingMessagesWithError(errorMessage: string) {
+    while (pendingMessages.length > 0) {
+      const pending = pendingMessages.shift()!
+      if (pending.message.id) {
+        queuedMessageIds.delete(pending.message.id)
+      }
+      sendErrorForPendingMessage(pending, errorMessage)
+    }
+  }
+
+  // Helper to queue a message for retry (prevents duplicates)
+  function queueMessageForRetry(message: Message): boolean {
+    if (message.id && queuedMessageIds.has(message.id)) {
+      log(`[Queue] Message ${message.id} already queued, skipping duplicate`)
+      return false
+    }
+    if (message.id) {
+      queuedMessageIds.add(message.id)
+    }
+    pendingMessages.push({ message, timestamp: Date.now() })
+    return true
+  }
+
+  // Helper to track a request and set up timeout
+  function trackRequest(message: Message) {
+    if (!message.id) return
+
+    const timeout = setTimeout(() => {
+      // Request timed out - server might be zombie
+      log(`[Timeout] Request ${message.id} (${message.method}) timed out after ${requestTimeoutMs}ms`)
+      const pending = pendingRequests.get(message.id)
+      pendingRequests.delete(message.id)
+
+      // Increment consecutive timeout counter
+      consecutiveTimeouts++
+      log(`[Timeout] Consecutive timeouts: ${consecutiveTimeouts}/${maxConsecutiveTimeouts}`)
+
+      // Mark connection as unhealthy and trigger reconnection
+      if (connectionHealthy && !isReconnecting) {
+        log('[Timeout] Marking connection as unhealthy and triggering reconnection...')
+        connectionHealthy = false
+
+        // DON'T send error yet - queue the message for retry after reconnection
+        if (pending) {
+          log(`[Timeout] Queuing request ${message.id} for retry after reconnection...`)
+          queueMessageForRetry(pending.message)
+        }
+
+        // Close current transport to trigger reconnection
+        currentTransportToServer.close().catch(onServerError)
+      } else if (isReconnecting) {
+        // Already reconnecting - just queue for retry
+        if (pending) {
+          log(`[Timeout] Already reconnecting, queuing request ${message.id} for retry...`)
+          queueMessageForRetry(pending.message)
+        }
+      } else {
+        // Connection already marked unhealthy but not reconnecting yet - queue for retry
+        if (pending) {
+          log(`[Timeout] Connection unhealthy, queuing request ${message.id} for retry...`)
+          queueMessageForRetry(pending.message)
+        }
+      }
+    }, requestTimeoutMs)
+
+    pendingRequests.set(message.id, { timeout, message })
+  }
+
+  // Helper to clear request tracking when response is received
+  function clearRequestTracking(messageId: string | number) {
+    const pending = pendingRequests.get(messageId)
+    if (pending) {
+      clearTimeout(pending.timeout)
+      pendingRequests.delete(messageId)
+      // Reset consecutive timeout counter on successful response
+      if (consecutiveTimeouts > 0) {
+        log(`[Recovery] Response received, resetting consecutive timeout counter (was ${consecutiveTimeouts})`)
+        consecutiveTimeouts = 0
+      }
+    }
+  }
+
+  // Clear all pending request timeouts
+  function clearAllRequestTracking() {
+    for (const [id, pending] of pendingRequests) {
+      clearTimeout(pending.timeout)
+    }
+    pendingRequests.clear()
+  }
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -165,6 +407,143 @@ export function mcpProxy({
     },
   })
 
+  function setupServerTransportHandlers(serverTransport: Transport) {
+    serverTransport.onmessage = (_message) => {
+      // TODO: fix types
+      const message = messageTransformer.interceptResponse(_message as any)
+      log('[Remote→Local]', message.method || message.id)
+
+      // Clear the timeout for this request if it's a response
+      if (message.id !== undefined) {
+        clearRequestTracking(message.id)
+      }
+
+      debugLog('Remote → Local message', {
+        method: message.method,
+        id: message.id,
+        result: message.result ? 'result-present' : undefined,
+        error: message.error,
+      })
+
+      transportToClient.send(message).catch(onClientError)
+    }
+
+    serverTransport.onclose = async () => {
+      if (transportToClientClosed) {
+        return
+      }
+
+      // Clear all pending request timeouts since we're reconnecting
+      clearAllRequestTracking()
+      connectionHealthy = false
+
+      // Check if auto-reconnect is enabled
+      if (reconnectOptions.enabled && reconnectFn && reconnectAttempts < reconnectOptions.maxAttempts) {
+        log(`Remote transport closed. Starting reconnection loop...`)
+        debugLog('Remote transport closed, starting reconnection loop', { attempt: reconnectAttempts + 1 })
+
+        isReconnecting = true
+
+        // Reconnection loop with improved handling
+        while (reconnectAttempts < reconnectOptions.maxAttempts && !transportToClientClosed) {
+          reconnectAttempts++
+
+          // Calculate delay with exponential backoff, capped at maxDelayMs
+          const delay = Math.min(reconnectOptions.baseDelayMs * Math.pow(2, reconnectAttempts - 1), maxDelayMs)
+          log(`Reconnect attempt ${reconnectAttempts}/${reconnectOptions.maxAttempts} - waiting ${delay}ms...`)
+
+          await new Promise((resolve) => setTimeout(resolve, delay))
+
+          // Flush any expired messages while waiting
+          flushExpiredMessages()
+
+          try {
+            // Create a promise that rejects after timeout
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('Connection attempt timed out')), connectionTimeoutMs)
+            })
+
+            // Race between connection and timeout
+            log('Attempting to connect to remote server...')
+            const newTransport = await Promise.race([reconnectFn(), timeoutPromise])
+
+            currentTransportToServer = newTransport
+            setupServerTransportHandlers(newTransport)
+            newTransport.onerror = onServerError
+
+            log('Transport reconnected successfully!')
+            debugLog('Transport reconnected successfully', { attempts: reconnectAttempts })
+
+            // Re-initialize MCP session before sending queued messages
+            log('[Reconnect] Re-initializing MCP session...')
+            const reinitSuccess = await reinitializeMcpSession(newTransport)
+
+            if (!reinitSuccess) {
+              log('[Reconnect] MCP session re-initialization failed, will retry connection...')
+              // Close this transport and try again
+              newTransport.close().catch(() => {})
+              continue // Try next reconnection attempt
+            }
+
+            // Reset state
+            reconnectAttempts = 0
+            isReconnecting = false
+            connectionHealthy = true
+            consecutiveTimeouts = 0 // Reset timeout counter on successful reconnect
+
+            // Flush pending messages
+            log(`Flushing ${pendingMessages.length} queued messages...`)
+            while (pendingMessages.length > 0) {
+              const pending = pendingMessages.shift()!
+              // Remove from tracking set
+              if (pending.message.id) {
+                queuedMessageIds.delete(pending.message.id)
+              }
+              // Check if message hasn't expired
+              if (Date.now() - pending.timestamp < messageTimeoutMs) {
+                log('[Local→Remote] (queued)', pending.message.method || pending.message.id)
+                // Track the request for timeout
+                trackRequest(pending.message)
+                currentTransportToServer.send(pending.message).catch(onServerError)
+              } else {
+                sendErrorForPendingMessage(pending, 'Request timed out while waiting for server reconnection')
+              }
+            }
+
+            return // Successfully reconnected, exit the loop
+          } catch (error) {
+            log(`Reconnection attempt ${reconnectAttempts} failed:`, error)
+            debugLog('Reconnection attempt failed', { error, attempts: reconnectAttempts })
+            // Continue to next iteration
+          }
+        }
+
+        // If we get here, all reconnection attempts failed
+        log(`Max reconnect attempts (${reconnectOptions.maxAttempts}) reached. Closing connection.`)
+        debugLog('Max reconnect attempts reached', { attempts: reconnectAttempts })
+
+        // Send errors for all pending messages
+        flushAllPendingMessagesWithError('Server connection lost and reconnection failed')
+
+        transportToServerClosed = true
+        isReconnecting = false
+        connectionHealthy = false
+        transportToClient.close().catch(onClientError)
+      } else {
+        transportToServerClosed = true
+        connectionHealthy = false
+        debugLog('Remote transport closed, closing local transport')
+
+        // Send errors for any pending messages
+        flushAllPendingMessagesWithError('Server connection closed')
+
+        transportToClient.close().catch(onClientError)
+      }
+    }
+
+    serverTransport.onerror = onServerError
+  }
+
   transportToClient.onmessage = (_message) => {
     // TODO: fix types
     const message = messageTransformer.interceptRequest(_message as any)
@@ -187,26 +566,44 @@ export function mcpProxy({
       if (clientInfo) clientInfo.name = `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})`
       log(JSON.stringify(message, null, 2))
 
+      // Save the initialize message for potential re-initialization after reconnect
+      savedInitializeMessage = { ...message }
+      log('[Init] Saved initialize message for potential reconnection')
+
       debugLog('Initialize message with modified client info', { clientInfo })
     }
 
-    transportToServer.send(message).catch(onServerError)
-  }
+    // If reconnecting or connection is unhealthy, queue the message
+    if (isReconnecting || !connectionHealthy) {
+      log('[Local→Remote] (queuing during reconnect)', message.method || message.id)
+      queueMessageForRetry(message)
 
-  transportToServer.onmessage = (_message) => {
-    // TODO: fix types
-    const message = messageTransformer.interceptResponse(_message as any)
-    log('[Remote→Local]', message.method || message.id)
+      // Warn if queue is getting large
+      if (pendingMessages.length % 10 === 0) {
+        log(`Warning: ${pendingMessages.length} messages queued waiting for reconnection`)
+      }
+      return
+    }
 
-    debugLog('Remote → Local message', {
-      method: message.method,
-      id: message.id,
-      result: message.result ? 'result-present' : undefined,
-      error: message.error,
+    // Track requests that expect a response (have an id)
+    trackRequest(message)
+
+    currentTransportToServer.send(message).catch((error) => {
+      // Clear the timeout since send failed
+      if (message.id !== undefined) {
+        clearRequestTracking(message.id)
+      }
+      // If send fails, the connection might have just died
+      // Queue the message and trigger reconnection handling
+      log('[Local→Remote] Send failed, queuing message:', error)
+      queueMessageForRetry(message)
+      connectionHealthy = false
+      onServerError(error)
     })
-
-    transportToClient.send(message).catch(onClientError)
   }
+
+  // Set up handlers for the initial server transport
+  setupServerTransportHandlers(transportToServer)
 
   transportToClient.onclose = () => {
     if (transportToServerClosed) {
@@ -215,20 +612,10 @@ export function mcpProxy({
 
     transportToClientClosed = true
     debugLog('Local transport closed, closing remote transport')
-    transportToServer.close().catch(onServerError)
-  }
-
-  transportToServer.onclose = () => {
-    if (transportToClientClosed) {
-      return
-    }
-    transportToServerClosed = true
-    debugLog('Remote transport closed, closing local transport')
-    transportToClient.close().catch(onClientError)
+    currentTransportToServer.close().catch(onServerError)
   }
 
   transportToClient.onerror = onClientError
-  transportToServer.onerror = onServerError
 
   function onClientError(error: Error) {
     log('Error from local client:', error)
@@ -726,6 +1113,68 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  // Parse auto-reconnect options
+  const autoReconnect = args.includes('--auto-reconnect')
+  let maxReconnectAttempts = 20 // Default (enough attempts for gateway restarts)
+  const maxReconnectAttemptsIndex = args.indexOf('--max-reconnect-attempts')
+  if (maxReconnectAttemptsIndex !== -1 && maxReconnectAttemptsIndex < args.length - 1) {
+    const value = parseInt(args[maxReconnectAttemptsIndex + 1], 10)
+    if (!isNaN(value) && value > 0) {
+      maxReconnectAttempts = value
+      log(`Using max reconnect attempts: ${maxReconnectAttempts}`)
+    } else {
+      log(`Warning: Ignoring invalid --max-reconnect-attempts value: ${args[maxReconnectAttemptsIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let reconnectDelayMs = 1000 // Default 1 second
+  const reconnectDelayIndex = args.indexOf('--reconnect-delay')
+  if (reconnectDelayIndex !== -1 && reconnectDelayIndex < args.length - 1) {
+    const value = parseInt(args[reconnectDelayIndex + 1], 10)
+    if (!isNaN(value) && value > 0) {
+      reconnectDelayMs = value
+      log(`Using reconnect delay: ${reconnectDelayMs}ms`)
+    } else {
+      log(`Warning: Ignoring invalid --reconnect-delay value: ${args[reconnectDelayIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let maxReconnectDelayMs = 15000 // Default 15 seconds max (reasonable for local gateways)
+  const maxReconnectDelayIndex = args.indexOf('--max-reconnect-delay')
+  if (maxReconnectDelayIndex !== -1 && maxReconnectDelayIndex < args.length - 1) {
+    const value = parseInt(args[maxReconnectDelayIndex + 1], 10)
+    if (!isNaN(value) && value > 0) {
+      maxReconnectDelayMs = value
+      log(`Using max reconnect delay: ${maxReconnectDelayMs}ms`)
+    } else {
+      log(`Warning: Ignoring invalid --max-reconnect-delay value: ${args[maxReconnectDelayIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let connectionTimeoutMs = 5000 // Default 5 seconds timeout per connection attempt (fast fail for local)
+  const connectionTimeoutIndex = args.indexOf('--connection-timeout')
+  if (connectionTimeoutIndex !== -1 && connectionTimeoutIndex < args.length - 1) {
+    const value = parseInt(args[connectionTimeoutIndex + 1], 10)
+    if (!isNaN(value) && value > 0) {
+      connectionTimeoutMs = value
+      log(`Using connection timeout: ${connectionTimeoutMs}ms`)
+    } else {
+      log(`Warning: Ignoring invalid --connection-timeout value: ${args[connectionTimeoutIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  const reconnectOptions: ReconnectOptions = {
+    enabled: autoReconnect,
+    maxAttempts: maxReconnectAttempts,
+    baseDelayMs: reconnectDelayMs,
+    maxDelayMs: maxReconnectDelayMs,
+    connectionTimeoutMs: connectionTimeoutMs,
+  }
+
+  if (autoReconnect) {
+    log(`Auto-reconnect enabled: max ${maxReconnectAttempts} attempts, base delay ${reconnectDelayMs}ms, max delay ${maxReconnectDelayMs}ms, timeout ${connectionTimeoutMs}ms`)
+  }
+
   if (!serverUrl) {
     log(usage)
     process.exit(1)
@@ -802,6 +1251,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    reconnectOptions,
   }
 }
 

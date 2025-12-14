@@ -11,7 +11,7 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { connectToRemoteServer, log, debugLog, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy } from './lib/utils'
+import { connectToRemoteServer, log, debugLog, mcpProxy, parseCommandLineArgs, setupSignalHandlers, TransportStrategy, ReconnectOptions } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
@@ -32,6 +32,7 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  reconnectOptions: ReconnectOptions,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -96,17 +97,28 @@ async function runProxy(
     // Connect to remote server with lazy authentication
     const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
+    // Create a reconnect function that will establish a new connection to the remote server
+    const reconnectFn = async () => {
+      log('Creating new connection to remote server...')
+      return connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
+    }
+
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      reconnectFn,
+      reconnectOptions,
     })
 
     // Start the local STDIO server
     await localTransport.start()
     log('Local STDIO server running')
     log(`Proxy established successfully between local STDIO and remote ${remoteTransport.constructor.name}`)
+    if (reconnectOptions.enabled) {
+      log(`Auto-reconnect enabled (max ${reconnectOptions.maxAttempts} attempts, base delay ${reconnectOptions.baseDelayMs}ms)`)
+    }
     log('Press Ctrl+C to exit')
 
     // Setup cleanup handler
@@ -167,6 +179,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      reconnectOptions,
     }) => {
       return runProxy(
         serverUrl,
@@ -180,6 +193,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        reconnectOptions,
       )
     },
   )
