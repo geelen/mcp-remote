@@ -1,7 +1,7 @@
 import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
@@ -457,15 +457,21 @@ export async function connectToRemoteServer(
     return transport
   } catch (error: any) {
     // Check if it's a protocol error and we should attempt fallback
-    if (
-      error instanceof Error &&
+    // StreamableHTTPError has a `code` property with the HTTP status code
+    const isStreamableHTTPError = error instanceof StreamableHTTPError
+    const httpStatusCode = isStreamableHTTPError ? error.code : null
+    const shouldFallbackOnError =
       shouldAttemptFallback &&
-      (error.message.includes('405') ||
+      error instanceof Error &&
+      (httpStatusCode === 404 ||
+        httpStatusCode === 405 ||
+        error.message.includes('405') ||
         error.message.includes('Method Not Allowed') ||
         error.message.includes('404') ||
         error.message.includes('Not Found'))
-    ) {
-      log(`Received error: ${error.message}`)
+
+    if (shouldFallbackOnError) {
+      log(`Received error (status ${httpStatusCode ?? 'unknown'}): ${error.message}`)
 
       // If we've already tried falling back once, throw an error
       if (recursionReasons.has(REASON_TRANSPORT_FALLBACK)) {
