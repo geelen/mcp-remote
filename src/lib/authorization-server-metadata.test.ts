@@ -4,18 +4,33 @@ import { fetchAuthorizationServerMetadata, getMetadataUrl } from './authorizatio
 describe('authorization-server-metadata', () => {
   describe('getMetadataUrl', () => {
     it('should construct correct well-known URL', () => {
-      const url = getMetadataUrl('https://example.com/mcp')
+      const url = getMetadataUrl('https://example.com')
       expect(url).toBe('https://example.com/.well-known/oauth-authorization-server')
+    })
+
+    it('should handle URLs with a trailing slash', () => {
+      const url = getMetadataUrl('https://example.com/')
+      expect(url).toBe('https://example.com/.well-known/oauth-authorization-server')
+    })
+
+    it('should handle URLs with trailing slashes', () => {
+      const url = getMetadataUrl('https://example.com///')
+      expect(url).toBe('https://example.com/.well-known/oauth-authorization-server')
+    })
+
+    it('should construct well-known URL using path insertion when URL has path components', () => {
+      const url = getMetadataUrl('https://example.com/mcp')
+      expect(url).toBe('https://example.com/.well-known/oauth-authorization-server/mcp')
     })
 
     it('should handle URLs with different paths', () => {
       const url = getMetadataUrl('https://api.example.com/v1/mcp/server')
-      expect(url).toBe('https://api.example.com/.well-known/oauth-authorization-server')
+      expect(url).toBe('https://api.example.com/.well-known/oauth-authorization-server/v1/mcp/server')
     })
 
     it('should handle URLs with ports', () => {
       const url = getMetadataUrl('https://localhost:8080/mcp')
-      expect(url).toBe('https://localhost:8080/.well-known/oauth-authorization-server')
+      expect(url).toBe('https://localhost:8080/.well-known/oauth-authorization-server/mcp')
     })
   })
 
@@ -49,7 +64,7 @@ describe('authorization-server-metadata', () => {
 
       expect(metadata).toEqual(mockMetadata)
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://example.com/.well-known/oauth-authorization-server',
+        'https://example.com/.well-known/oauth-authorization-server/mcp',
         expect.objectContaining({
           headers: {
             Accept: 'application/json',
