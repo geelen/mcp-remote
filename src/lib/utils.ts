@@ -132,10 +132,12 @@ export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  authInitializer,
 }: {
   transportToClient: Transport
-  transportToServer: Transport
+  transportToServer: Transport | SSEClientTransport | StreamableHTTPClientTransport
   ignoredTools?: string[]
+  authInitializer?: AuthInitializer
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
@@ -201,7 +203,7 @@ export function mcpProxy({
       debugLog('Initialize message with modified client info', { clientInfo })
     }
 
-    transportToServer.send(message).catch(onServerError)
+    transportToServer.send(message).catch((error) => onSendError(error, message))
   }
 
   transportToServer.onmessage = (_message) => {
@@ -249,6 +251,44 @@ export function mcpProxy({
   function onServerError(error: Error) {
     log('Error from remote server:', error)
     debugLog('Error from remote server', { stack: error.stack })
+  }
+
+  async function onSendError(error: Error, failedMessage?: Message) {
+    if (error instanceof UnauthorizedError && authInitializer) {
+      debugLog('onSendError: Calling authInitializer to start auth flow')
+      const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
+
+      if (skipBrowserAuth) {
+        log('onSendError: Authentication required but skipping browser auth - using shared auth')
+      } else {
+        log('onSendError: Authentication required. Waiting for authorization...')
+      }
+
+      // Wait for the authorization code from the callback
+      debugLog('onSendError: Waiting for auth code from callback server')
+      const code = await waitForAuthCode()
+      debugLog('onSendError: Received auth code from callback server')
+
+      try {
+        log('onSendError: Completing authorization...')
+        // Check if transport has finishAuth method (SSEClientTransport or StreamableHTTPClientTransport)
+        if ('finishAuth' in transportToServer && typeof transportToServer.finishAuth === 'function') {
+          await transportToServer.finishAuth(code)
+          log('onSendError: Authorization completed successfully')
+
+          // Retry sending the failed message after successful re-authentication
+          if (failedMessage) {
+            log('onSendError: Retrying failed message after re-authentication')
+            await transportToServer.send(failedMessage)
+            log('onSendError: Message successfully sent after re-authentication')
+          }
+        } else {
+          log('onSendError: Warning: Transport does not support finishAuth method')
+        }
+      } catch (error) {
+        log('onSendError: Error completing authorization:', error)
+      }
+    }
   }
 }
 

@@ -114,6 +114,7 @@ async function runProxy(
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      authInitializer,
     })
 
     // Start the local STDIO server
