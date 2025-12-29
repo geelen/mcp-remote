@@ -193,10 +193,31 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Reading OAuth tokens')
     debugLog('Token request stack trace:', new Error().stack)
 
-    const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
+    // Read tokens with extended schema that includes expires_at
+    const tokens = await readJsonFile<OAuthTokens & { expires_at?: number }>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
 
     if (tokens) {
-      const timeLeft = tokens.expires_in || 0
+      // Calculate actual time left using expires_at if available (preferred),
+      // otherwise fall back to expires_in (less accurate - doesn't account for time since save)
+      let timeLeft: number
+      let isExpired: boolean
+
+      if (typeof tokens.expires_at === 'number' && tokens.expires_at > 0) {
+        // Use absolute timestamp for accurate expiration check
+        timeLeft = Math.floor((tokens.expires_at - Date.now()) / 1000)
+        isExpired = timeLeft <= 0
+        debugLog('Using expires_at for expiration check', {
+          expiresAt: new Date(tokens.expires_at).toISOString(),
+          timeLeftSeconds: timeLeft,
+        })
+      } else {
+        // Fall back to expires_in (legacy behavior - may be inaccurate)
+        timeLeft = tokens.expires_in || 0
+        isExpired = timeLeft <= 0
+        debugLog('⚠️ Using legacy expires_in (may be inaccurate)', {
+          expiresIn: tokens.expires_in,
+        })
+      }
 
       // Alert if expires_in is invalid
       if (typeof tokens.expires_in !== 'number' || tokens.expires_in < 0) {
@@ -212,8 +233,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         hasAccessToken: !!tokens.access_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
-        isExpired: timeLeft <= 0,
+        isExpired,
         expiresInValue: tokens.expires_in,
+        expiresAtValue: tokens.expires_at,
       })
     } else {
       debugLog('Token result: Not found')
@@ -238,14 +260,25 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       })
     }
 
+    // Calculate and store absolute expiration timestamp for accurate expiration checks later
+    // This prevents the issue where expires_in becomes stale when read from disk
+    const expiresAt = typeof tokens.expires_in === 'number' && tokens.expires_in > 0 ? Date.now() + tokens.expires_in * 1000 : undefined
+
     debugLog('Saving tokens', {
       hasAccessToken: !!tokens.access_token,
       hasRefreshToken: !!tokens.refresh_token,
       expiresIn: `${timeLeft} seconds`,
       expiresInValue: tokens.expires_in,
+      expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
     })
 
-    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+    // Store tokens with additional expires_at field for accurate expiration tracking
+    const tokensWithExpiry = {
+      ...tokens,
+      ...(expiresAt ? { expires_at: expiresAt } : {}),
+    }
+
+    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensWithExpiry)
   }
 
   /**

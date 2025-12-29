@@ -547,8 +547,34 @@ export async function connectToRemoteServer(
         log('Authorization error:', authError)
         debugLog('Authorization error during finishAuth', {
           errorMessage: authError.message,
+          errorCode: authError instanceof OAuthError ? authError.errorCode : undefined,
           stack: authError.stack,
         })
+
+        // Handle invalid_grant error specifically - this means the refresh token is invalid/expired
+        // Clear tokens and trigger fresh authentication
+        const isInvalidGrant =
+          (authError instanceof OAuthError && authError.errorCode === 'invalid_grant') ||
+          (authError.message && authError.message.includes('invalid_grant'))
+
+        if (isInvalidGrant) {
+          log('Refresh token is invalid or expired. Clearing tokens and re-authenticating...')
+          debugLog('Detected invalid_grant error, invalidating tokens')
+
+          // Invalidate the stale tokens
+          if (authProvider && typeof authProvider.invalidateCredentials === 'function') {
+            await authProvider.invalidateCredentials('tokens')
+          }
+
+          // If we haven't already retried due to invalid_grant, try fresh auth
+          const REASON_INVALID_GRANT = 'invalid-grant-retry'
+          if (!recursionReasons.has(REASON_INVALID_GRANT)) {
+            recursionReasons.add(REASON_INVALID_GRANT)
+            log('Retrying with fresh authentication...')
+            return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+          }
+        }
+
         throw authError
       }
     } else {
