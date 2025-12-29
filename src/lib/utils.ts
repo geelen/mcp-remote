@@ -133,13 +133,16 @@ export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  authInitializer,
 }: {
   transportToClient: Transport
-  transportToServer: Transport
+  transportToServer: Transport | SSEClientTransport | StreamableHTTPClientTransport
   ignoredTools?: string[]
+  authInitializer?: AuthInitializer
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let reAuthPromise: Promise<void> | null = null
   let initializeRequestId: string | number | undefined
   let lastInitialize: Message | null = null
   let reinitSeq = 0
@@ -360,6 +363,61 @@ export function mcpProxy({
       await transportToServer.send(message)
       return
     } catch (error) {
+      if (error instanceof UnauthorizedError && authInitializer) {
+        // If a re-auth flow is already in progress, wait for it instead of starting another
+        if (reAuthPromise) {
+          debugLog('onSendError: Re-auth already in progress, waiting for it to complete')
+          await reAuthPromise
+          if (message) {
+            log('onSendError: Retrying failed message after shared re-authentication')
+            await transportToServer.send(message)
+            log('onSendError: Message successfully sent after shared re-authentication')
+          }
+          return
+        }
+
+        reAuthPromise = (async () => {
+          debugLog('onSendError: Calling authInitializer to start auth flow')
+          const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
+
+          if (skipBrowserAuth) {
+            log('onSendError: Authentication required but skipping browser auth - using shared auth')
+          } else {
+            log('onSendError: Authentication required. Waiting for authorization...')
+          }
+
+          // Wait for the authorization code from the callback
+          debugLog('onSendError: Waiting for auth code from callback server')
+          const code = await waitForAuthCode()
+          debugLog('onSendError: Received auth code from callback server')
+
+          log('onSendError: Completing authorization...')
+          // Check if transport has finishAuth method (SSEClientTransport or StreamableHTTPClientTransport)
+          if ('finishAuth' in transportToServer && typeof transportToServer.finishAuth === 'function') {
+            await transportToServer.finishAuth(code)
+            log('onSendError: Authorization completed successfully')
+          } else {
+            log('onSendError: Warning: Transport does not support finishAuth method')
+          }
+        })()
+
+        try {
+          await reAuthPromise
+
+          // Retry sending the failed message after successful re-authentication
+          if (message) {
+            log('onSendError: Retrying failed message after re-authentication')
+            await transportToServer.send(message)
+            log('onSendError: Message successfully sent after re-authentication')
+          }
+        } catch (error) {
+          log('onSendError: Error completing authorization:', error)
+        } finally {
+          reAuthPromise = null
+        }
+        return
+      }
+
       // Re-initializing in response to a failed initialize would loop
       if (!isSessionExpired(error as Error) || message.method === 'initialize') {
         onServerError(error as Error)
@@ -749,6 +807,13 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     authCompletedResolve = resolve
   })
 
+  // Listen for reset-auth-code event to reset authCode to null
+  options.events.on('reset-auth-code', () => {
+    log('Resetting authCode to null due to new authorization flow')
+    debugLog('Received reset-auth-code event, resetting authCode')
+    authCode = null
+  })
+
   // Long-polling endpoint
   app.get('/wait-for-auth', (req, res) => {
     if (authCode) {
@@ -858,11 +923,13 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     return new Promise((resolve) => {
       if (authCode) {
         resolve(authCode)
+        authCode = null
         return
       }
 
       options.events.once('auth-code-received', (code) => {
         resolve(code)
+        authCode = null
       })
     })
   }
