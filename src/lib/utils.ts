@@ -693,11 +693,13 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     return new Promise((resolve) => {
       if (authCode) {
         resolve(authCode)
+        authCode = null 
         return
       }
 
       options.events.once('auth-code-received', (code) => {
         resolve(code)
+        authCode = null 
       })
     })
   }
