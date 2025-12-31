@@ -618,6 +618,13 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     authCompletedResolve = resolve
   })
 
+  // Listen for reset-auth-code event to reset authCode to null
+  options.events.on('reset-auth-code', () => {
+    log('Resetting authCode to null due to new authorization flow')
+    debugLog('Received reset-auth-code event, resetting authCode')
+    authCode = null
+  })
+
   // Long-polling endpoint
   app.get('/wait-for-auth', (req, res) => {
     if (authCode) {
