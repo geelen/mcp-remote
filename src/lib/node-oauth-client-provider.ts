@@ -34,6 +34,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  private events?: import('events').EventEmitter
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -54,6 +55,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+    this.events = options.events
   }
 
   get redirectUrl(): string {
@@ -253,6 +255,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    // Reset the auth code to null when starting a new authorization flow
+    if (this.events) {
+      debugLog('Emitting reset-auth-code event')
+      this.events.emit('reset-auth-code')
+    }
+
     // Optionally fetch metadata for debugging/informational purposes (non-blocking)
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
