@@ -155,7 +155,9 @@ export async function readJsonFile<T>(serverUrlHash: string, filename: string, s
 }
 
 /**
- * Writes a JSON object to a file
+ * Writes a JSON object to a file atomically using temp file + rename pattern.
+ * This prevents race conditions where multiple processes might read partially-written files.
+ * The rename operation is atomic on POSIX systems.
  * @param serverUrlHash The hash of the server URL
  * @param filename The name of the file to write
  * @param data The data to write
@@ -164,7 +166,26 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
+
+    // Use atomic write pattern: write to temp file, then rename
+    // This prevents other processes from reading partially-written files
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
+
+    try {
+      // Write to temporary file first
+      await fs.writeFile(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
+
+      // Atomic rename (on POSIX systems)
+      await fs.rename(tempPath, filePath)
+    } catch (writeError) {
+      // Clean up temp file if it exists
+      try {
+        await fs.unlink(tempPath)
+      } catch {
+        // Ignore cleanup errors
+      }
+      throw writeError
+    }
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
