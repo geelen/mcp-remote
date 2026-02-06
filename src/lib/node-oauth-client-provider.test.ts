@@ -104,6 +104,42 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
     })
+
+    it('should include resource parameter when authorizeResource is provided', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizeResource: 'https://api.example.com/mcp',
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      await provider.redirectToAuthorization(authUrl)
+
+      expect(authUrl.searchParams.get('resource')).toBe('https://api.example.com/mcp')
+    })
+
+    it('should remove resource parameter when skipResourceParameter is true', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizeResource: 'https://api.example.com/mcp',
+        skipResourceParameter: true,
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize?resource=existing')
+      await provider.redirectToAuthorization(authUrl)
+
+      expect(authUrl.searchParams.has('resource')).toBe(false)
+    })
+
+    it('should make validateResourceURL return undefined when skipResourceParameter is true', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        skipResourceParameter: true,
+      })
+
+      expect(provider.validateResourceURL).toBeDefined()
+      const result = await provider.validateResourceURL!(new URL('https://example.com'), 'https://configured.example.com')
+      expect(result).toBeUndefined()
+    })
   })
 
   describe('backward compatibility', () => {

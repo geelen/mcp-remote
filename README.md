@@ -168,6 +168,8 @@ Each unique combination of server URL, resource, and custom headers will maintai
 
 * To suppress default logs, add the `--silent` flag. This will prevent logs from being emitted, except in the case where `--debug` is also passed.
 
+* To disable the `resource=` query parameter in authorization requests (required by some OAuth providers like Entra ID v2), add the `--disable-resource-parameter` flag or set `--resource ""` in your configuration.
+
 ```json
       "args": [
         "mcp-remote",

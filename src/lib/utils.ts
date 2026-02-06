@@ -830,12 +830,28 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
-  // Parse resource to authorize
-  let authorizeResource = '' // Default
+  // Parse resource to authorize / disable flag
+  let authorizeResource: string | undefined
+  let skipResourceParameter = args.includes('--disable-resource-parameter')
+  if (skipResourceParameter) {
+    log('Resource parameter disabled - authorization requests will not include the resource query value')
+  }
+
   const resourceIndex = args.indexOf('--resource')
   if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
-    authorizeResource = args[resourceIndex + 1]
-    log(`Using authorize resource: ${authorizeResource}`)
+    const rawResource = args[resourceIndex + 1]
+    const trimmedResource = rawResource?.trim() ?? ''
+
+    if (trimmedResource.length === 0) {
+      skipResourceParameter = true
+      log('Empty --resource value provided - resource parameter will be removed from authorization requests')
+    } else if (skipResourceParameter) {
+      log('Warning: Both --resource and --disable-resource-parameter were provided. The resource parameter will be removed.')
+      authorizeResource = trimmedResource
+    } else {
+      authorizeResource = trimmedResource
+      log(`Using authorize resource: ${authorizeResource}`)
+    }
   }
 
   // Parse ignored tools
@@ -939,6 +955,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    skipResourceParameter,
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,

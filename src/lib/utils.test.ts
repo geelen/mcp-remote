@@ -45,6 +45,36 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.serverUrl).toBe('http://localhost:8080/sse')
   })
 
+  it('Scenario: Disable resource parameter via flag', async () => {
+    const args = ['https://example.com/sse', '--disable-resource-parameter']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.skipResourceParameter).toBe(true)
+    expect(result.authorizeResource).toBeUndefined()
+  })
+
+  it('Scenario: Parse explicit authorize resource', async () => {
+    const args = ['https://example.com/sse', '--resource', 'https://tenant.example.com/']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.authorizeResource).toBe('https://tenant.example.com/')
+    expect(result.skipResourceParameter).toBe(false)
+  })
+
+  it('Scenario: Empty authorize resource removes param', async () => {
+    const args = ['https://example.com/sse', '--resource', '   ']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.authorizeResource).toBeUndefined()
+    expect(result.skipResourceParameter).toBe(true)
+  })
+
   it('Scenario: Parse 127.0.0.1 URL with HTTP protocol', async () => {
     // Given command line arguments with 127.0.0.1 HTTP URL
     const args = ['http://127.0.0.1:8080/sse']
