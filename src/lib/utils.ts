@@ -141,6 +141,7 @@ export function mcpProxy({
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let reAuthPromise: Promise<void> | null = null
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -255,38 +256,56 @@ export function mcpProxy({
 
   async function onSendError(error: Error, failedMessage?: Message) {
     if (error instanceof UnauthorizedError && authInitializer) {
-      debugLog('onSendError: Calling authInitializer to start auth flow')
-      const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
-
-      if (skipBrowserAuth) {
-        log('onSendError: Authentication required but skipping browser auth - using shared auth')
-      } else {
-        log('onSendError: Authentication required. Waiting for authorization...')
+      // If a re-auth flow is already in progress, wait for it instead of starting another
+      if (reAuthPromise) {
+        debugLog('onSendError: Re-auth already in progress, waiting for it to complete')
+        await reAuthPromise
+        if (failedMessage) {
+          log('onSendError: Retrying failed message after shared re-authentication')
+          await transportToServer.send(failedMessage)
+          log('onSendError: Message successfully sent after shared re-authentication')
+        }
+        return
       }
 
-      // Wait for the authorization code from the callback
-      debugLog('onSendError: Waiting for auth code from callback server')
-      const code = await waitForAuthCode()
-      debugLog('onSendError: Received auth code from callback server')
+      reAuthPromise = (async () => {
+        debugLog('onSendError: Calling authInitializer to start auth flow')
+        const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
-      try {
+        if (skipBrowserAuth) {
+          log('onSendError: Authentication required but skipping browser auth - using shared auth')
+        } else {
+          log('onSendError: Authentication required. Waiting for authorization...')
+        }
+
+        // Wait for the authorization code from the callback
+        debugLog('onSendError: Waiting for auth code from callback server')
+        const code = await waitForAuthCode()
+        debugLog('onSendError: Received auth code from callback server')
+
         log('onSendError: Completing authorization...')
         // Check if transport has finishAuth method (SSEClientTransport or StreamableHTTPClientTransport)
         if ('finishAuth' in transportToServer && typeof transportToServer.finishAuth === 'function') {
           await transportToServer.finishAuth(code)
           log('onSendError: Authorization completed successfully')
-
-          // Retry sending the failed message after successful re-authentication
-          if (failedMessage) {
-            log('onSendError: Retrying failed message after re-authentication')
-            await transportToServer.send(failedMessage)
-            log('onSendError: Message successfully sent after re-authentication')
-          }
         } else {
           log('onSendError: Warning: Transport does not support finishAuth method')
         }
+      })()
+
+      try {
+        await reAuthPromise
+
+        // Retry sending the failed message after successful re-authentication
+        if (failedMessage) {
+          log('onSendError: Retrying failed message after re-authentication')
+          await transportToServer.send(failedMessage)
+          log('onSendError: Message successfully sent after re-authentication')
+        }
       } catch (error) {
         log('onSendError: Error completing authorization:', error)
+      } finally {
+        reAuthPromise = null
       }
     }
   }
