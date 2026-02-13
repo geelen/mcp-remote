@@ -645,8 +645,9 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, '127.0.0.1', () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  const host = options.listenHost || '127.0.0.1'
+  const server = app.listen(options.port, host, () => {
+    log(`OAuth callback server running at http://${host}:${options.port}`)
   })
 
   const waitForAuthCode = (): Promise<string> => {
@@ -800,6 +801,33 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using callback hostname: ${host}`)
   }
 
+  // Parse callback URL for reverse proxy support
+  let callbackUrl = '' // Default empty
+  const callbackUrlIndex = args.indexOf('--callback-url')
+  if (callbackUrlIndex !== -1 && callbackUrlIndex < args.length - 1) {
+    callbackUrl = args[callbackUrlIndex + 1]
+    try {
+      new URL(callbackUrl)
+      log(`Using callback URL: ${callbackUrl}`)
+      // Warn if both --host and --callback-url are provided
+      if (hostIndex !== -1 && hostIndex < args.length - 1) {
+        log(`Warning: Both --host and --callback-url provided. --callback-url takes precedence.`)
+      }
+    } catch {
+      log(`Error: Invalid callback URL: ${callbackUrl}`)
+      log(usage)
+      process.exit(1)
+    }
+  }
+
+  // Parse listen host for reverse proxy support
+  let listenHost = 'localhost' // Default
+  const listenHostIndex = args.indexOf('--listen-host')
+  if (listenHostIndex !== -1 && listenHostIndex < args.length - 1) {
+    listenHost = args[listenHostIndex + 1]
+    log(`Using listen host: ${listenHost}`)
+  }
+
   let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
   const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
   if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
@@ -880,7 +908,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     process.exit(1)
   }
   // Calculate hash with all parsed parameters for cache isolation
-  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers)
+  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers, callbackUrl)
 
   // Set server hash globally for debug logging
   global.currentServerUrlHash = serverUrlHash
@@ -942,6 +970,8 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    callbackUrl,
+    listenHost,
   }
 }
 
@@ -974,8 +1004,13 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
  * @param headers Optional custom headers
  * @returns MD5 hash of the configuration
  */
-export function getServerUrlHash(serverUrl: string, authorizeResource?: string, headers?: Record<string, string>): string {
-  // Include resource and headers in hash to isolate OAuth sessions
+export function getServerUrlHash(
+  serverUrl: string,
+  authorizeResource?: string,
+  headers?: Record<string, string>,
+  callbackUrl?: string,
+): string {
+  // Include resource, headers, and callbackUrl in hash to isolate OAuth sessions
   // per unique server configuration (fixes #25)
   const parts = [serverUrl]
   if (authorizeResource) parts.push(authorizeResource)
@@ -983,6 +1018,7 @@ export function getServerUrlHash(serverUrl: string, authorizeResource?: string, 
     const sortedKeys = Object.keys(headers).sort()
     parts.push(JSON.stringify(headers, sortedKeys))
   }
+  if (callbackUrl) parts.push(callbackUrl)
   return crypto.createHash('md5').update(parts.join('|')).digest('hex')
 }
 
