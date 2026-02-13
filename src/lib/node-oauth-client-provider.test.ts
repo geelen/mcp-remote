@@ -302,4 +302,98 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(clientMetadata.scope).toBe('openid email profile')
     })
   })
+
+  describe('redirectUrl getter', () => {
+    it('should return callbackUrl when provided', () => {
+      // Given a provider with callbackUrl option
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        callbackUrl: 'https://proxy.example.com/oauth/callback',
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then it should return the callbackUrl
+      expect(redirectUrl).toBe('https://proxy.example.com/oauth/callback')
+    })
+
+    it('should construct URL from host, port, and path when callbackUrl is not provided', () => {
+      // Given a provider without callbackUrl option
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        host: 'localhost',
+        callbackPort: 8080,
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then it should construct URL from host, port, and path
+      expect(redirectUrl).toBe('http://localhost:8080/oauth/callback')
+    })
+
+    it('should use custom host in constructed URL', () => {
+      // Given a provider with custom host
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        host: 'custom.host.com',
+        callbackPort: 3000,
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then it should use the custom host
+      expect(redirectUrl).toBe('http://custom.host.com:3000/oauth/callback')
+    })
+
+    it('should use custom callback path when provided', () => {
+      // Given a provider with custom callback path
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        host: 'localhost',
+        callbackPort: 8080,
+        callbackPath: '/custom/callback/path',
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then it should use the custom path
+      expect(redirectUrl).toBe('http://localhost:8080/custom/callback/path')
+    })
+
+    it('should prioritize callbackUrl over host/port construction', () => {
+      // Given a provider with both callbackUrl and host/port
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        callbackUrl: 'https://proxy.example.com/callback',
+        host: 'custom.host.com',
+        callbackPort: 9999,
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then callbackUrl should take precedence
+      expect(redirectUrl).toBe('https://proxy.example.com/callback')
+    })
+
+    it('should use empty string callbackUrl as falsy and fallback to host/port', () => {
+      // Given a provider with empty string callbackUrl
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        callbackUrl: '',
+        host: 'localhost',
+        callbackPort: 8080,
+      })
+
+      // When getting redirectUrl
+      const redirectUrl = provider.redirectUrl
+
+      // Then it should fallback to constructing URL from host/port
+      expect(redirectUrl).toBe('http://localhost:8080/oauth/callback')
+    })
+  })
 })

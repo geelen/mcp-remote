@@ -146,6 +146,41 @@ Each unique combination of server URL, resource, and custom headers will maintai
       ]
 ```
 
+* To specify an explicit callback URL for reverse proxy configurations, add the `--callback-url` flag. This is useful when running behind a reverse proxy like ngrok or Cloudflare Tunnel.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--callback-url",
+        "https://my-domain.ngrok.io/oauth/callback"
+      ]
+```
+
+* To specify which host the local callback server should listen on, add the `--listen-host` flag. Use `0.0.0.0` to listen on all interfaces (e.g., for Docker containers).
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--listen-host",
+        "0.0.0.0"
+      ]
+```
+
+* To run behind a reverse proxy (e.g., ngrok, Cloudflare Tunnel), use `--callback-url` for the public URL and `--listen-host` to bind to the appropriate interface:
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--callback-url",
+        "https://my-domain.ngrok.io/oauth/callback",
+        "--listen-host",
+        "0.0.0.0"
+      ]
+```
+
 * To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
 
 ```json
