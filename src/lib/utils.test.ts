@@ -260,6 +260,142 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.transportStrategy).toBe('sse-only')
   })
 
+  it('Scenario: Parse --callback-url flag with valid URL', async () => {
+    // Given command line arguments with --callback-url
+    const args = ['https://example.com/sse', '--callback-url', 'https://auth.example.com/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the callback URL should be correctly parsed
+    expect(result.serverUrl).toBe('https://example.com/sse')
+    expect(result.callbackUrl).toBe('https://auth.example.com/callback')
+  })
+
+  it('Scenario: Use empty callbackUrl when --callback-url not provided', async () => {
+    // Given command line arguments without --callback-url
+    const args = ['https://example.com/sse']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the callbackUrl should be empty string by default
+    expect(result.callbackUrl).toBe('')
+  })
+
+  it('Scenario: Parse --callback-url with custom port', async () => {
+    // Given command line arguments with callback URL and custom port
+    const args = ['https://example.com/sse', '8080', '--callback-url', 'https://proxy.example.com:9000/oauth/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then both callback port and callback URL should be correctly parsed
+    expect(result.callbackPort).toBe(8080)
+    expect(result.callbackUrl).toBe('https://proxy.example.com:9000/oauth/callback')
+  })
+
+  it('Scenario: Parse --listen-host flag with custom host', async () => {
+    // Given command line arguments with --listen-host
+    const args = ['https://example.com/sse', '--listen-host', '0.0.0.0']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the listen host should be correctly parsed
+    expect(result.serverUrl).toBe('https://example.com/sse')
+    expect(result.listenHost).toBe('0.0.0.0')
+  })
+
+  it('Scenario: Use default listenHost when not specified', async () => {
+    // Given command line arguments without --listen-host
+    const args = ['https://example.com/sse']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the default listen host should be localhost
+    expect(result.listenHost).toBe('localhost')
+  })
+
+  it('Scenario: Parse --listen-host with IP address', async () => {
+    // Given command line arguments with IP listen host
+    const args = ['https://example.com/sse', '--listen-host', '127.0.0.1']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the listen host should be correctly parsed as IP address
+    expect(result.listenHost).toBe('127.0.0.1')
+  })
+
+  it('Scenario: Parse both --host and --callback-url together', async () => {
+    // Given command line arguments with both --host and --callback-url
+    const args = ['https://example.com/sse', '--host', 'custom.host.com', '--callback-url', 'https://proxy.example.com/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then both should be correctly parsed
+    expect(result.host).toBe('custom.host.com')
+    expect(result.callbackUrl).toBe('https://proxy.example.com/callback')
+  })
+
+  it('Scenario: Parse --listen-host with other arguments', async () => {
+    // Given command line arguments with listen host, port, and callback URL
+    const args = ['https://example.com/sse', '3000', '--listen-host', '0.0.0.0', '--callback-url', 'https://proxy.example.com/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then all arguments should be correctly parsed
+    expect(result.callbackPort).toBe(3000)
+    expect(result.listenHost).toBe('0.0.0.0')
+    expect(result.callbackUrl).toBe('https://proxy.example.com/callback')
+  })
+
+  it('Scenario: Log warning when both --host and --callback-url are provided', async () => {
+    // Given command line arguments with both --host and --callback-url
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--host', 'custom.host.com', '--callback-url', 'https://proxy.example.com/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then both values should be parsed and warning should be logged
+    expect(result.host).toBe('custom.host.com')
+    expect(result.callbackUrl).toBe('https://proxy.example.com/callback')
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Warning: Both --host and --callback-url provided'))
+
+    consoleSpy.mockRestore()
+  })
+
+  it('Scenario: Log warning when --callback-url and --host order is reversed', async () => {
+    // Given command line arguments with --callback-url before --host
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--callback-url', 'https://proxy.example.com/callback', '--host', 'custom.host.com']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then both values should be parsed and warning should be logged
+    expect(result.host).toBe('custom.host.com')
+    expect(result.callbackUrl).toBe('https://proxy.example.com/callback')
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Warning: Both --host and --callback-url provided'))
+
+    consoleSpy.mockRestore()
+  })
+
   it('Scenario: Return empty ignored tools array when none specified', async () => {
     // Given command line arguments without --ignore-tool flags
     const args = ['https://example.com/sse']
