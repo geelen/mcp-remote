@@ -682,14 +682,22 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     return undefined
   }
 
-  const localhostRedirectUri = clientInfo.redirect_uris
+  // Try localhost first (backward compatibility for standard mode)
+  let redirectUri = clientInfo.redirect_uris
     .map((uri) => new URL(uri))
     .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
-  if (!localhostRedirectUri) {
-    throw new Error('Cannot find localhost callback URI from existing client information')
+
+  // If no localhost found, use any redirect URI (reverse proxy mode)
+  if (!redirectUri && clientInfo.redirect_uris.length > 0) {
+    redirectUri = new URL(clientInfo.redirect_uris[0])
   }
 
-  return parseInt(localhostRedirectUri.port)
+  if (!redirectUri) {
+    return undefined
+  }
+
+  const port = parseInt(redirectUri.port)
+  return isNaN(port) ? undefined : port
 }
 
 function calculateDefaultPort(serverUrlHash: string): number {
