@@ -1,0 +1,49 @@
+{
+  "dxt_version": "0.1",
+  "name": "mcp-remote",
+  "display_name": "Remote MCP Connector",
+  "version": "1.5.0",
+  "description": "A universal connector that enables AI assistants to connect to any remote Model Context Protocol (MCP) server via mcp-remote",
+  "long_description": "This universal MCP connector allows you to connect to any remote Model Context Protocol server using the mcp-remote adapter. Simply provide the URL of your remote MCP server and start using its tools immediately.\n\nFeatures:\n\n- Connect to any remote MCP server\n- Support for OAuth authentication\n- SSL/TLS encrypted connections\n- No local server installation required\n- Works with all MCP-compatible clients\n- Easy one-time setup\n\nCompatible with Claude Desktop, Cursor, Windsurf, ChatWise, and any MCP-compatible clients.",
+  "author": {
+    "name": "Tommy Nguyen"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geelen/mcp-remote"
+  },
+  "homepage": "https://github.com/geelen/mcp-remote",
+  "documentation": "https://github.com/geelen/mcp-remote/blob/main/README.md",
+  "support": "https://github.com/geelen/mcp-remote/issues",
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "mcp-remote",
+    "mcp_config": {
+      "command": "npx",
+      "args": ["-y","mcp-remote", "${user_config.server_url}"]
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Remote MCP Server URL",
+      "description": "The complete URL of the remote MCP server (e.g., https://example.com/mcp)",
+      "required": true
+    }
+  },
+  "tools": [
+    {
+      "name": "dynamic",
+      "description": "Tools are dynamically loaded from the connected remote MCP server"
+    }
+  ]
+}
