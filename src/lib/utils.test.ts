@@ -419,6 +419,58 @@ describe('Feature: Command Line Arguments Parsing', () => {
     consoleSpy.mockRestore()
   })
 
+  it('Scenario: Use default callback path when not specified', async () => {
+    // Given command line arguments without --callback-path flag
+    const args = ['https://example.com/sse']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the default callback path should be /oauth/callback
+    expect(result.callbackPath).toBe('/oauth/callback')
+  })
+
+  it('Scenario: Parse custom callback path', async () => {
+    // Given command line arguments with --callback-path flag
+    const args = ['https://example.com/sse', '--callback-path', '/callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the callback path should be set to the custom value
+    expect(result.callbackPath).toBe('/callback')
+  })
+
+  it('Scenario: Auto-prefix callback path with slash if missing', async () => {
+    // Given command line arguments with --callback-path without leading slash
+    const args = ['https://example.com/sse', '--callback-path', 'callback']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then the callback path should be auto-prefixed with /
+    expect(result.callbackPath).toBe('/callback')
+  })
+
+  it('Scenario: Handle callback path with other arguments', async () => {
+    // Given command line arguments with callback path mixed with other arguments
+    const args = ['https://example.com/sse', '3000', '--callback-path', '/custom/callback', '--host', 'localhost', '--transport', 'sse-only']
+    const usage = 'test usage'
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, usage)
+
+    // Then all arguments should be correctly parsed including callback path
+    expect(result.serverUrl).toBe('https://example.com/sse')
+    expect(result.callbackPort).toBe(3000)
+    expect(result.callbackPath).toBe('/custom/callback')
+    expect(result.host).toBe('localhost')
+    expect(result.transportStrategy).toBe('sse-only')
+  })
+
   it('Scenario: Suppresses LOG when using --silent', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const args = ['https://example.com/sse', '--auth-timeout', '45', '--silent']

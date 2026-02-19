@@ -106,6 +106,33 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('callback path', () => {
+    it('should use default callback path /oauth/callback', () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      expect(provider.redirectUrl).toBe('http://localhost:8080/oauth/callback')
+    })
+
+    it('should use custom callback path when provided', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        callbackPath: '/callback',
+      })
+
+      expect(provider.redirectUrl).toBe('http://localhost:8080/callback')
+    })
+
+    it('should include custom callback path in client metadata redirect_uris', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        callbackPath: '/callback',
+      })
+
+      const metadata = provider.clientMetadata
+      expect(metadata.redirect_uris).toEqual(['http://localhost:8080/callback'])
+    })
+  })
+
   describe('backward compatibility', () => {
     it('should preserve existing custom scope behavior', () => {
       provider = new NodeOAuthClientProvider({
