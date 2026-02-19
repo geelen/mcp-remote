@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import { AuthMode, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
@@ -685,10 +685,16 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     .map((uri) => new URL(uri))
     .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
-    throw new Error('Cannot find localhost callback URI from existing client information')
+    debugLog('Existing client info does not include a localhost callback URI')
+    return undefined
   }
 
   return parseInt(localhostRedirectUri.port)
+}
+
+async function findExistingClientRedirectUri(serverUrlHash: string): Promise<string | undefined> {
+  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+  return clientInfo?.redirect_uris?.[0]
 }
 
 function calculateDefaultPort(serverUrlHash: string): number {
@@ -800,6 +806,66 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using callback hostname: ${host}`)
   }
 
+  // Parse auth mode
+  let authMode: AuthMode = 'local'
+  const authModeIndex = args.indexOf('--auth-mode')
+  if (authModeIndex !== -1 && authModeIndex < args.length - 1) {
+    const mode = args[authModeIndex + 1]
+    if (mode === 'local' || mode === 'bridge') {
+      authMode = mode
+      log(`Using auth mode: ${authMode}`)
+    } else {
+      log(`Warning: Ignoring invalid auth mode: ${mode}. Valid values are: local, bridge`)
+    }
+  }
+
+  // Parse redirect URL override
+  let redirectUrl: string | undefined
+  const redirectUrlIndex = args.indexOf('--redirect-url')
+  if (redirectUrlIndex !== -1 && redirectUrlIndex < args.length - 1) {
+    const redirectUrlArg = args[redirectUrlIndex + 1]
+    const redirectUrlParsed = new URL(redirectUrlArg)
+    if (redirectUrlParsed.protocol !== 'http:' && redirectUrlParsed.protocol !== 'https:') {
+      throw new Error(`Invalid --redirect-url protocol: ${redirectUrlParsed.protocol}. Expected http: or https:`)
+    }
+    redirectUrl = redirectUrlParsed.toString()
+    log(`Using explicit OAuth redirect URL: ${redirectUrl}`)
+  }
+
+  // Parse auth bridge options
+  let authBridgePollUrl: string | undefined
+  const authBridgePollUrlIndex = args.indexOf('--auth-bridge-poll-url')
+  if (authBridgePollUrlIndex !== -1 && authBridgePollUrlIndex < args.length - 1) {
+    authBridgePollUrl = args[authBridgePollUrlIndex + 1]
+    log(`Using auth bridge poll URL: ${authBridgePollUrl}`)
+  }
+
+  let authBridgeNotifyUrl: string | undefined
+  const authBridgeNotifyUrlIndex = args.indexOf('--auth-bridge-notify-url')
+  if (authBridgeNotifyUrlIndex !== -1 && authBridgeNotifyUrlIndex < args.length - 1) {
+    authBridgeNotifyUrl = args[authBridgeNotifyUrlIndex + 1]
+    log(`Using auth bridge notify URL: ${authBridgeNotifyUrl}`)
+  }
+
+  let authBridgePollIntervalMs = 2000
+  const authBridgePollIntervalIndex = args.indexOf('--auth-bridge-poll-interval')
+  if (authBridgePollIntervalIndex !== -1 && authBridgePollIntervalIndex < args.length - 1) {
+    const intervalSeconds = parseInt(args[authBridgePollIntervalIndex + 1], 10)
+    if (!isNaN(intervalSeconds) && intervalSeconds > 0) {
+      authBridgePollIntervalMs = intervalSeconds * 1000
+      log(`Using auth bridge poll interval: ${intervalSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid auth bridge poll interval value: ${args[authBridgePollIntervalIndex + 1]}. Must be a positive number.`)
+    }
+  }
+
+  let authSessionId: string = crypto.randomUUID()
+  const authSessionIdIndex = args.indexOf('--auth-session-id')
+  if (authSessionIdIndex !== -1 && authSessionIdIndex < args.length - 1) {
+    authSessionId = args[authSessionIdIndex + 1]
+    log(`Using provided auth session ID: ${authSessionId}`)
+  }
+
   let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
   const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
   if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
@@ -890,7 +956,11 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
   // Use the specified port, or the existing client port or fallback to find an available one
-  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrlHash), findAvailablePort(defaultPort)])
+  const [existingClientPort, existingClientRedirectUri, availablePort] = await Promise.all([
+    findExistingClientPort(serverUrlHash),
+    findExistingClientRedirectUri(serverUrlHash),
+    findAvailablePort(defaultPort),
+  ])
   let callbackPort: number
 
   if (specifiedPort) {
@@ -898,7 +968,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
       log(
         `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
       )
-      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
+      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
     }
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
@@ -908,6 +978,29 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   } else {
     log(`Using automatically selected callback port: ${availablePort}`)
     callbackPort = availablePort
+  }
+
+  const effectiveRedirectUrl = redirectUrl || `http://${host}:${callbackPort}/oauth/callback`
+  let redirectUriMatches = false
+  if (existingClientRedirectUri) {
+    try {
+      redirectUriMatches = new URL(existingClientRedirectUri).toString() === new URL(effectiveRedirectUrl).toString()
+    } catch {
+      redirectUriMatches = false
+    }
+  }
+
+  if (existingClientRedirectUri && !redirectUriMatches) {
+    log(
+      `Existing OAuth client redirect URI (${existingClientRedirectUri}) differs from current redirect URI (${effectiveRedirectUrl}). Deleting existing client data to force reregistration.`,
+    )
+    await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
+  }
+
+  if (authMode === 'bridge' && !authBridgePollUrl) {
+    log('Error: --auth-bridge-poll-url is required when --auth-mode bridge')
+    log(usage)
+    process.exit(1)
   }
 
   if (Object.keys(headers).length > 0) {
@@ -935,6 +1028,12 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     headers,
     transportStrategy,
     host,
+    authMode,
+    redirectUrl,
+    authBridgePollUrl,
+    authBridgeNotifyUrl,
+    authBridgePollIntervalMs,
+    authSessionId,
     debug,
     staticOAuthClientMetadata,
     staticOAuthClientInfo,

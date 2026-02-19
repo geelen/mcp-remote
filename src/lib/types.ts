@@ -4,6 +4,11 @@ import type { AuthorizationServerMetadata } from './authorization-server-metadat
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
+ * Authentication mode for obtaining OAuth authorization codes.
+ */
+export type AuthMode = 'local' | 'bridge'
+
+/**
  * Options for creating an OAuth client provider
  */
 export interface OAuthProviderOptions {
@@ -33,6 +38,14 @@ export interface OAuthProviderOptions {
   authorizeResource?: string
   /** Pre-calculated server URL hash for cache isolation */
   serverUrlHash: string
+  /** Override the OAuth redirect URL entirely (e.g. external HTTPS callback URL) */
+  redirectUrl?: string
+  /** Authentication mode for browser handoff and callback handling */
+  authMode?: AuthMode
+  /** Optional URL to notify with authorization URL details when auth is required (bridge mode) */
+  authBridgeNotifyUrl?: string
+  /** Stable auth session identifier used by bridge integrations */
+  authSessionId?: string
   /** Authorization server metadata (optional, fetched if not provided) */
   authorizationServerMetadata?: AuthorizationServerMetadata
   /** Protected resource metadata (optional, discovered from 401 response) */

@@ -49,7 +49,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this.authorizeResource = options.authorizeResource
-    this._state = randomUUID()
+    this._state = options.authSessionId || randomUUID()
     this._clientInfo = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
@@ -57,6 +57,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
+    if (this.options.redirectUrl) {
+      return this.options.redirectUrl
+    }
     return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
   }
 
@@ -266,9 +269,48 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     authorizationUrl.searchParams.set('scope', effectiveScope)
     debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
 
+    if (this.options.authMode === 'bridge') {
+      const event = {
+        type: 'mcp-remote-auth-url',
+        session_id: this.options.authSessionId || this._state,
+        state: this._state,
+        authorization_url: authorizationUrl.toString(),
+        redirect_url: this.redirectUrl,
+      }
+      log(`MCP_REMOTE_AUTH_URL ${JSON.stringify(event)}`)
+
+      if (this.options.authBridgeNotifyUrl) {
+        try {
+          const response = await fetch(this.options.authBridgeNotifyUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify(event),
+            signal: AbortSignal.timeout(10000),
+          })
+
+          if (!response.ok) {
+            log(`Failed to notify auth bridge endpoint: HTTP ${response.status}`)
+          } else {
+            debugLog('Auth bridge notified successfully', { url: this.options.authBridgeNotifyUrl })
+          }
+        } catch (error) {
+          log(`Failed to notify auth bridge endpoint: ${(error as Error).message}`)
+          debugLog('Failed to notify auth bridge endpoint', error)
+        }
+      }
+    }
+
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
+
+    if (this.options.authMode === 'bridge') {
+      log('Bridge mode enabled, skipping automatic browser launch.')
+      return
+    }
 
     try {
       await open(sanitizeUrl(authorizationUrl.toString()))

@@ -23,7 +23,7 @@ import {
   TransportStrategy,
   discoverOAuthServerInfo,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { AuthMode, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
 /**
@@ -35,6 +35,12 @@ async function runClient(
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
+  authMode: AuthMode,
+  redirectUrl: string | undefined,
+  authBridgePollUrl: string | undefined,
+  authBridgeNotifyUrl: string | undefined,
+  authBridgePollIntervalMs: number,
+  authSessionId: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
@@ -44,7 +50,14 @@ async function runClient(
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, events, {
+    callbackPort,
+    authTimeoutMs,
+    authMode,
+    authBridgePollUrl,
+    authBridgePollIntervalMs,
+    authSessionId,
+  })
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -67,6 +80,10 @@ async function runClient(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
+    redirectUrl,
+    authMode,
+    authBridgeNotifyUrl,
+    authSessionId,
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
@@ -186,6 +203,12 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
       headers,
       transportStrategy,
       host,
+      authMode,
+      redirectUrl,
+      authBridgePollUrl,
+      authBridgeNotifyUrl,
+      authBridgePollIntervalMs,
+      authSessionId,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authTimeoutMs,
@@ -197,6 +220,12 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
         headers,
         transportStrategy,
         host,
+        authMode,
+        redirectUrl,
+        authBridgePollUrl,
+        authBridgeNotifyUrl,
+        authBridgePollIntervalMs,
+        authSessionId,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authTimeoutMs,

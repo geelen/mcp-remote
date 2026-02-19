@@ -5,9 +5,25 @@ import express from 'express'
 import { AddressInfo } from 'net'
 import { unlinkSync } from 'fs'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
+import type { AuthMode } from './types'
+
+export interface AuthCoordinatorOptions {
+  callbackPort: number
+  authTimeoutMs: number
+  authMode: AuthMode
+  authBridgePollUrl?: string
+  authBridgePollIntervalMs?: number
+  authSessionId?: string
+}
+
+export type AuthCoordinatorState = {
+  server?: Server
+  waitForAuthCode: () => Promise<string>
+  skipBrowserAuth: boolean
+}
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
+  initializeAuth: () => Promise<AuthCoordinatorState>
 }
 
 /**
@@ -128,13 +144,8 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
  * @param events The event emitter to use for signaling
  * @returns An AuthCoordinator object with an initializeAuth method
  */
-export function createLazyAuthCoordinator(
-  serverUrlHash: string,
-  callbackPort: number,
-  events: EventEmitter,
-  authTimeoutMs: number,
-): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
+export function createLazyAuthCoordinator(serverUrlHash: string, events: EventEmitter, options: AuthCoordinatorOptions): AuthCoordinator {
+  let authState: AuthCoordinatorState | null = null
 
   return {
     initializeAuth: async () => {
@@ -145,13 +156,110 @@ export function createLazyAuthCoordinator(
       }
 
       log('Initializing auth coordination on-demand')
-      debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort })
+      debugLog('Initializing auth coordination on-demand', { serverUrlHash, authMode: options.authMode })
 
       // Initialize auth using the existing coordinateAuth logic
-      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs)
+      if (options.authMode === 'bridge') {
+        authState = coordinateBridgeAuth(serverUrlHash, options)
+      } else {
+        authState = await coordinateAuth(serverUrlHash, options.callbackPort, events, options.authTimeoutMs)
+      }
+
       debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
       return authState
     },
+  }
+}
+
+function resolveBridgePollUrl(template: string, authSessionId: string, serverUrlHash: string): string {
+  const withPlaceholders = template
+    .replaceAll('{session_id}', encodeURIComponent(authSessionId))
+    .replaceAll('{server_url_hash}', encodeURIComponent(serverUrlHash))
+
+  const hasPlaceholder = withPlaceholders !== template
+  if (hasPlaceholder) {
+    return withPlaceholders
+  }
+
+  const url = new URL(withPlaceholders)
+  url.searchParams.set('session_id', authSessionId)
+  url.searchParams.set('server_url_hash', serverUrlHash)
+  return url.toString()
+}
+
+function extractAuthCode(responseBody: string): string | undefined {
+  const trimmed = responseBody.trim()
+  if (!trimmed) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { code?: string; authorization_code?: string }
+    return parsed.code || parsed.authorization_code
+  } catch {
+    return trimmed
+  }
+}
+
+async function waitForBridgeAuthCode(pollUrl: string, pollIntervalMs: number): Promise<string> {
+  log(`Waiting for bridge auth code from: ${pollUrl}`)
+
+  let attempts = 0
+  while (true) {
+    attempts++
+    try {
+      const response = await fetch(pollUrl, {
+        headers: {
+          Accept: 'application/json, text/plain',
+        },
+        signal: AbortSignal.timeout(10000),
+      })
+
+      if (response.status === 200) {
+        const body = await response.text()
+        const code = extractAuthCode(body)
+        if (code) {
+          debugLog('Received auth code from auth bridge', { attempts })
+          return code
+        }
+
+        debugLog('Auth bridge returned 200 but no code yet', { attempts })
+      } else if (response.status === 202 || response.status === 204 || response.status === 404) {
+        debugLog('Auth bridge indicates auth is still pending', { attempts, status: response.status })
+      } else if (response.status === 410) {
+        throw new Error('Auth bridge session expired')
+      } else {
+        debugLog('Unexpected auth bridge response status', { attempts, status: response.status })
+      }
+    } catch (error) {
+      debugLog('Error polling auth bridge for auth code', {
+        attempts,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+  }
+}
+
+function coordinateBridgeAuth(serverUrlHash: string, options: AuthCoordinatorOptions): AuthCoordinatorState {
+  if (!options.authBridgePollUrl) {
+    throw new Error('authBridgePollUrl is required for bridge auth mode')
+  }
+
+  const authSessionId = options.authSessionId || `${serverUrlHash}-${process.pid}`
+  const pollUrl = resolveBridgePollUrl(options.authBridgePollUrl, authSessionId, serverUrlHash)
+  const pollIntervalMs = options.authBridgePollIntervalMs || 2000
+
+  debugLog('Using bridge auth coordinator', {
+    authSessionId,
+    pollUrl,
+    pollIntervalMs,
+  })
+
+  return {
+    waitForAuthCode: () => waitForBridgeAuthCode(pollUrl, pollIntervalMs),
+    skipBrowserAuth: false,
   }
 }
 
@@ -167,7 +275,7 @@ export async function coordinateAuth(
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<AuthCoordinatorState> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPort })
 
   // Check for a lockfile (disabled on Windows for the time being)

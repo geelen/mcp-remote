@@ -219,6 +219,32 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* To run OAuth in cloud/sandbox environments where localhost callbacks are not available, use `--auth-mode bridge` and provide a polling endpoint with `--auth-bridge-poll-url`.
+  You can also override the registered OAuth redirect URL with `--redirect-url` so the provider redirects to your web app/backend callback.
+
+```bash
+npx mcp-remote https://remote.mcp.server/sse \
+  --auth-mode bridge \
+  --redirect-url https://your-app.example.com/oauth/mcp/callback \
+  --auth-bridge-poll-url https://your-api.example.com/mcp/auth/poll?session_id={session_id} \
+  --auth-bridge-notify-url https://your-api.example.com/mcp/auth/notify
+```
+
+In `bridge` mode:
+- `mcp-remote` does not try to open a local browser.
+- It emits a machine-readable auth event to stderr:
+  - `MCP_REMOTE_AUTH_URL {"type":"mcp-remote-auth-url","session_id":"...","state":"...","authorization_url":"...","redirect_url":"..."}`
+- It polls `--auth-bridge-poll-url` until your backend returns an auth code.
+
+Bridge polling response contract:
+- `200` with JSON `{ "code": "..." }` (or `{ "authorization_code": "..." }`) to complete auth.
+- `202`, `204`, or `404` to continue polling.
+- `410` to fail because the auth session expired.
+
+Additional bridge flags:
+- `--auth-bridge-poll-interval <seconds>`: polling interval (default `2`).
+- `--auth-session-id <id>`: optionally provide your own session identifier (default is random).
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.

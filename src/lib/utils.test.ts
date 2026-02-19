@@ -431,6 +431,45 @@ describe('Feature: Command Line Arguments Parsing', () => {
 
     consoleSpy.mockRestore()
   })
+
+  it('Scenario: Use local auth mode by default', async () => {
+    const args = ['https://example.com/sse']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.authMode).toBe('local')
+    expect(typeof result.authSessionId).toBe('string')
+    expect(result.authSessionId.length).toBeGreaterThan(0)
+  })
+
+  it('Scenario: Parse bridge auth mode options', async () => {
+    const args = [
+      'https://example.com/sse',
+      '--auth-mode',
+      'bridge',
+      '--redirect-url',
+      'https://app.example.com/oauth/callback',
+      '--auth-bridge-poll-url',
+      'https://api.example.com/mcp/auth/poll?session_id={session_id}',
+      '--auth-bridge-notify-url',
+      'https://api.example.com/mcp/auth/notify',
+      '--auth-bridge-poll-interval',
+      '3',
+      '--auth-session-id',
+      'session-123',
+    ]
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.authMode).toBe('bridge')
+    expect(result.redirectUrl).toBe('https://app.example.com/oauth/callback')
+    expect(result.authBridgePollUrl).toBe('https://api.example.com/mcp/auth/poll?session_id={session_id}')
+    expect(result.authBridgeNotifyUrl).toBe('https://api.example.com/mcp/auth/notify')
+    expect(result.authBridgePollIntervalMs).toBe(3000)
+    expect(result.authSessionId).toBe('session-123')
+  })
 })
 
 describe('Feature: Tool Filtering with Ignore Patterns', () => {

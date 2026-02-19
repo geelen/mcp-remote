@@ -21,7 +21,7 @@ import {
   TransportStrategy,
   discoverOAuthServerInfo,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { AuthMode, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
@@ -34,6 +34,12 @@ async function runProxy(
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
+  authMode: AuthMode,
+  redirectUrl: string | undefined,
+  authBridgePollUrl: string | undefined,
+  authBridgeNotifyUrl: string | undefined,
+  authBridgePollIntervalMs: number,
+  authSessionId: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authorizeResource: string,
@@ -45,7 +51,14 @@ async function runProxy(
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, events, {
+    callbackPort,
+    authTimeoutMs,
+    authMode,
+    authBridgePollUrl,
+    authBridgePollIntervalMs,
+    authSessionId,
+  })
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -68,6 +81,10 @@ async function runProxy(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
+    redirectUrl,
+    authMode,
+    authBridgeNotifyUrl,
+    authSessionId,
     clientName: 'MCP CLI Proxy',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
@@ -173,6 +190,12 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       headers,
       transportStrategy,
       host,
+      authMode,
+      redirectUrl,
+      authBridgePollUrl,
+      authBridgeNotifyUrl,
+      authBridgePollIntervalMs,
+      authSessionId,
       debug,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
@@ -187,6 +210,12 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         headers,
         transportStrategy,
         host,
+        authMode,
+        redirectUrl,
+        authBridgePollUrl,
+        authBridgeNotifyUrl,
+        authBridgePollIntervalMs,
+        authSessionId,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authorizeResource,

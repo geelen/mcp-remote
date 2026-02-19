@@ -104,6 +104,30 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
     })
+
+    it('should use explicit redirect URL when provided', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        redirectUrl: 'https://app.example.com/oauth/callback',
+      })
+
+      expect(provider.redirectUrl).toBe('https://app.example.com/oauth/callback')
+      expect(provider.clientMetadata.redirect_uris).toEqual(['https://app.example.com/oauth/callback'])
+    })
+
+    it('should not try to open a browser in bridge mode', async () => {
+      const openModule = await import('open')
+      const openMock = vi.mocked(openModule.default)
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authMode: 'bridge',
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      await provider.redirectToAuthorization(authUrl)
+
+      expect(openMock).not.toHaveBeenCalled()
+    })
   })
 
   describe('backward compatibility', () => {
