@@ -645,8 +645,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, () => {
-    log(`OAuth callback server running at http://localhost:${options.port}`)
+  const server = app.listen(options.port, options.host || '127.0.0.1', () => {
+    log(`OAuth callback server running at http://${options.host || '127.0.0.1'}:${options.port}`)
   })
 
   const waitForAuthCode = (): Promise<string> => {

@@ -134,6 +134,7 @@ export function createLazyAuthCoordinator(
   events: EventEmitter,
   authTimeoutMs: number,
   callbackPath?: string,
+  host?: string,
 ): AuthCoordinator {
   let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
 
@@ -146,10 +147,10 @@ export function createLazyAuthCoordinator(
       }
 
       log('Initializing auth coordination on-demand')
-      debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort, callbackPath })
+      debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort, callbackPath, host })
 
       // Initialize auth using the existing coordinateAuth logic
-      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs, callbackPath)
+      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs, callbackPath, host)
       debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
       return authState
     },
@@ -169,8 +170,9 @@ export async function coordinateAuth(
   events: EventEmitter,
   authTimeoutMs: number,
   callbackPath?: string,
+  host?: string,
 ): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
-  debugLog('Coordinating authentication', { serverUrlHash, callbackPort })
+  debugLog('Coordinating authentication', { serverUrlHash, callbackPort, callbackPath, host })
 
   // Check for a lockfile (disabled on Windows for the time being)
   const lockData = process.platform === 'win32' ? null : await checkLockfile(serverUrlHash)
@@ -228,10 +230,11 @@ export async function coordinateAuth(
   }
 
   // Create our own lockfile
-  debugLog('Setting up OAuth callback server', { port: callbackPort, path: callbackPath || '/oauth/callback' })
+  debugLog('Setting up OAuth callback server', { port: callbackPort, path: callbackPath || '/oauth/callback', host: host || '127.0.0.1' })
   const { server, waitForAuthCode, authCompletedPromise } = setupOAuthCallbackServerWithLongPoll({
     port: callbackPort,
     path: callbackPath || '/oauth/callback',
+    host: host || '127.0.0.1',
     events,
     authTimeoutMs,
   })
