@@ -645,8 +645,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, '127.0.0.1', () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  const server = app.listen(options.port, options.host || '127.0.0.1', () => {
+    log(`OAuth callback server running at http://${options.host || '127.0.0.1'}:${options.port}`)
   })
 
   const waitForAuthCode = (): Promise<string> => {
@@ -800,6 +800,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using callback hostname: ${host}`)
   }
 
+  // Parse callback path
+  let callbackPath: string | undefined = undefined
+  const callbackPathIndex = args.indexOf('--callback-path')
+  if (callbackPathIndex !== -1 && callbackPathIndex < args.length - 1) {
+    callbackPath = args[callbackPathIndex + 1]
+    log(`Using callback path: ${callbackPath}`)
+  }
+
   let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
   const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
   if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
@@ -942,6 +950,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    callbackPath,
   }
 }
 

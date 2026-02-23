@@ -49,6 +49,8 @@ export interface OAuthCallbackServerOptions {
   port: number
   /** Path for the callback endpoint */
   path: string
+  /** Host for the callback server (defaults to 127.0.0.1 for security) */
+  host?: string
   /** Event emitter to signal when auth code is received */
   events: EventEmitter
   /** Timeout in milliseconds for the auth callback server's long poll */
