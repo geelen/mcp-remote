@@ -40,12 +40,13 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  callbackPath?: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, callbackPath)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -68,7 +69,7 @@ async function runProxy(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
-    clientName: 'MCP CLI Proxy',
+    clientName: 'Codex',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
@@ -76,6 +77,7 @@ async function runProxy(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    callbackPath,
   })
 
   // Create the STDIO transport for local connections
@@ -180,6 +182,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      callbackPath,
     }) => {
       return runProxy(
         serverUrl,
@@ -193,6 +196,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        callbackPath,
       )
     },
   )

@@ -39,12 +39,13 @@ async function runClient(
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
   serverUrlHash: string,
+  callbackPath?: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, callbackPath)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -67,13 +68,14 @@ async function runClient(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
-    clientName: 'MCP CLI Client',
+    clientName: 'Codex',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     serverUrlHash,
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    callbackPath,
   })
 
   // Create the client
@@ -190,6 +192,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
       staticOAuthClientInfo,
       authTimeoutMs,
       serverUrlHash,
+      callbackPath,
     }) => {
       return runClient(
         serverUrl,
@@ -201,6 +204,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
         staticOAuthClientInfo,
         authTimeoutMs,
         serverUrlHash,
+        callbackPath,
       )
     },
   )
