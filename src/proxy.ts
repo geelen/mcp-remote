@@ -69,7 +69,7 @@ async function runProxy(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
-    clientName: 'Codex',
+    clientName: 'MCP CLI Proxy',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,

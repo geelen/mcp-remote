@@ -68,7 +68,7 @@ async function runClient(
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
     host,
-    clientName: 'Codex',
+    clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     serverUrlHash,
