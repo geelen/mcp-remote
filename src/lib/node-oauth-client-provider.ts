@@ -1,5 +1,5 @@
 import open from 'open'
-import { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import { OAuthClientProvider, OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
   OAuthClientInformationFull,
   OAuthClientInformationFullSchema,
@@ -34,6 +34,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  private _discoveryState: OAuthDiscoveryState | undefined
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -303,7 +304,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * Invalidates the specified credentials
    * @param scope The scope of credentials to invalidate
    */
-  async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier'): Promise<void> {
+  async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
     debugLog(`Invalidating credentials: ${scope}`)
 
     switch (scope) {
@@ -312,8 +313,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+          deleteConfigFile(this.serverUrlHash, 'discovery_state.json'),
         ])
         this._clientInfo = undefined
+        this._discoveryState = undefined
+        this.authorizationServerMetadata = undefined
+        this.protectedResourceMetadata = undefined
         debugLog('All credentials invalidated')
         break
 
@@ -333,8 +338,53 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         debugLog('Code verifier invalidated')
         break
 
+      case 'discovery':
+        await deleteConfigFile(this.serverUrlHash, 'discovery_state.json')
+        this._discoveryState = undefined
+        this.authorizationServerMetadata = undefined
+        this.protectedResourceMetadata = undefined
+        debugLog('Discovery state invalidated')
+        break
+
       default:
         throw new Error(`Unknown credential scope: ${scope}`)
     }
+  }
+
+  async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    debugLog('Saving discovery state', {
+      authorizationServerUrl: state.authorizationServerUrl,
+      hasResourceMetadata: !!state.resourceMetadata,
+      resourceMetadataUrl: state.resourceMetadataUrl,
+    })
+    this._discoveryState = state
+    await writeJsonFile(this.serverUrlHash, 'discovery_state.json', state)
+  }
+
+  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+    if (this._discoveryState) {
+      debugLog('Returning in-memory discovery state')
+      return this._discoveryState
+    }
+
+    const saved = await readJsonFile<OAuthDiscoveryState>(this.serverUrlHash, 'discovery_state.json', {
+      async parseAsync(data: any) {
+        if (typeof data !== 'object' || data === null) return undefined
+        if (typeof data.authorizationServerUrl !== 'string') return undefined
+        return data as OAuthDiscoveryState
+      },
+    })
+
+    if (saved) {
+      this._discoveryState = saved
+      debugLog('Loaded discovery state from disk', {
+        authorizationServerUrl: saved.authorizationServerUrl,
+        resourceMetadataUrl: saved.resourceMetadataUrl,
+      })
+      return saved
+    }
+
+    debugLog('No discovery state available')
+    return undefined
   }
 }
