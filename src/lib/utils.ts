@@ -22,6 +22,7 @@ import { readFile, rm } from 'fs/promises'
 import path from 'path'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
 import { EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
+import { createSocksDispatcher, redactProxyUrl } from './socks-dispatcher'
 
 // Global type declaration for typescript
 declare global {
@@ -773,10 +774,33 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   const enableProxy = args.includes('--enable-proxy')
+  const socksProxyIndex = args.indexOf('--socks-proxy')
+
+  // --socks-proxy present but missing value
+  if (socksProxyIndex !== -1 && (socksProxyIndex >= args.length - 1 || args[socksProxyIndex + 1].startsWith('--'))) {
+    log('Error: --socks-proxy requires a URL argument (e.g. --socks-proxy socks5://127.0.0.1:1080)')
+    process.exit(1)
+  }
+
+  const hasSocksProxy = socksProxyIndex !== -1 && socksProxyIndex < args.length - 1
+
+  // Validate mutual exclusivity before setting any dispatcher
+  if (enableProxy && hasSocksProxy) {
+    log('Error: --socks-proxy and --enable-proxy are mutually exclusive')
+    process.exit(1)
+  }
+
   if (enableProxy) {
     // Use env proxy
     setGlobalDispatcher(new EnvHttpProxyAgent())
     log('HTTP proxy support enabled - using system HTTP_PROXY/HTTPS_PROXY environment variables')
+  }
+
+  if (hasSocksProxy) {
+    const socksUrl = args[socksProxyIndex + 1]
+    const dispatcher = createSocksDispatcher(socksUrl)
+    setGlobalDispatcher(dispatcher)
+    log(`SOCKS proxy enabled: ${redactProxyUrl(socksUrl)}`)
   }
 
   // Parse transport strategy

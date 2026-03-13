@@ -431,6 +431,83 @@ describe('Feature: Command Line Arguments Parsing', () => {
 
     consoleSpy.mockRestore()
   })
+
+  it('Scenario: Exit with error when --socks-proxy and --enable-proxy are both specified', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit')
+    })
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const args = ['https://example.com/sse', '--enable-proxy', '--socks-proxy', 'socks5://127.0.0.1:1080']
+    const usage = 'test usage'
+
+    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+
+    exitSpy.mockRestore()
+    consoleSpy.mockRestore()
+  })
+
+  it('Scenario: Exit with error when --socks-proxy has no value', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit')
+    })
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const args = ['https://example.com/sse', '--socks-proxy']
+    const usage = 'test usage'
+
+    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+
+    exitSpy.mockRestore()
+    consoleSpy.mockRestore()
+  })
+
+  it('Scenario: Exit with error when --socks-proxy is followed by another flag', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit')
+    })
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const args = ['https://example.com/sse', '--socks-proxy', '--debug']
+    const usage = 'test usage'
+
+    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+
+    exitSpy.mockRestore()
+    consoleSpy.mockRestore()
+  })
+
+  it('Scenario: Accept valid --socks-proxy URL', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--socks-proxy', 'socks5://127.0.0.1:1080']
+    const usage = 'test usage'
+
+    const result = await parseCommandLineArgs(args, usage)
+
+    expect(result.serverUrl).toBe('https://example.com/sse')
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('SOCKS proxy enabled'))
+
+    consoleSpy.mockRestore()
+  })
+
+  it('Scenario: Redact credentials in --socks-proxy log output', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--socks-proxy', 'socks5://user:secret@127.0.0.1:1080']
+    const usage = 'test usage'
+
+    await parseCommandLineArgs(args, usage)
+
+    const socksLogCall = consoleSpy.mock.calls.find((call) => String(call[0]).includes('SOCKS proxy enabled'))
+    expect(socksLogCall).toBeDefined()
+    expect(String(socksLogCall![0])).not.toContain('user')
+    expect(String(socksLogCall![0])).not.toContain('secret')
+    expect(String(socksLogCall![0])).toContain('***')
+
+    consoleSpy.mockRestore()
+  })
 })
 
 describe('Feature: Tool Filtering with Ignore Patterns', () => {
