@@ -326,6 +326,7 @@ export async function discoverOAuthServerInfo(
         wwwAuthenticateScope = params.scope
       }
     }
+
   } catch (error) {
     debugLog('Error probing MCP server', {
       error: error instanceof Error ? error.message : String(error),
@@ -423,6 +424,42 @@ export async function connectToRemoteServer(
   // Choose transport based on user strategy and recursion history
   const shouldAttemptFallback = transportStrategy === 'http-first' || transportStrategy === 'sse-first'
 
+  // Custom fetch that converts 302 redirects to 401 responses, so the SDK's
+  // built-in OAuth flow can handle SSO gateways that redirect to an identity
+  // provider instead of returning 401.
+  // We use redirect:'manual' to catch redirects before they're followed, then
+  // re-fetch with redirect:'follow' for non-redirect responses.
+  const fetchWith302To401: typeof fetch = async (input, init) => {
+    const manualInit = { ...init, redirect: 'manual' as const }
+    const response = await fetch(input, manualInit)
+    if (response.status >= 300 && response.status < 400) {
+      debugLog('Intercepted redirect response, converting to 401 for OAuth flow', {
+        status: response.status,
+        location: response.headers.get('location'),
+      })
+      // Return a synthetic 401 response that the SDK's auth handler understands
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: new Headers({ 'WWW-Authenticate': 'Bearer' }),
+        text: async () => 'Unauthorized',
+        json: async () => ({ error: 'unauthorized' }),
+        body: null,
+        bodyUsed: false,
+        redirected: false,
+        type: 'basic' as ResponseType,
+        url: typeof input === 'string' ? input : input.toString(),
+        clone: () => { throw new Error('not cloneable') },
+        arrayBuffer: async () => new ArrayBuffer(0),
+        blob: async () => new Blob(),
+        formData: async () => new FormData(),
+        bytes: async () => new Uint8Array(),
+      } as unknown as Awaited<ReturnType<typeof fetch>>
+    }
+    return response
+  }
+
   // Create transport instance based on the strategy
   const sseTransport = transportStrategy === 'sse-only' || transportStrategy === 'sse-first'
   const transport = sseTransport
@@ -434,6 +471,7 @@ export async function connectToRemoteServer(
     : new StreamableHTTPClientTransport(url, {
         authProvider,
         requestInit: { headers },
+        fetch: fetchWith302To401,
       })
 
   try {
@@ -451,7 +489,7 @@ export async function connectToRemoteServer(
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
-        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers }, fetch: fetchWith302To401 })
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
