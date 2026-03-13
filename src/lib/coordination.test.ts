@@ -1,9 +1,31 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { setGlobalDispatcher, getGlobalDispatcher, Agent } from 'undici'
+import { setGlobalDispatcher, getGlobalDispatcher, Agent, buildConnector } from 'undici'
 import express from 'express'
 import { type Server } from 'http'
 import { type AddressInfo } from 'net'
 import { isLockValid, waitForAuthentication } from './coordination'
+
+function startCoordinationServer(): Promise<{ server: Server; port: number }> {
+  const app = express()
+  app.get('/wait-for-auth', (_req, res) => {
+    res.status(200).send('ok')
+  })
+  return new Promise((resolve) => {
+    const server = app.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port
+      resolve({ server, port })
+    })
+  })
+}
+
+function setBrokenGlobalDispatcher(): void {
+  const brokenAgent = new Agent({
+    connect: (_opts: buildConnector.Options, callback: buildConnector.Callback) => {
+      callback(new Error('global dispatcher should not be used for coordination'), null)
+    },
+  })
+  setGlobalDispatcher(brokenAgent)
+}
 
 describe('coordination fetches bypass global dispatcher', () => {
   let server: Server
@@ -15,30 +37,13 @@ describe('coordination fetches bypass global dispatcher', () => {
   })
 
   it('isLockValid succeeds even when global dispatcher rejects connections', async () => {
-    // Start a real HTTP server that responds to the coordination endpoint
-    const app = express()
-    app.get('/wait-for-auth', (_req, res) => {
-      res.status(200).send('ok')
-    })
-
-    server = await new Promise<Server>((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s))
-    })
-    const port = (server.address() as AddressInfo).port
-
-    // Set global dispatcher to one that always fails (simulating an
-    // unreachable SOCKS proxy). If coordination fetches go through
-    // this dispatcher, isLockValid will return false.
-    const brokenAgent = new Agent({
-      connect: (_opts: any, callback: any) => {
-        callback(new Error('global dispatcher should not be used for coordination'), null)
-      },
-    })
-    setGlobalDispatcher(brokenAgent)
+    const started = await startCoordinationServer()
+    server = started.server
+    setBrokenGlobalDispatcher()
 
     const result = await isLockValid({
       pid: process.pid,
-      port,
+      port: started.port,
       timestamp: Date.now(),
     })
 
@@ -46,25 +51,11 @@ describe('coordination fetches bypass global dispatcher', () => {
   })
 
   it('waitForAuthentication succeeds even when global dispatcher rejects connections', async () => {
-    const app = express()
-    // Return 200 immediately so waitForAuthentication resolves without polling
-    app.get('/wait-for-auth', (_req, res) => {
-      res.status(200).send('ok')
-    })
+    const started = await startCoordinationServer()
+    server = started.server
+    setBrokenGlobalDispatcher()
 
-    server = await new Promise<Server>((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s))
-    })
-    const port = (server.address() as AddressInfo).port
-
-    const brokenAgent = new Agent({
-      connect: (_opts: any, callback: any) => {
-        callback(new Error('global dispatcher should not be used for coordination'), null)
-      },
-    })
-    setGlobalDispatcher(brokenAgent)
-
-    const result = await waitForAuthentication(port)
+    const result = await waitForAuthentication(started.port)
 
     expect(result).toBe(true)
   })

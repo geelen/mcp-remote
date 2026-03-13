@@ -1,4 +1,4 @@
-import { Agent } from 'undici'
+import { Agent, buildConnector } from 'undici'
 import { SocksClient, type SocksProxy } from 'socks'
 import tls from 'tls'
 import net from 'net'
@@ -72,7 +72,7 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
   const config = parseSocksUrl(proxyUrl)
 
   return new Agent({
-    connect: (opts: any, callback: any) => {
+    connect: (opts: buildConnector.Options, callback: buildConnector.Callback) => {
       const { hostname, port, protocol } = opts
 
       // Strip brackets from IPv6 literals (e.g. [::1] -> ::1) for SOCKS destination and TLS servername
