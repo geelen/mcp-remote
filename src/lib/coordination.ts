@@ -4,7 +4,12 @@ import { Server } from 'http'
 import express from 'express'
 import { AddressInfo } from 'net'
 import { unlinkSync } from 'fs'
+import { fetch, Agent } from 'undici'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
+
+// Direct agent bypasses the global dispatcher so coordination fetches
+// to 127.0.0.1 never route through a SOCKS proxy.
+const directAgent = new Agent()
 
 export type AuthCoordinator = {
   initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
@@ -61,6 +66,7 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
 
     const response = await fetch(`http://127.0.0.1:${lockData.port}/wait-for-auth?poll=false`, {
       signal: controller.signal,
+      dispatcher: directAgent,
     })
 
     clearTimeout(timeout)
@@ -92,7 +98,7 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
       debugLog(`Poll attempt ${attempts}`)
 
       try {
-        const response = await fetch(url)
+        const response = await fetch(url, { dispatcher: directAgent })
         debugLog(`Poll response status: ${response.status}`)
 
         if (response.status === 200) {
