@@ -64,12 +64,18 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 1000)
 
-    const response = await fetch(`http://127.0.0.1:${lockData.port}/wait-for-auth?poll=false`, {
-      signal: controller.signal,
-      dispatcher: directAgent,
-    })
+    let response
+    try {
+      response = await fetch(`http://127.0.0.1:${lockData.port}/wait-for-auth?poll=false`, {
+        signal: controller.signal,
+        dispatcher: directAgent,
+      })
+    } finally {
+      clearTimeout(timeout)
+    }
 
-    clearTimeout(timeout)
+    // Drain response body to release the connection back to the pool
+    await response.text()
 
     const isValid = response.status === 200 || response.status === 202
     debugLog(`Endpoint check result: ${isValid ? 'valid' : 'invalid'}`, { status: response.status })
@@ -100,6 +106,8 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
       try {
         const response = await fetch(url, { dispatcher: directAgent })
         debugLog(`Poll response status: ${response.status}`)
+        // Drain response body to release the connection back to the pool
+        await response.text()
 
         if (response.status === 200) {
           // Auth completed, but we don't return the code anymore
