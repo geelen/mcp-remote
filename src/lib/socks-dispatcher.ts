@@ -137,6 +137,7 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
               if (done) return
               done = true
               tlsSocket.removeListener('secureConnect', onSecureConnect)
+              tlsSocket.destroy()
               socket.destroy()
               callback(err, null)
             }

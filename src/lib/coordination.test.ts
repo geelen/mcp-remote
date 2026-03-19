@@ -18,28 +18,31 @@ function startCoordinationServer(): Promise<{ server: Server; port: number }> {
   })
 }
 
-function setBrokenGlobalDispatcher(): void {
+function setBrokenGlobalDispatcher(): Agent {
   const brokenAgent = new Agent({
     connect: (_opts: buildConnector.Options, callback: buildConnector.Callback) => {
       callback(new Error('global dispatcher should not be used for coordination'), null)
     },
   })
   setGlobalDispatcher(brokenAgent)
+  return brokenAgent
 }
 
 describe('coordination fetches bypass global dispatcher', () => {
   let server: Server | undefined
+  let brokenAgent: Agent | undefined
   const originalDispatcher = getGlobalDispatcher()
 
   afterEach(async () => {
     setGlobalDispatcher(originalDispatcher)
+    await brokenAgent?.close()
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()))
   })
 
   it('isLockValid succeeds even when global dispatcher rejects connections', async () => {
     const started = await startCoordinationServer()
     server = started.server
-    setBrokenGlobalDispatcher()
+    brokenAgent = setBrokenGlobalDispatcher()
 
     const result = await isLockValid({
       pid: process.pid,
@@ -53,7 +56,7 @@ describe('coordination fetches bypass global dispatcher', () => {
   it('waitForAuthentication succeeds even when global dispatcher rejects connections', async () => {
     const started = await startCoordinationServer()
     server = started.server
-    setBrokenGlobalDispatcher()
+    brokenAgent = setBrokenGlobalDispatcher()
 
     const result = await waitForAuthentication(started.port)
 
