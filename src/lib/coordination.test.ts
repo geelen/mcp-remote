@@ -28,7 +28,7 @@ function setBrokenGlobalDispatcher(): void {
 }
 
 describe('coordination fetches bypass global dispatcher', () => {
-  let server: Server
+  let server: Server | undefined
   const originalDispatcher = getGlobalDispatcher()
 
   afterEach(async () => {

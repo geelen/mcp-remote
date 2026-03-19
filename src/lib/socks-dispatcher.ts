@@ -81,7 +81,7 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
 
   return new Agent({
     connect: (opts: buildConnector.Options, callback: buildConnector.Callback) => {
-      const { hostname, port, protocol } = opts
+      const { hostname, port, protocol, servername } = opts
 
       // Strip brackets from IPv6 literals (e.g. [::1] -> ::1) for SOCKS destination and TLS servername
       const bareHostname = stripIPv6Brackets(hostname)
@@ -125,10 +125,12 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
         .then(({ socket }) => {
           if (protocol === 'https:') {
             let done = false
+            // Determine SNI servername: prefer undici's opts.servername, fall back to bareHostname.
+            // IPs must not be sent as SNI (RFC 6066).
+            const sni = servername || bareHostname
             const tlsSocket = tls.connect({
               socket: socket as net.Socket,
-              // Only set servername for DNS names; IPs must not be sent as SNI (RFC 6066)
-              ...(net.isIP(bareHostname) ? {} : { servername: bareHostname }),
+              ...(net.isIP(sni) ? {} : { servername: sni }),
             })
 
             const onError = (err: Error) => {
