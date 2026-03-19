@@ -64,15 +64,10 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 1000)
 
-    let response
-    try {
-      response = await fetch(`http://127.0.0.1:${lockData.port}/wait-for-auth?poll=false`, {
-        signal: controller.signal,
-        dispatcher: directAgent,
-      })
-    } finally {
-      clearTimeout(timeout)
-    }
+    const response = await fetch(`http://127.0.0.1:${lockData.port}/wait-for-auth?poll=false`, {
+      signal: controller.signal,
+      dispatcher: directAgent,
+    }).finally(() => clearTimeout(timeout))
 
     // Drain response body to release the connection back to the pool
     await response.text()

@@ -31,9 +31,9 @@ describe('coordination fetches bypass global dispatcher', () => {
   let server: Server
   const originalDispatcher = getGlobalDispatcher()
 
-  afterEach(() => {
+  afterEach(async () => {
     setGlobalDispatcher(originalDispatcher)
-    server?.close()
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()))
   })
 
   it('isLockValid succeeds even when global dispatcher rejects connections', async () => {
