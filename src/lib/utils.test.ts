@@ -437,15 +437,16 @@ describe('Feature: Command Line Arguments Parsing', () => {
       throw new Error('process.exit')
     })
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const args = ['https://example.com/sse', '--enable-proxy', '--socks-proxy', 'socks5://127.0.0.1:1080']
+      const usage = 'test usage'
 
-    const args = ['https://example.com/sse', '--enable-proxy', '--socks-proxy', 'socks5://127.0.0.1:1080']
-    const usage = 'test usage'
-
-    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
-    expect(exitSpy).toHaveBeenCalledWith(1)
-
-    exitSpy.mockRestore()
-    consoleSpy.mockRestore()
+      await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    } finally {
+      exitSpy.mockRestore()
+      consoleSpy.mockRestore()
+    }
   })
 
   it('Scenario: Exit with error when --socks-proxy has no value', async () => {
@@ -453,15 +454,16 @@ describe('Feature: Command Line Arguments Parsing', () => {
       throw new Error('process.exit')
     })
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const args = ['https://example.com/sse', '--socks-proxy']
+      const usage = 'test usage'
 
-    const args = ['https://example.com/sse', '--socks-proxy']
-    const usage = 'test usage'
-
-    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
-    expect(exitSpy).toHaveBeenCalledWith(1)
-
-    exitSpy.mockRestore()
-    consoleSpy.mockRestore()
+      await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    } finally {
+      exitSpy.mockRestore()
+      consoleSpy.mockRestore()
+    }
   })
 
   it('Scenario: Exit with error when --socks-proxy is followed by another flag', async () => {
@@ -469,15 +471,16 @@ describe('Feature: Command Line Arguments Parsing', () => {
       throw new Error('process.exit')
     })
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const args = ['https://example.com/sse', '--socks-proxy', '--debug']
+      const usage = 'test usage'
 
-    const args = ['https://example.com/sse', '--socks-proxy', '--debug']
-    const usage = 'test usage'
-
-    await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
-    expect(exitSpy).toHaveBeenCalledWith(1)
-
-    exitSpy.mockRestore()
-    consoleSpy.mockRestore()
+      await expect(parseCommandLineArgs(args, usage)).rejects.toThrow('process.exit')
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    } finally {
+      exitSpy.mockRestore()
+      consoleSpy.mockRestore()
+    }
   })
 
   it('Scenario: Accept valid --socks-proxy URL', async () => {

@@ -4,6 +4,10 @@ import tls from 'tls'
 import net from 'net'
 import { lookup } from 'dns/promises'
 
+function stripIPv6Brackets(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+}
+
 export interface SocksProxyConfig {
   host: string
   port: number
@@ -51,7 +55,7 @@ export function parseSocksUrl(proxyUrl: string): SocksProxyConfig {
   }
 
   // Strip brackets from IPv6 proxy host (e.g. [::1] -> ::1)
-  const host = url.hostname.startsWith('[') && url.hostname.endsWith(']') ? url.hostname.slice(1, -1) : url.hostname
+  const host = stripIPv6Brackets(url.hostname)
 
   return {
     host,
@@ -80,7 +84,7 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
       const { hostname, port, protocol } = opts
 
       // Strip brackets from IPv6 literals (e.g. [::1] -> ::1) for SOCKS destination and TLS servername
-      const bareHostname = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+      const bareHostname = stripIPv6Brackets(hostname)
 
       // For socks5/socks4 (proxyDns=false), resolve DNS locally before connecting.
       // For socks5h/socks4a (proxyDns=true), pass hostname as-is so the proxy resolves DNS.
@@ -123,7 +127,8 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
             let done = false
             const tlsSocket = tls.connect({
               socket: socket as net.Socket,
-              servername: bareHostname,
+              // Only set servername for DNS names; IPs must not be sent as SNI (RFC 6066)
+              ...(net.isIP(bareHostname) ? {} : { servername: bareHostname }),
             })
 
             const onError = (err: Error) => {

@@ -782,7 +782,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     process.exit(1)
   }
 
-  const hasSocksProxy = socksProxyIndex !== -1 && socksProxyIndex < args.length - 1
+  const hasSocksProxy = socksProxyIndex !== -1
 
   // Validate mutual exclusivity before setting any dispatcher
   if (enableProxy && hasSocksProxy) {
