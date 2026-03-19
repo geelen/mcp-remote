@@ -46,6 +46,10 @@ export function parseSocksUrl(proxyUrl: string): SocksProxyConfig {
     throw new Error(`Invalid SOCKS proxy port: ${url.port}. Must be a number between 1 and 65535.`)
   }
 
+  if (!url.hostname) {
+    throw new Error('SOCKS proxy URL must include a hostname (e.g. socks5://127.0.0.1:1080)')
+  }
+
   // Strip brackets from IPv6 proxy host (e.g. [::1] -> ::1)
   const host = url.hostname.startsWith('[') && url.hostname.endsWith(']') ? url.hostname.slice(1, -1) : url.hostname
 
@@ -83,6 +87,9 @@ export function createSocksDispatcher(proxyUrl: string): Agent {
       const getDestination = async (): Promise<{ host: string; port: number }> => {
         // undici passes port as "" (empty string) when the URL uses the default port
         const destPort = port ? parseInt(String(port), 10) : protocol === 'https:' ? 443 : 80
+        if (config.type === 4 && net.isIPv6(bareHostname)) {
+          throw new Error(`SOCKS4 does not support IPv6 destinations: ${bareHostname}`)
+        }
         if (config.proxyDns || net.isIP(bareHostname)) {
           // Proxy resolves DNS, or it's already an IP — pass unbracketed
           return { host: bareHostname, port: destPort }

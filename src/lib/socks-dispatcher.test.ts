@@ -80,6 +80,22 @@ describe('Feature: SOCKS Proxy URL Parsing', () => {
     expect(config.host).toBe('fd12:3456:789a::1')
     expect(config.port).toBe(9050)
   })
+
+  it('Scenario: Throw on empty hostname', () => {
+    expect(() => parseSocksUrl('socks5://')).toThrow(/must include a hostname/)
+  })
+})
+
+describe('Feature: SOCKS4 IPv6 Destination Rejection', () => {
+  it('Scenario: Reject IPv6 destination when using SOCKS4 proxy', async () => {
+    const { createSocksDispatcher } = await import('./socks-dispatcher')
+    const dispatcher = createSocksDispatcher('socks4://127.0.0.1:1080')
+
+    await expect(
+      dispatcher.request({ origin: 'https://[::1]', path: '/', method: 'GET' }),
+    ).rejects.toThrow(/SOCKS4 does not support IPv6/)
+    await dispatcher.close()
+  })
 })
 
 describe('Feature: Proxy URL Credential Redaction', () => {

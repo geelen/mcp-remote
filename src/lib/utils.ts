@@ -798,9 +798,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   if (hasSocksProxy) {
     const socksUrl = args[socksProxyIndex + 1]
-    const dispatcher = createSocksDispatcher(socksUrl)
-    setGlobalDispatcher(dispatcher)
-    log(`SOCKS proxy enabled: ${redactProxyUrl(socksUrl)}`)
+    try {
+      const dispatcher = createSocksDispatcher(socksUrl)
+      setGlobalDispatcher(dispatcher)
+      log(`SOCKS proxy enabled: ${redactProxyUrl(socksUrl)}`)
+    } catch (err) {
+      log(`Error: Invalid --socks-proxy URL: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
   }
 
   // Parse transport strategy

@@ -481,32 +481,42 @@ describe('Feature: Command Line Arguments Parsing', () => {
   })
 
   it('Scenario: Accept valid --socks-proxy URL', async () => {
+    const { getGlobalDispatcher, setGlobalDispatcher } = await import('undici')
+    const originalDispatcher = getGlobalDispatcher()
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const args = ['https://example.com/sse', '--socks-proxy', 'socks5://127.0.0.1:1080']
-    const usage = 'test usage'
+    try {
+      const args = ['https://example.com/sse', '--socks-proxy', 'socks5://127.0.0.1:1080']
+      const usage = 'test usage'
 
-    const result = await parseCommandLineArgs(args, usage)
+      const result = await parseCommandLineArgs(args, usage)
 
-    expect(result.serverUrl).toBe('https://example.com/sse')
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('SOCKS proxy enabled'))
-
-    consoleSpy.mockRestore()
+      expect(result.serverUrl).toBe('https://example.com/sse')
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('SOCKS proxy enabled'))
+    } finally {
+      setGlobalDispatcher(originalDispatcher)
+      consoleSpy.mockRestore()
+    }
   })
 
   it('Scenario: Redact credentials in --socks-proxy log output', async () => {
+    const { getGlobalDispatcher, setGlobalDispatcher } = await import('undici')
+    const originalDispatcher = getGlobalDispatcher()
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const args = ['https://example.com/sse', '--socks-proxy', 'socks5://user:secret@127.0.0.1:1080']
-    const usage = 'test usage'
+    try {
+      const args = ['https://example.com/sse', '--socks-proxy', 'socks5://user:secret@127.0.0.1:1080']
+      const usage = 'test usage'
 
-    await parseCommandLineArgs(args, usage)
+      await parseCommandLineArgs(args, usage)
 
-    const socksLogCall = consoleSpy.mock.calls.find((call) => String(call[0]).includes('SOCKS proxy enabled'))
-    expect(socksLogCall).toBeDefined()
-    expect(String(socksLogCall![0])).not.toContain('user')
-    expect(String(socksLogCall![0])).not.toContain('secret')
-    expect(String(socksLogCall![0])).toContain('***')
-
-    consoleSpy.mockRestore()
+      const socksLogCall = consoleSpy.mock.calls.find((call) => String(call[0]).includes('SOCKS proxy enabled'))
+      expect(socksLogCall).toBeDefined()
+      expect(String(socksLogCall![0])).not.toContain('user')
+      expect(String(socksLogCall![0])).not.toContain('secret')
+      expect(String(socksLogCall![0])).toContain('***')
+    } finally {
+      setGlobalDispatcher(originalDispatcher)
+      consoleSpy.mockRestore()
+    }
   })
 })
 
