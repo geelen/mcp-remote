@@ -72,7 +72,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       software_id: this.softwareId,
       software_version: this.softwareVersion,
       ...this.staticOAuthClientMetadata,
-      scope: effectiveScope,
+      ...(effectiveScope ? { scope: effectiveScope } : {}),
     }
   }
 
@@ -135,17 +135,22 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return this._clientInfo.scope
     }
 
-    // Priority 5: Use authorization server's supported scopes if available
-    if (this.authorizationServerMetadata?.scopes_supported?.length) {
-      const scope = this.authorizationServerMetadata.scopes_supported.join(' ')
+    // Priority 5: Use authorization server's supported scopes if advertised
+    const authScopes = this.authorizationServerMetadata?.scopes_supported
+    if (authScopes !== undefined) {
+      if (authScopes.length === 0) {
+        debugLog('Authorization server advertises no scopes (scopes_supported: []), omitting scope')
+        return ''
+      }
+      const scope = authScopes.join(' ')
       debugLog('Using scopes from Authorization Server Metadata', {
-        scopes_supported: this.authorizationServerMetadata.scopes_supported,
+        scopes_supported: authScopes,
         scope,
       })
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default
+    // Priority 6: Fallback to hardcoded default when metadata is unknown or omits scopes_supported
     debugLog('Using fallback default scope')
     return 'openid email profile'
   }
@@ -263,8 +268,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     const effectiveScope = this.getEffectiveScope()
-    authorizationUrl.searchParams.set('scope', effectiveScope)
-    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    if (effectiveScope) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    } else {
+      debugLog('Omitting scope parameter from authorization URL (no effective scope)')
+    }
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
