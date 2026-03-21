@@ -26,16 +26,14 @@ export interface AuthorizationServerMetadata {
 /**
  * Constructs the well-known URL for OAuth authorization server metadata
  * @param serverUrl The base server URL
- * @returns The well-known metadata URL
+ * @returns The well-known metadata URL candidates
  */
-export function getMetadataUrl(serverUrl: string): string {
+export function getMetadataUrls(serverUrl: string): string[] {
   const url = new URL(serverUrl)
-  // Per RFC 8414, the metadata is at /.well-known/oauth-authorization-server
-  // relative to the issuer identifier
-  const metadataPath = '/.well-known/oauth-authorization-server'
-
-  // Construct the full metadata URL
-  return `${url.origin}${metadataPath}`
+  return [
+    `${url.origin}/.well-known/oauth-authorization-server`, // Per RFC 8414, the metadata is at /.well-known/oauth-authorization-server relative to the issuer identifier
+    `${url.href.replace(/\/$/, '')}/.well-known/openid-configuration` // Per RFC 8414, the OIDC metadata might be used for compatibility
+  ]
 }
 
 /**
@@ -44,44 +42,48 @@ export function getMetadataUrl(serverUrl: string): string {
  * @returns The authorization server metadata, or undefined if fetch fails
  */
 export async function fetchAuthorizationServerMetadata(serverUrl: string): Promise<AuthorizationServerMetadata | undefined> {
-  const metadataUrl = getMetadataUrl(serverUrl)
-
-  debugLog('Fetching authorization server metadata', { serverUrl, metadataUrl })
+  const metadataUrlCandidates = getMetadataUrls(serverUrl)
 
   try {
-    const response = await fetch(metadataUrl, {
-      headers: {
-        Accept: 'application/json',
-      },
-      // Short timeout to avoid blocking
-      signal: AbortSignal.timeout(5000),
-    })
+    let response: Response
+    for (const metadataUrl of metadataUrlCandidates) {
+      debugLog('Fetching authorization server metadata', { metadataUrl })
+      response = await fetch(metadataUrl, {
+        headers: {
+          Accept: 'application/json',
+        },
+        // Short timeout to avoid blocking
+        signal: AbortSignal.timeout(5000),
+      })
 
-    if (!response.ok) {
-      if (response.status === 404) {
-        debugLog('Authorization server metadata endpoint not found (404)', { metadataUrl })
+      if (!response.ok) {
+        if (response.status === 404) {
+          debugLog('Authorization server metadata endpoint not found (404)', { metadataUrl })
+          continue;
+        } else {
+          debugLog('Failed to fetch authorization server metadata', {
+            status: response.status,
+            statusText: response.statusText,
+          })
+        }
+        return undefined
       } else {
-        debugLog('Failed to fetch authorization server metadata', {
-          status: response.status,
-          statusText: response.statusText,
+        const metadata = (await response.json()) as AuthorizationServerMetadata
+
+        debugLog('Successfully fetched authorization server metadata', {
+          issuer: metadata.issuer,
+          scopes_supported: metadata.scopes_supported,
+          scopeCount: metadata.scopes_supported?.length || 0,
         })
+
+        return metadata
       }
-      return undefined
     }
 
-    const metadata = (await response.json()) as AuthorizationServerMetadata
-
-    debugLog('Successfully fetched authorization server metadata', {
-      issuer: metadata.issuer,
-      scopes_supported: metadata.scopes_supported,
-      scopeCount: metadata.scopes_supported?.length || 0,
-    })
-
-    return metadata
   } catch (error) {
     debugLog('Error fetching authorization server metadata', {
       error: error instanceof Error ? error.message : String(error),
-      metadataUrl,
+      metadataUrlCandidates,
     })
     return undefined
   }
