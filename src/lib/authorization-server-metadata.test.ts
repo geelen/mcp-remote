@@ -1,21 +1,31 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { fetchAuthorizationServerMetadata, getMetadataUrl } from './authorization-server-metadata'
+import { fetchAuthorizationServerMetadata, getMetadataUrls } from './authorization-server-metadata'
 
 describe('authorization-server-metadata', () => {
-  describe('getMetadataUrl', () => {
+  describe('getMetadataUrls', () => {
     it('should construct correct well-known URL', () => {
-      const url = getMetadataUrl('https://example.com/mcp')
-      expect(url).toBe('https://example.com/.well-known/oauth-authorization-server')
+      const urls = getMetadataUrls('https://example.com/mcp')
+      expect(urls).toContain('https://example.com/.well-known/oauth-authorization-server')
     })
 
     it('should handle URLs with different paths', () => {
-      const url = getMetadataUrl('https://api.example.com/v1/mcp/server')
-      expect(url).toBe('https://api.example.com/.well-known/oauth-authorization-server')
+      const urls = getMetadataUrls('https://api.example.com/v1/mcp/server')
+      expect(urls).toContain('https://api.example.com/.well-known/oauth-authorization-server')
     })
 
     it('should handle URLs with ports', () => {
-      const url = getMetadataUrl('https://localhost:8080/mcp')
-      expect(url).toBe('https://localhost:8080/.well-known/oauth-authorization-server')
+      const urls = getMetadataUrls('https://localhost:8080/mcp')
+      expect(urls).toContain('https://localhost:8080/.well-known/oauth-authorization-server')
+    })
+
+    it('should handle OIDC metadata URLs', () => {
+      const urls = getMetadataUrls('https://example.com')
+      expect(urls).toContain('https://example.com/.well-known/openid-configuration')
+    })
+
+    it('should handle segmented OIDC metadata URLs', () => {
+      const urls = getMetadataUrls('https://example.com/id')
+      expect(urls).toContain('https://example.com/id/.well-known/openid-configuration')
     })
   })
 
