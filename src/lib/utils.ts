@@ -411,7 +411,7 @@ export async function connectToRemoteServer(
               : (init?.headers as Record<string, string>) || {}),
             ...headers,
             ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: 'text/event-stream',
+            Accept: 'application/json, text/event-stream',
           } as Record<string, string>,
         }),
       )
