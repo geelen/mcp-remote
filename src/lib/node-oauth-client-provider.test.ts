@@ -73,11 +73,11 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(metadata.scope).toBe('openid email profile read:user')
     })
 
-    it('should fallback to default scopes when none provided', () => {
+    it('should fallback to no scope when none provided', () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       const metadata = provider.clientMetadata
-      expect(metadata.scope).toBe('openid email profile')
+      expect(metadata.scope).toBeUndefined()
     })
   })
 
@@ -96,13 +96,13 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(authUrl.searchParams.get('scope')).toBe('github read:user')
     })
 
-    it('should include default scope in authorization URL when none specified', async () => {
+    it('should omit scope from authorization URL when none specified', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       const authUrl = new URL('https://auth.example.com/authorize')
       await provider.redirectToAuthorization(authUrl)
 
-      expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
+      expect(authUrl.searchParams.has('scope')).toBe(false)
     })
   })
 
@@ -132,7 +132,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   })
 
   describe('credential invalidation', () => {
-    it('should reset to default scopes after client invalidation', async () => {
+    it('should reset to no scope after client invalidation', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       const clientInfo = {
@@ -147,7 +147,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       await provider.invalidateCredentials('client')
 
-      expect(provider.clientMetadata.scope).toBe('openid email profile')
+      expect(provider.clientMetadata.scope).toBeUndefined()
       expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'client_info.json')
     })
 
@@ -218,7 +218,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(clientMetadata.scope).toBe('custom:read custom:write special:scope')
     })
 
-    it('should use scopes when scopes_supported is empty', () => {
+    it('should not include scope in client metadata when scopes_supported is empty', () => {
       const metadata: AuthorizationServerMetadata = {
         issuer: 'https://example.com',
         scopes_supported: [],
@@ -234,6 +234,24 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       const clientMetadata = provider.clientMetadata
       expect(clientMetadata.scope).toBe('custom:read custom:write')
+    })
+
+    it('should omit scope from authorization URL when server declares empty scopes_supported', async () => {
+      const metadata: AuthorizationServerMetadata = {
+        issuer: 'https://example.com',
+        scopes_supported: [],
+      }
+
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: metadata,
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      await provider.redirectToAuthorization(authUrl)
+
+      // When no scopes are available, scope param should be omitted entirely
+      expect(authUrl.searchParams.has('scope')).toBe(false)
     })
 
     it('should use scopes when no metadata is provided', () => {
@@ -289,7 +307,29 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(clientMetadata.scope).toBe('openid email')
     })
 
-    it('should treat empty scope string as no scope and use default', () => {
+    it('should omit scope when scopes_supported is empty and no other sources', () => {
+      const metadata: AuthorizationServerMetadata = {
+        issuer: 'https://example.com',
+        scopes_supported: [],
+      }
+
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: metadata,
+      })
+
+      const clientMetadata = provider.clientMetadata
+      expect(clientMetadata.scope).toBeUndefined()
+    })
+
+    it('should omit scope when no metadata is provided and no other sources', () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      const clientMetadata = provider.clientMetadata
+      expect(clientMetadata.scope).toBeUndefined()
+    })
+
+    it('should treat empty scope string as no scope and omit it', () => {
       provider = new NodeOAuthClientProvider({
         ...defaultOptions,
         staticOAuthClientMetadata: {
@@ -298,8 +338,8 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       })
 
       const clientMetadata = provider.clientMetadata
-      // Empty scope should fallback to default
-      expect(clientMetadata.scope).toBe('openid email profile')
+      // Empty scope should be omitted entirely
+      expect(clientMetadata.scope).toBeUndefined()
     })
   })
 })

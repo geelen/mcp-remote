@@ -62,6 +62,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
   get clientMetadata() {
     const effectiveScope = this.getEffectiveScope()
+    // Destructure scope out of staticOAuthClientMetadata to prevent it from
+    // overriding the computed effectiveScope via object spread.
+    const { scope: _staticScope, ...staticMetadataWithoutScope } = this.staticOAuthClientMetadata || {}
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: 'none',
@@ -71,8 +74,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       client_uri: this.clientUri,
       software_id: this.softwareId,
       software_version: this.softwareVersion,
-      ...this.staticOAuthClientMetadata,
-      scope: effectiveScope,
+      ...staticMetadataWithoutScope,
+      ...(effectiveScope != null ? { scope: effectiveScope } : {}),
     }
   }
 
@@ -106,7 +109,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
   }
 
-  private getEffectiveScope(): string {
+  private getEffectiveScope(): string | undefined {
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
       debugLog('Using scope from staticOAuthClientMetadata', { scope: this.staticOAuthClientMetadata.scope })
@@ -145,9 +148,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default
-    debugLog('Using fallback default scope')
-    return 'openid email profile'
+    // No scopes available — the server does not require scopes (e.g. Datadog MCP).
+    // Return undefined so the scope parameter is omitted from requests entirely,
+    // rather than sending a hardcoded default that the server may reject.
+    debugLog('No scopes found from any source, omitting scope parameter')
+    return undefined
   }
 
   /**
@@ -263,8 +268,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     const effectiveScope = this.getEffectiveScope()
-    authorizationUrl.searchParams.set('scope', effectiveScope)
-    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    if (effectiveScope != null) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    } else {
+      debugLog('No scope to add to authorization URL')
+    }
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
