@@ -32,6 +32,7 @@ import { createLazyAuthCoordinator } from './lib/coordination'
 async function runClient(
   serverUrl: string,
   callbackPort: number,
+  callbackPath: string,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
@@ -66,6 +67,7 @@ async function runClient(
   const authProvider = new NodeOAuthClientProvider({
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
+    callbackPath,
     host,
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
@@ -183,6 +185,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
     ({
       serverUrl,
       callbackPort,
+      callbackPath,
       headers,
       transportStrategy,
       host,
@@ -194,6 +197,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
       return runClient(
         serverUrl,
         callbackPort,
+        callbackPath,
         headers,
         transportStrategy,
         host,

@@ -853,6 +853,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     j++
   }
 
+  // Parse callback path
+  let callbackPath = '/oauth/callback' // Default
+  const callbackPathIndex = args.indexOf('--callback-path')
+  if (callbackPathIndex !== -1 && callbackPathIndex < args.length - 1) {
+    callbackPath = args[callbackPathIndex + 1]
+    log(`Using callback path: ${callbackPath}`)
+  }
+
   // Parse auth timeout
   let authTimeoutMs = 30000 // Default 30 seconds
   const authTimeoutIndex = args.indexOf('--auth-timeout')
@@ -932,6 +940,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   return {
     serverUrl,
     callbackPort,
+    callbackPath,
     headers,
     transportStrategy,
     host,
