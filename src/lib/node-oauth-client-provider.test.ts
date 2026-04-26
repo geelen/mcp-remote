@@ -104,6 +104,25 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
     })
+
+    it('should use Google offline access parameters without offline_access scope', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: {
+          scope: 'openid email profile offline_access',
+        } as any,
+        authorizationServerMetadata: {
+          issuer: 'https://accounts.google.com',
+        } as AuthorizationServerMetadata,
+      })
+
+      const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
+      await provider.redirectToAuthorization(authUrl)
+
+      expect(authUrl.searchParams.get('access_type')).toBe('offline')
+      expect(authUrl.searchParams.get('prompt')).toBe('consent')
+      expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
+    })
   })
 
   describe('backward compatibility', () => {

@@ -262,7 +262,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       authorizationUrl.searchParams.set('resource', this.authorizeResource)
     }
 
-    const effectiveScope = this.getEffectiveScope()
+    let effectiveScope = this.getEffectiveScope()
+    const issuerHost = new URL(this.authorizationServerMetadata?.issuer ?? authorizationUrl.href).hostname
+    if (issuerHost === 'accounts.google.com' || issuerHost === 'oauth2.googleapis.com') {
+      authorizationUrl.searchParams.set('access_type', 'offline')
+      authorizationUrl.searchParams.set('prompt', 'consent')
+      effectiveScope = effectiveScope
+        .split(/\s+/)
+        .filter((scope) => scope && scope !== 'offline_access')
+        .join(' ')
+    }
     authorizationUrl.searchParams.set('scope', effectiveScope)
     debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
 
