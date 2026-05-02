@@ -3,6 +3,7 @@ import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackSe
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
+import net from 'net'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
@@ -1024,6 +1025,64 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+
+  it('should return actualPort matching the bound port on success', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+    })
+
+    server = result.server
+    const boundPort = (server.address() as net.AddressInfo).port
+    expect(result.actualPort).toBe(boundPort)
+    expect(result.actualPort).toBeGreaterThan(0)
+  })
+
+  it('should fall back to a random port when the requested port is already in use', async () => {
+    // Hold a port so the callback server cannot bind to it
+    const blocker = net.createServer()
+    const blockedPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
+    })
+
+    try {
+      const result = await setupOAuthCallbackServerWithLongPoll({
+        port: blockedPort,
+        path: '/oauth/callback',
+        events,
+      })
+
+      server = result.server
+      expect(result.actualPort).toBeGreaterThan(0)
+      expect(result.actualPort).not.toBe(blockedPort)
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
+  })
+
+  it('should reject with EADDRINUSE error when strictPort is true and port is already in use', async () => {
+    const blocker = net.createServer()
+    const blockedPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
+    })
+
+    try {
+      await expect(
+        setupOAuthCallbackServerWithLongPoll({
+          port: blockedPort,
+          path: '/oauth/callback',
+          events,
+          strictPort: true,
+        }),
+      ).rejects.toMatchObject({
+        code: 'EADDRINUSE',
+        requestedPort: blockedPort,
+      })
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
   })
 })
 
