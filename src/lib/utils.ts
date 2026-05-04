@@ -630,7 +630,9 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     log('Auth code received, resolving promise')
     authCompletedResolve(code)
 
-    res.send(`
+    res.send(
+      options.callbackHtml ??
+        `
       Authorization successful!
       You may close this window and return to the CLI.
       <script>
@@ -639,7 +641,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
         // the user will see the message above.
         window.close();
       </script>
-    `)
+    `,
+    )
 
     // Notify main flow that auth code is available
     options.events.emit('auth-code-received', code)
@@ -853,6 +856,23 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     j++
   }
 
+  // Parse callback HTML override
+  // Accepts an inline string or `@/path/to/file.html` to read from disk
+  // (mirrors the convention used by --static-oauth-client-info).
+  let callbackHtml: string | undefined
+  const callbackHtmlIndex = args.indexOf('--callback-html')
+  if (callbackHtmlIndex !== -1 && callbackHtmlIndex < args.length - 1) {
+    const callbackHtmlArg = args[callbackHtmlIndex + 1]
+    if (callbackHtmlArg.startsWith('@')) {
+      const filePath = callbackHtmlArg.slice(1)
+      callbackHtml = await readFile(filePath, 'utf8')
+      log(`Using custom OAuth callback HTML from file: ${filePath}`)
+    } else {
+      callbackHtml = callbackHtmlArg
+      log('Using custom OAuth callback HTML from string')
+    }
+  }
+
   // Parse auth timeout
   let authTimeoutMs = 30000 // Default 30 seconds
   const authTimeoutIndex = args.indexOf('--auth-timeout')
@@ -941,6 +961,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     authorizeResource,
     ignoredTools,
     authTimeoutMs,
+    callbackHtml,
     serverUrlHash,
   }
 }

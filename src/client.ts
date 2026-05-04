@@ -38,13 +38,14 @@ async function runClient(
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
+  callbackHtml: string | undefined,
   serverUrlHash: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, callbackHtml)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -189,6 +190,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authTimeoutMs,
+      callbackHtml,
       serverUrlHash,
     }) => {
       return runClient(
@@ -200,6 +202,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authTimeoutMs,
+        callbackHtml,
         serverUrlHash,
       )
     },

@@ -325,6 +325,36 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.ignoredTools).toEqual(['tool1', 'tool2'])
   })
 
+  it('Scenario: callbackHtml is undefined when --callback-html is not specified', async () => {
+    const args = ['https://example.com/sse']
+    const result = await parseCommandLineArgs(args, 'test usage')
+    expect(result.callbackHtml).toBeUndefined()
+  })
+
+  it('Scenario: Parse inline --callback-html string', async () => {
+    const inline = '<title>Quiet</title><script>window.close()</script>'
+    const args = ['https://example.com/sse', '--callback-html', inline]
+    const result = await parseCommandLineArgs(args, 'test usage')
+    expect(result.callbackHtml).toBe(inline)
+  })
+
+  it('Scenario: Parse --callback-html @file path and read file contents', async () => {
+    const fs = await import('fs/promises')
+    const os = await import('os')
+    const path = await import('path')
+    const tmp = path.join(os.tmpdir(), `mcp-remote-cb-${Date.now()}.html`)
+    const fileBody = '<!doctype html><title>From file</title>'
+    await fs.writeFile(tmp, fileBody, 'utf8')
+
+    try {
+      const args = ['https://example.com/sse', '--callback-html', `@${tmp}`]
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.callbackHtml).toBe(fileBody)
+    } finally {
+      await fs.rm(tmp, { force: true })
+    }
+  })
+
   it('Scenario: Use default auth timeout when not specified', async () => {
     // Given command line arguments without --auth-timeout flag
     const args = ['https://example.com/sse']
@@ -1024,6 +1054,44 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+
+  it('should render the default success page when callbackHtml is not provided', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+    })
+    server = result.server
+
+    await new Promise<void>((resolve) => server.once('listening', resolve))
+    const port = server.address().port
+    const response = await fetch(`http://127.0.0.1:${port}/oauth/callback?code=test-code`)
+    const body = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(body).toContain('Authorization successful!')
+    expect(body).toContain('window.close()')
+  })
+
+  it('should render the supplied HTML when callbackHtml is provided', async () => {
+    const customHtml = '<!doctype html><title>Quiet</title><script>window.close();</script>'
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      callbackHtml: customHtml,
+    })
+    server = result.server
+
+    await new Promise<void>((resolve) => server.once('listening', resolve))
+    const port = server.address().port
+    const response = await fetch(`http://127.0.0.1:${port}/oauth/callback?code=test-code`)
+    const body = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(body).toBe(customHtml)
+    expect(body).not.toContain('Authorization successful!')
   })
 })
 
