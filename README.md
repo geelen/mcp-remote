@@ -219,6 +219,17 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* To override the HTML rendered on the OAuth callback page, add the `--callback-html` flag with either an inline HTML string or a `@`-prefixed filepath. See [Custom Callback Page](#custom-callback-page) for details.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--callback-html",
+        "@/Users/username/.config/mcp-remote/callback.html"
+      ]
+```
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.
@@ -266,6 +277,32 @@ npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"cli
 # uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
 npx mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
 ```
+
+### Custom Callback Page
+
+After the OAuth code exchange completes, mcp-remote serves a small HTML page on
+the loopback callback URL. By default that page reads "Authorization
+successful! You may close this window and return to the CLI." with a
+`window.close()` script that only fires if the host browser opened the tab via
+`window.open` (so for OS-launched browsers the user is left looking at the
+default text).
+
+The `--callback-html` flag overrides that page. Pass either an inline HTML
+string or a `@`-prefixed filepath:
+
+```bash
+# Inline (silent auto-close attempt, no visible text)
+npx mcp-remote https://example.remote/server \
+  --callback-html '<!doctype html><title>Signed in</title><script>window.close()</script>'
+
+# From a file
+npx mcp-remote https://example.remote/server \
+  --callback-html '@/Users/username/.config/mcp-remote/callback.html'
+```
+
+This is purely cosmetic — the callback handler still receives the auth code
+and resolves the OAuth flow exactly as before; the supplied HTML is simply
+what the user's browser sees on the loopback page.
 
 ### Claude Desktop
 

@@ -53,6 +53,13 @@ export interface OAuthCallbackServerOptions {
   events: EventEmitter
   /** Timeout in milliseconds for the auth callback server's long poll */
   authTimeoutMs?: number
+  /**
+   * HTML body to render on the OAuth callback page after a successful code
+   * exchange. When omitted, the default "Authorization successful! ..."
+   * message is shown. Hosts that spawn mcp-remote programmatically (or users
+   * who want a quieter landing page) can supply their own markup.
+   */
+  callbackHtml?: string
 }
 
 // optional tatic OAuth client information
