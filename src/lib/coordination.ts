@@ -10,6 +10,20 @@ export type AuthCoordinator = {
   initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
 }
 
+export async function waitForListeningAddress(server: Server): Promise<AddressInfo> {
+  let address = server.address()
+  if (!address) {
+    await new Promise<void>((resolve) => server.once('listening', resolve))
+    address = server.address()
+  }
+
+  if (!address || typeof address === 'string') {
+    throw new Error('Failed to get server address after listening event')
+  }
+
+  return address
+}
+
 /**
  * Checks if a process with the given PID is running
  * @param pid The process ID to check
@@ -193,7 +207,7 @@ export async function coordinateAuth(
 
         // Setup a dummy server - the client will use tokens directly from disk
         const dummyServer = express().listen(0) // Listen on any available port
-        const dummyPort = (dummyServer.address() as AddressInfo).port
+        const dummyPort = (await waitForListeningAddress(dummyServer)).port
         debugLog('Started dummy server', { port: dummyPort })
 
         // This shouldn't actually be called in normal operation, but provide it for API compatibility
@@ -235,16 +249,7 @@ export async function coordinateAuth(
   })
 
   // Get the actual port the server is running on
-  let address = server.address() as AddressInfo | null
-  if (!address) {
-    await new Promise<void>((resolve) => server.once('listening', resolve))
-    address = server.address() as AddressInfo | null
-  }
-
-  if (!address) {
-    throw new Error('Failed to get server address after listening event')
-  }
-
+  const address = await waitForListeningAddress(server)
   const actualPort = address.port
   debugLog('OAuth callback server running', { port: actualPort })
 
