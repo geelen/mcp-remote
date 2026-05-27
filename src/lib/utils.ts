@@ -253,6 +253,211 @@ export function mcpProxy({
 }
 
 /**
+ * Handle returned by {@link createDeferredMcpBridge}.
+ *
+ * The bridge starts the local STDIO transport immediately and answers the
+ * client's `initialize` (and the per-domain `list` requests that typically
+ * follow) locally with empty results plus `listChanged: true` capabilities,
+ * while
+ * OAuth + remote connect proceed in the background. When the remote
+ * transport is ready, call {@link attachRemote} to hand over to {@link
+ * mcpProxy} and emit `notifications/<tools|resources|prompts>/list_changed`
+ * so the client refreshes its caches. Call {@link fail} if the remote
+ * bring-up fails — subsequent client requests get a structured error
+ * instead of silently hanging.
+ */
+export interface DeferredMcpBridgeHandle {
+  attachRemote(remoteTransport: Transport): Promise<void>
+  fail(error: Error): void
+}
+
+/**
+ * Pre-handshake bridge that lets the local MCP client finish `initialize`
+ * before the remote (OAuth-protected) MCP server is reachable.
+ *
+ * **Why this exists:** clients (notably Claude Desktop) give the server
+ * ~60 s to respond to `initialize`. Real OAuth flows take 30–180 s.
+ * The fix is RFC-clean: respond immediately with empty tool/resource/prompt
+ * lists, declare `listChanged: true`, finish OAuth in the background, then
+ * notify the client to refresh once the upstream is attached.
+ *
+ * Use {@link mcpProxy} directly when tokens are already cached (warm
+ * path); only construct this bridge for cold-start (no/expired tokens).
+ */
+export function createDeferredMcpBridge({
+  transportToClient,
+  ignoredTools = [],
+  serverInfoName = 'mcp-remote',
+  serverInfoVersion = MCP_REMOTE_VERSION,
+}: {
+  transportToClient: Transport
+  ignoredTools?: string[]
+  serverInfoName?: string
+  serverInfoVersion?: string
+}): DeferredMcpBridgeHandle {
+  type Phase = 'pre-handshake' | 'proxying' | 'failed'
+  let phase: Phase = 'pre-handshake'
+  let savedInitializeParams: any | undefined
+  let clientInitializedReceived = false
+  let failureReason: Error | undefined
+
+  const NOT_READY_CODE = -32002
+  const NOT_READY_MSG = 'mcp-remote: remote MCP server not yet authorized — complete OAuth in the opened browser tab, then retry'
+
+  const sendToClient = (message: any) => {
+    return transportToClient.send(message).catch((err) => {
+      debugLog('[Deferred] send to client failed', { error: (err as Error)?.message })
+    })
+  }
+  const replyError = (id: any, code: number, message: string) => {
+    void sendToClient({ jsonrpc: '2.0', id, error: { code, message } })
+  }
+  const replyResult = (id: any, result: any) => {
+    void sendToClient({ jsonrpc: '2.0', id, result })
+  }
+
+  // Install pre-handshake handler synchronously so the local STDIO transport
+  // begins consuming stdin as soon as it starts — that is the whole point.
+  transportToClient.onmessage = (_message) => {
+    const message = _message as any
+    const { method, id, params } = message ?? {}
+
+    if (phase === 'failed') {
+      if (id !== undefined && id !== null) {
+        replyError(
+          id,
+          NOT_READY_CODE,
+          `mcp-remote: authorization failed (${failureReason?.message ?? 'unknown error'}). Restart the client to retry.`,
+        )
+      }
+      return
+    }
+
+    // phase === 'pre-handshake' (proxying replaces this handler via mcpProxy())
+    if (method === 'initialize') {
+      savedInitializeParams = params
+      const clientProtocolVersion = params?.protocolVersion ?? '2024-11-05'
+      replyResult(id, {
+        protocolVersion: clientProtocolVersion,
+        capabilities: {
+          tools: { listChanged: true },
+          resources: { listChanged: true },
+          prompts: { listChanged: true },
+        },
+        serverInfo: { name: serverInfoName, version: serverInfoVersion },
+      })
+      log('[Deferred] Answered initialize locally; OAuth + remote connect continue in background')
+      return
+    }
+
+    if (method === 'notifications/initialized') {
+      clientInitializedReceived = true
+      return
+    }
+
+    if (method === 'tools/list') {
+      replyResult(id, { tools: [] })
+      return
+    }
+    if (method === 'resources/list') {
+      replyResult(id, { resources: [] })
+      return
+    }
+    if (method === 'prompts/list') {
+      replyResult(id, { prompts: [] })
+      return
+    }
+    if (method === 'resources/templates/list') {
+      replyResult(id, { resourceTemplates: [] })
+      return
+    }
+
+    if (typeof method === 'string' && method.startsWith('notifications/')) {
+      // Swallow any other client-side notifications during pre-handshake.
+      return
+    }
+
+    if (id !== undefined && id !== null) {
+      replyError(id, NOT_READY_CODE, NOT_READY_MSG)
+    }
+  }
+
+  return {
+    async attachRemote(remoteTransport: Transport) {
+      if (phase !== 'pre-handshake') {
+        throw new Error(`createDeferredMcpBridge.attachRemote: invalid phase '${phase}'`)
+      }
+
+      // 1. Re-issue initialize upstream using the client's saved params.
+      //    The remote MCP SDK transport is connected (.start() ran) but the
+      //    MCP-layer handshake has not happened yet — connectToRemoteServer
+      //    intentionally passes client=null.
+      if (savedInitializeParams) {
+        const upstreamInitId = `__mcp_remote_init_${crypto.randomUUID()}`
+        const clientInfo = savedInitializeParams.clientInfo
+        const taggedClientInfo = clientInfo
+          ? { ...clientInfo, name: `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})` }
+          : { name: `mcp-remote ${MCP_REMOTE_VERSION}`, version: MCP_REMOTE_VERSION }
+
+        const initAck = new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Upstream initialize timed out after 30s')), 30_000)
+          remoteTransport.onmessage = (msg: any) => {
+            if (msg?.id === upstreamInitId) {
+              clearTimeout(timer)
+              resolve()
+            }
+          }
+        })
+        await remoteTransport.send({
+          jsonrpc: '2.0',
+          id: upstreamInitId,
+          method: 'initialize',
+          params: { ...savedInitializeParams, clientInfo: taggedClientInfo },
+        } as any)
+        await initAck
+        debugLog('[Deferred] Upstream initialize acknowledged')
+      }
+
+      // 2. Forward the client's notifications/initialized upstream (if seen).
+      if (clientInitializedReceived) {
+        await remoteTransport.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as any).catch((err) => {
+          debugLog('[Deferred] Failed to forward notifications/initialized upstream', { error: (err as Error)?.message })
+        })
+      }
+
+      // 3. Hand over to the standard bidirectional proxy. mcpProxy reassigns
+      //    transportToClient.onmessage and transportToServer.onmessage.
+      phase = 'proxying'
+      mcpProxy({ transportToClient, transportToServer: remoteTransport, ignoredTools })
+
+      // 4. Tell the client lists changed so it re-fetches with real data.
+      for (const method of [
+        'notifications/tools/list_changed',
+        'notifications/resources/list_changed',
+        'notifications/prompts/list_changed',
+      ]) {
+        try {
+          await transportToClient.send({ jsonrpc: '2.0', method } as any)
+        } catch (err) {
+          debugLog(`[Deferred] Failed to send ${method}`, { error: (err as Error)?.message })
+        }
+      }
+      log('[Deferred] Remote attached; emitted list_changed notifications for tools/resources/prompts')
+    },
+
+    fail(error: Error) {
+      if (phase === 'proxying') {
+        debugLog('[Deferred] fail() called after attach — ignoring', { error: error.message })
+        return
+      }
+      phase = 'failed'
+      failureReason = error
+      log('[Deferred] OAuth/remote bring-up failed:', error.message)
+    },
+  }
+}
+
+/**
  * Result of OAuth server discovery
  */
 export interface OAuthServerDiscoveryResult {

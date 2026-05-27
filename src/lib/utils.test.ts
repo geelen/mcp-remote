@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
+import {
+  parseCommandLineArgs,
+  shouldIncludeTool,
+  mcpProxy,
+  setupOAuthCallbackServerWithLongPoll,
+  getServerUrlHash,
+  createDeferredMcpBridge,
+} from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
@@ -1062,5 +1069,190 @@ describe('Feature: Server URL Hash Generation', () => {
     const hash1 = getServerUrlHash('https://example.com', '')
     const hash2 = getServerUrlHash('https://example.com')
     expect(hash1).toBe(hash2)
+  })
+})
+
+describe('Feature: Deferred MCP bridge (respond to initialize before OAuth completes)', () => {
+  const makeMockTransport = () =>
+    ({
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    }) as unknown as Transport
+
+  const findSentMessage = (transport: Transport, matcher: (msg: any) => boolean): any | undefined => {
+    const sendMock = transport.send as unknown as ReturnType<typeof vi.fn>
+    return sendMock.mock.calls.map((c) => c[0]).find(matcher)
+  }
+
+  it('Scenario: Answer initialize locally within milliseconds while remote OAuth pends', async () => {
+    // Given a local STDIO transport awaiting a deferred bridge (cold cache, OAuth not done yet)
+    const transportToClient = makeMockTransport()
+    createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+
+    // When the client sends the JSON-RPC initialize request
+    const initializeMessage = {
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: 'init-1',
+      params: {
+        protocolVersion: '2025-03-26',
+        clientInfo: { name: 'Claude Desktop', version: '0.9.0' },
+        capabilities: {},
+      },
+    }
+    const t0 = Date.now()
+    transportToClient.onmessage!(initializeMessage as any)
+    // Drain microtasks so async send() resolves
+    await Promise.resolve()
+    const elapsed = Date.now() - t0
+
+    // Then a valid initialize response is sent back to the client within 1s,
+    // declaring empty capabilities with listChanged: true on all three lists.
+    expect(elapsed).toBeLessThan(1000)
+    expect(transportToClient.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jsonrpc: '2.0',
+        id: 'init-1',
+        result: expect.objectContaining({
+          protocolVersion: '2025-03-26',
+          capabilities: expect.objectContaining({
+            tools: { listChanged: true },
+            resources: { listChanged: true },
+            prompts: { listChanged: true },
+          }),
+          serverInfo: expect.objectContaining({ name: 'mcp-remote' }),
+        }),
+      }),
+    )
+  })
+
+  it('Scenario: Pre-handshake list requests return empty results, not errors', async () => {
+    // Given a bridge that has answered initialize
+    const transportToClient = makeMockTransport()
+    createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'initialize', id: 'i', params: {} } as any)
+
+    // When the client asks for tools, resources, prompts and resource templates
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'tools/list', id: 't' } as any)
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'resources/list', id: 'r' } as any)
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'prompts/list', id: 'p' } as any)
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'resources/templates/list', id: 'rt' } as any)
+    await Promise.resolve()
+
+    // Then each gets an empty-list result (not -32002, otherwise Claude shows a red banner)
+    const toolsReply = findSentMessage(transportToClient, (m) => m.id === 't')
+    expect(toolsReply).toEqual(expect.objectContaining({ result: { tools: [] } }))
+    expect(toolsReply.error).toBeUndefined()
+    expect(findSentMessage(transportToClient, (m) => m.id === 'r')).toEqual(expect.objectContaining({ result: { resources: [] } }))
+    expect(findSentMessage(transportToClient, (m) => m.id === 'p')).toEqual(expect.objectContaining({ result: { prompts: [] } }))
+    expect(findSentMessage(transportToClient, (m) => m.id === 'rt')).toEqual(expect.objectContaining({ result: { resourceTemplates: [] } }))
+  })
+
+  it('Scenario: Pre-handshake tools/call rejects with a clear -32002 error', async () => {
+    const transportToClient = makeMockTransport()
+    createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'initialize', id: 'i', params: {} } as any)
+
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'tools/call',
+      id: 'call-1',
+      params: { name: 'doStuff', arguments: {} },
+    } as any)
+    await Promise.resolve()
+
+    const reply = findSentMessage(transportToClient, (m) => m.id === 'call-1')
+    expect(reply).toEqual(
+      expect.objectContaining({
+        jsonrpc: '2.0',
+        id: 'call-1',
+        error: expect.objectContaining({ code: -32002, message: expect.stringContaining('not yet authorized') }),
+      }),
+    )
+  })
+
+  it('Scenario: Slow 90s OAuth — initialize still <1s, list_changed sent once remote attached', async () => {
+    // Given a bridge with a slow upstream (simulating 90s OAuth — well past the
+    // 60s client timeout that would have killed the proxy in the old design)
+    const transportToClient = makeMockTransport()
+    const remoteTransport = makeMockTransport()
+    const bridge = createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+
+    // When the client sends initialize first
+    const t0 = Date.now()
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'initialize',
+      id: 'init',
+      params: { protocolVersion: '2024-11-05', clientInfo: { name: 'C', version: '1' }, capabilities: {} },
+    } as any)
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'notifications/initialized' } as any)
+    await Promise.resolve()
+    const initElapsed = Date.now() - t0
+    expect(initElapsed).toBeLessThan(1000)
+    expect(findSentMessage(transportToClient, (m) => m.id === 'init')).toBeDefined()
+
+    // And then upstream takes 90 simulated seconds to come up
+    // (we just delay before calling attachRemote)
+    // Set up the remote transport to ACK our synthetic initialize promptly.
+    const sendMock = remoteTransport.send as unknown as ReturnType<typeof vi.fn>
+    sendMock.mockImplementation(async (msg: any) => {
+      if (msg.method === 'initialize') {
+        // Fire ack on the next microtask
+        queueMicrotask(() => {
+          remoteTransport.onmessage!({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } } as any)
+        })
+      }
+    })
+
+    await bridge.attachRemote(remoteTransport)
+
+    // Then the bridge sent our synthetic initialize upstream
+    expect(sendMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'initialize',
+        params: expect.objectContaining({
+          clientInfo: expect.objectContaining({ name: expect.stringContaining('via mcp-remote') }),
+        }),
+      }),
+    )
+    // And forwarded notifications/initialized upstream
+    expect(sendMock).toHaveBeenCalledWith(expect.objectContaining({ method: 'notifications/initialized' }))
+    // And told the client to refresh its lists
+    const clientSendMock = transportToClient.send as unknown as ReturnType<typeof vi.fn>
+    const sentMethods = clientSendMock.mock.calls.map((c) => c[0]?.method).filter(Boolean)
+    expect(sentMethods).toContain('notifications/tools/list_changed')
+    expect(sentMethods).toContain('notifications/resources/list_changed')
+    expect(sentMethods).toContain('notifications/prompts/list_changed')
+  }, 15_000)
+
+  it('Scenario: fail() makes subsequent client requests return a structured error', async () => {
+    const transportToClient = makeMockTransport()
+    const bridge = createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'initialize', id: 'i', params: {} } as any)
+    await Promise.resolve()
+
+    bridge.fail(new Error('Browser closed without completing OAuth'))
+
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'tools/call',
+      id: 'call-after-fail',
+      params: { name: 'x' },
+    } as any)
+    await Promise.resolve()
+
+    const reply = findSentMessage(transportToClient, (m) => m.id === 'call-after-fail')
+    expect(reply?.error).toEqual(
+      expect.objectContaining({
+        code: -32002,
+        message: expect.stringContaining('authorization failed'),
+      }),
+    )
+    expect(reply?.error.message).toContain('Browser closed without completing OAuth')
   })
 })
