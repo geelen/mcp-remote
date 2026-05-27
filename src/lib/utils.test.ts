@@ -1202,9 +1202,14 @@ describe('Feature: Deferred MCP bridge (respond to initialize before OAuth compl
     const sendMock = remoteTransport.send as unknown as ReturnType<typeof vi.fn>
     sendMock.mockImplementation(async (msg: any) => {
       if (msg.method === 'initialize') {
-        // Fire ack on the next microtask
+        // Fire ack on the next microtask, advertising all three capabilities so
+        // the bridge emits all three list_changed notifications.
         queueMicrotask(() => {
-          remoteTransport.onmessage!({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } } as any)
+          remoteTransport.onmessage!({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { capabilities: { tools: {}, resources: {}, prompts: {} } },
+          } as any)
         })
       }
     })
@@ -1229,6 +1234,132 @@ describe('Feature: Deferred MCP bridge (respond to initialize before OAuth compl
     expect(sentMethods).toContain('notifications/resources/list_changed')
     expect(sentMethods).toContain('notifications/prompts/list_changed')
   }, 15_000)
+
+  it('Scenario: capability mirroring — upstream advertises only tools, bridge skips resources/prompts list_changed', async () => {
+    const transportToClient = makeMockTransport()
+    const remoteTransport = makeMockTransport()
+    const bridge = createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'initialize',
+      id: 'init',
+      params: { protocolVersion: '2024-11-05', clientInfo: { name: 'C', version: '1' }, capabilities: {} },
+    } as any)
+    await Promise.resolve()
+
+    const sendMock = remoteTransport.send as unknown as ReturnType<typeof vi.fn>
+    sendMock.mockImplementation(async (msg: any) => {
+      if (msg.method === 'initialize') {
+        queueMicrotask(() => {
+          remoteTransport.onmessage!({
+            jsonrpc: '2.0',
+            id: msg.id,
+            // Tools-only server (e.g. SpeakUp's own MCP server)
+            result: { capabilities: { tools: {} } },
+          } as any)
+        })
+      }
+    })
+
+    await bridge.attachRemote(remoteTransport)
+
+    // Then only tools/list_changed is emitted; resources/prompts list_changed is skipped
+    const clientSendMock = transportToClient.send as unknown as ReturnType<typeof vi.fn>
+    const sentMethods = clientSendMock.mock.calls.map((c) => c[0]?.method).filter(Boolean)
+    expect(sentMethods).toContain('notifications/tools/list_changed')
+    expect(sentMethods).not.toContain('notifications/resources/list_changed')
+    expect(sentMethods).not.toContain('notifications/prompts/list_changed')
+
+    // And post-attach, resources/list / prompts/list are short-circuited to empty
+    // by the capability filter (instead of forwarding upstream for a -32601)
+    clientSendMock.mockClear()
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'resources/list', id: 'rl' } as any)
+    transportToClient.onmessage!({ jsonrpc: '2.0', method: 'prompts/list', id: 'pl' } as any)
+    await Promise.resolve()
+
+    expect(findSentMessage(transportToClient, (m) => m.id === 'rl')).toEqual(expect.objectContaining({ result: { resources: [] } }))
+    expect(findSentMessage(transportToClient, (m) => m.id === 'pl')).toEqual(expect.objectContaining({ result: { prompts: [] } }))
+    // And those calls were NOT forwarded to the remote (would have been a -32601 round-trip)
+    const remoteMethodsAfter = sendMock.mock.calls.map((c) => c[0]?.method).filter(Boolean)
+    expect(remoteMethodsAfter).not.toContain('resources/list')
+    expect(remoteMethodsAfter).not.toContain('prompts/list')
+  })
+
+  it('Scenario: remote closes mid-handshake — attachRemote rejects fast instead of waiting 30s', async () => {
+    const transportToClient = makeMockTransport()
+    const remoteTransport = makeMockTransport()
+    const bridge = createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'initialize',
+      id: 'init',
+      params: { protocolVersion: '2024-11-05', clientInfo: { name: 'C', version: '1' }, capabilities: {} },
+    } as any)
+    await Promise.resolve()
+
+    // Simulate the remote socket closing right after we send initialize upstream
+    const sendMock = remoteTransport.send as unknown as ReturnType<typeof vi.fn>
+    sendMock.mockImplementation(async (msg: any) => {
+      if (msg.method === 'initialize') {
+        queueMicrotask(() => {
+          if (remoteTransport.onclose) remoteTransport.onclose()
+        })
+      }
+    })
+
+    const t0 = Date.now()
+    await expect(bridge.attachRemote(remoteTransport)).rejects.toThrow(/closed during upstream initialize/)
+    const elapsed = Date.now() - t0
+    expect(elapsed).toBeLessThan(5000) // not 30s
+  })
+
+  it('Scenario: post-attach list_changed send fails → bridge closes local transport so client reconnects', async () => {
+    const transportToClient = makeMockTransport()
+    const remoteTransport = makeMockTransport()
+    const bridge = createDeferredMcpBridge({ transportToClient, ignoredTools: [] })
+
+    transportToClient.onmessage!({
+      jsonrpc: '2.0',
+      method: 'initialize',
+      id: 'init',
+      params: { protocolVersion: '2024-11-05', clientInfo: { name: 'C', version: '1' }, capabilities: {} },
+    } as any)
+    await Promise.resolve()
+
+    // Upstream acks normally with all 3 caps
+    const sendMock = remoteTransport.send as unknown as ReturnType<typeof vi.fn>
+    sendMock.mockImplementation(async (msg: any) => {
+      if (msg.method === 'initialize') {
+        queueMicrotask(() => {
+          remoteTransport.onmessage!({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { capabilities: { tools: {}, resources: {}, prompts: {} } },
+          } as any)
+        })
+      }
+    })
+
+    // But the local client send pipe breaks right when we try to emit list_changed.
+    // The initialize reply already went out via the pre-handshake handler before
+    // we install this failure, so we only fail later sends.
+    const clientSendMock = transportToClient.send as unknown as ReturnType<typeof vi.fn>
+    let callCount = 0
+    clientSendMock.mockImplementation(async (msg: any) => {
+      callCount++
+      if (msg?.method?.includes('list_changed')) {
+        throw new Error('local pipe closed (EPIPE)')
+      }
+    })
+
+    await expect(bridge.attachRemote(remoteTransport)).rejects.toThrow(/EPIPE/)
+    // Bridge closed the local transport so the MCP client reconnects cleanly
+    // instead of being stuck with the empty lists we replied with pre-handshake.
+    expect(transportToClient.close).toHaveBeenCalled()
+    expect(callCount).toBeGreaterThan(0)
+  })
 
   it('Scenario: fail() makes subsequent client requests return a structured error', async () => {
     const transportToClient = makeMockTransport()
