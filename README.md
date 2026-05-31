@@ -1,6 +1,12 @@
-# `mcp-remote`
+# `mcp-remote` (Datadog/Zed fork)
 
-Connect an MCP Client that only supports local (stdio) servers to a Remote MCP Server, with auth support:
+Connect an MCP Client that only supports local (stdio) servers to a Remote MCP Server, with auth support.
+
+> **This is a fork of [geelen/mcp-remote](https://github.com/geelen/mcp-remote) v0.1.38** with additional patches for Datadog and Zed compatibility:
+>
+> - **`params: null` normalization** — Zed sends JSON-RPC notifications with `"params": null`, which the MCP SDK rejects. This fork normalizes them transparently before schema validation.
+> - **Server warmup delay** — Datadog's Streamable HTTP endpoint needs a brief warm-up after the MCP handshake before it can serve `tools/list`. New `--ready-delay-ms` / `--tools-delay-ms` flags let you configure this.
+> - **No-default-scope mode** — mcp-remote v0.1.38 always sends `openid email profile` as a fallback OAuth scope, which causes Datadog to report "MCP CLI Proxy will have no permissions". The `--no-default-scope` flag disables this fallback, restoring the scoping behavior from v0.1.30.
 
 **Note: this is a working proof-of-concept** but should be considered **experimental**.
 
@@ -219,6 +225,40 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* *(Datadog/Zed)* To suppress the default `openid email profile` OAuth scope fallback (which can cause Datadog to reject the client), add the `--no-default-scope` flag. Explicitly configured scopes (via `--static-oauth-client-metadata`, WWW-Authenticate header, Protected Resource Metadata, etc.) are still honoured. You can also set the `MCP_REMOTE_NO_DEFAULT_SCOPE=true` environment variable.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--no-default-scope"
+      ]
+```
+
+* *(Datadog/Zed)* To delay all post-`initialize` messages by a fixed number of milliseconds (useful for servers that need time to warm up after the MCP handshake), add the `--ready-delay-ms` flag. The `initialize` message is always sent immediately; all subsequent messages are held until the delay has elapsed. You can also set the `MCP_REMOTE_READY_DELAY_MS` environment variable.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--ready-delay-ms",
+        "2000"
+      ]
+```
+
+* *(Datadog/Zed)* To delay only `tools/list` requests specifically (independent of `--ready-delay-ms`), add the `--tools-delay-ms` flag. You can also set the `MCP_REMOTE_TOOLS_DELAY_MS` environment variable. When both flags are provided, `tools/list` uses `--tools-delay-ms` and all other messages use `--ready-delay-ms`.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--ready-delay-ms",
+        "1000",
+        "--tools-delay-ms",
+        "3000"
+      ]
+```
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.
@@ -291,6 +331,35 @@ As of version `0.48.0`, Cursor supports unauthed SSE servers directly. If your M
 ### Windsurf
 
 [Official Docs](https://docs.codeium.com/windsurf/mcp). The configuration file is located at `~/.codeium/windsurf/mcp_config.json`.
+
+### Datadog (via Zed or any stdio-only client)
+
+Datadog's MCP server requires three of the Datadog-specific patches in this fork. A typical configuration looks like:
+
+```json
+{
+  "mcpServers": {
+    "datadog": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://api.datadoghq.com/api/v2/mcp/sse",
+        "--no-default-scope",
+        "--ready-delay-ms",
+        "2000",
+        "--tools-delay-ms",
+        "3000"
+      ]
+    }
+  }
+}
+```
+
+- `--no-default-scope` prevents the generic `openid email profile` scope from being sent, which Datadog interprets as "no permissions".
+- `--ready-delay-ms 2000` gives Datadog's Streamable HTTP endpoint time to initialise before the client sends any further messages.
+- `--tools-delay-ms 3000` waits an additional second before sending `tools/list` so the tool registry is fully ready.
+
+The `params: null` normalization is always active and requires no configuration — it fixes the Zed client sending `"params": null` in JSON-RPC notifications.
 
 ## Building Remote MCP Servers
 

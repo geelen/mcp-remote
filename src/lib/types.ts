@@ -39,6 +39,8 @@ export interface OAuthProviderOptions {
   protectedResourceMetadata?: ProtectedResourceMetadata
   /** Scope extracted from WWW-Authenticate header */
   wwwAuthenticateScope?: string
+  /** Suppress the default 'openid email profile' scope fallback (restores 0.1.30 behavior for Datadog compatibility) */
+  noDefaultScope?: boolean
 }
 
 /**

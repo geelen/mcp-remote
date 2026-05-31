@@ -132,13 +132,18 @@ export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  readyDelayMs = 0,
+  toolsDelayMs = 0,
 }: {
   transportToClient: Transport
   transportToServer: Transport
   ignoredTools?: string[]
+  readyDelayMs?: number
+  toolsDelayMs?: number
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let initializeTimestamp: number | undefined
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -199,6 +204,37 @@ export function mcpProxy({
       log(JSON.stringify(message, null, 2))
 
       debugLog('Initialize message with modified client info', { clientInfo })
+
+      // Record initialize timestamp for warmup delay
+      if (readyDelayMs > 0 || toolsDelayMs > 0) {
+        initializeTimestamp = Date.now()
+        debugLog('Recorded initialize timestamp for warmup delay', { initializeTimestamp })
+      }
+
+      // Send initialize immediately
+      transportToServer.send(message).catch(onServerError)
+      return
+    }
+
+    // Apply warmup delay for post-initialize messages if configured
+    if (initializeTimestamp !== undefined && (readyDelayMs > 0 || toolsDelayMs > 0)) {
+      const delayMs = message.method === 'tools/list' ? toolsDelayMs : readyDelayMs
+      if (delayMs > 0) {
+        const elapsed = Date.now() - initializeTimestamp
+        const remainingDelay = Math.max(0, delayMs - elapsed)
+
+        if (remainingDelay > 0) {
+          debugLog(`Delaying ${message.method || message.id} by ${remainingDelay}ms for server warmup`, {
+            delayMs,
+            elapsed,
+            remainingDelay,
+          })
+          setTimeout(() => {
+            transportToServer.send(message).catch(onServerError)
+          }, remainingDelay)
+          return
+        }
+      }
     }
 
     transportToServer.send(message).catch(onServerError)
@@ -929,6 +965,50 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     })
   }
 
+  // Parse --no-default-scope flag (for Datadog compatibility)
+  const noDefaultScope = args.includes('--no-default-scope') || process.env.MCP_REMOTE_NO_DEFAULT_SCOPE === 'true'
+  if (noDefaultScope) {
+    log('No-default-scope mode enabled - will not send generic OIDC scope fallback')
+  }
+
+  // Parse --ready-delay-ms flag (for Datadog warmup)
+  let readyDelayMs = 0
+  const readyDelayIndex = args.indexOf('--ready-delay-ms')
+  if (readyDelayIndex !== -1 && readyDelayIndex < args.length - 1) {
+    const delayValue = parseInt(args[readyDelayIndex + 1], 10)
+    if (!isNaN(delayValue) && delayValue >= 0) {
+      readyDelayMs = delayValue
+      log(`Using ready delay: ${readyDelayMs}ms`)
+    } else {
+      log(`Warning: Ignoring invalid ready-delay-ms value: ${args[readyDelayIndex + 1]}. Must be a non-negative number.`)
+    }
+  } else if (process.env.MCP_REMOTE_READY_DELAY_MS) {
+    const envValue = parseInt(process.env.MCP_REMOTE_READY_DELAY_MS, 10)
+    if (!isNaN(envValue) && envValue >= 0) {
+      readyDelayMs = envValue
+      log(`Using ready delay from env: ${readyDelayMs}ms`)
+    }
+  }
+
+  // Parse --tools-delay-ms flag (for Datadog tools/list warmup)
+  let toolsDelayMs = 0
+  const toolsDelayIndex = args.indexOf('--tools-delay-ms')
+  if (toolsDelayIndex !== -1 && toolsDelayIndex < args.length - 1) {
+    const delayValue = parseInt(args[toolsDelayIndex + 1], 10)
+    if (!isNaN(delayValue) && delayValue >= 0) {
+      toolsDelayMs = delayValue
+      log(`Using tools/list delay: ${toolsDelayMs}ms`)
+    } else {
+      log(`Warning: Ignoring invalid tools-delay-ms value: ${args[toolsDelayIndex + 1]}. Must be a non-negative number.`)
+    }
+  } else if (process.env.MCP_REMOTE_TOOLS_DELAY_MS) {
+    const envValue = parseInt(process.env.MCP_REMOTE_TOOLS_DELAY_MS, 10)
+    if (!isNaN(envValue) && envValue >= 0) {
+      toolsDelayMs = envValue
+      log(`Using tools/list delay from env: ${toolsDelayMs}ms`)
+    }
+  }
+
   return {
     serverUrl,
     callbackPort,
@@ -942,6 +1022,9 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    noDefaultScope,
+    readyDelayMs,
+    toolsDelayMs,
   }
 }
 

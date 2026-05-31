@@ -1064,3 +1064,190 @@ describe('Feature: Server URL Hash Generation', () => {
     expect(hash1).toBe(hash2)
   })
 })
+
+describe('Feature: Datadog Compatibility Flags', () => {
+  describe('Scenario: Parse --no-default-scope flag', () => {
+    it('should set noDefaultScope to true when flag is present', async () => {
+      const args = ['https://example.com', '--no-default-scope']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.noDefaultScope).toBe(true)
+    })
+
+    it('should set noDefaultScope to false when flag is absent', async () => {
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.noDefaultScope).toBe(false)
+    })
+
+    it('should set noDefaultScope to true from env var', async () => {
+      const original = process.env.MCP_REMOTE_NO_DEFAULT_SCOPE
+      process.env.MCP_REMOTE_NO_DEFAULT_SCOPE = 'true'
+
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.noDefaultScope).toBe(true)
+
+      if (original) process.env.MCP_REMOTE_NO_DEFAULT_SCOPE = original
+      else delete process.env.MCP_REMOTE_NO_DEFAULT_SCOPE
+    })
+  })
+
+  describe('Scenario: Parse --ready-delay-ms flag', () => {
+    it('should set readyDelayMs when flag is present', async () => {
+      const args = ['https://example.com', '--ready-delay-ms', '2000']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.readyDelayMs).toBe(2000)
+    })
+
+    it('should default to 0 when flag is absent', async () => {
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.readyDelayMs).toBe(0)
+    })
+
+    it('should set readyDelayMs from env var', async () => {
+      const original = process.env.MCP_REMOTE_READY_DELAY_MS
+      process.env.MCP_REMOTE_READY_DELAY_MS = '3000'
+
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.readyDelayMs).toBe(3000)
+
+      if (original) process.env.MCP_REMOTE_READY_DELAY_MS = original
+      else delete process.env.MCP_REMOTE_READY_DELAY_MS
+    })
+
+    it('should ignore invalid delay value', async () => {
+      const args = ['https://example.com', '--ready-delay-ms', 'invalid']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.readyDelayMs).toBe(0)
+    })
+  })
+
+  describe('Scenario: Parse --tools-delay-ms flag', () => {
+    it('should set toolsDelayMs when flag is present', async () => {
+      const args = ['https://example.com', '--tools-delay-ms', '2000']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.toolsDelayMs).toBe(2000)
+    })
+
+    it('should default to 0 when flag is absent', async () => {
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.toolsDelayMs).toBe(0)
+    })
+
+    it('should set toolsDelayMs from env var', async () => {
+      const original = process.env.MCP_REMOTE_TOOLS_DELAY_MS
+      process.env.MCP_REMOTE_TOOLS_DELAY_MS = '3000'
+
+      const args = ['https://example.com']
+      const result = await parseCommandLineArgs(args, 'test usage')
+      expect(result.toolsDelayMs).toBe(3000)
+
+      if (original) process.env.MCP_REMOTE_TOOLS_DELAY_MS = original
+      else delete process.env.MCP_REMOTE_TOOLS_DELAY_MS
+    })
+  })
+})
+
+describe('Feature: mcpProxy Warmup Delay', () => {
+  it('should send initialize immediately and delay subsequent messages', async () => {
+    vi.useFakeTimers()
+
+    const sentToServer: any[] = []
+    const mockClientTransport: Transport = {
+      onmessage: undefined,
+      onclose: undefined,
+      onerror: undefined,
+      send: vi.fn(),
+      close: vi.fn(),
+      start: vi.fn(),
+    }
+
+    const mockServerTransport: Transport = {
+      onmessage: undefined,
+      onclose: undefined,
+      onerror: undefined,
+      send: vi.fn((msg) => {
+        sentToServer.push({ message: msg, time: Date.now() })
+        return Promise.resolve()
+      }),
+      close: vi.fn(),
+      start: vi.fn(),
+    }
+
+    // Create proxy with delay
+    mcpProxy({
+      transportToClient: mockClientTransport,
+      transportToServer: mockServerTransport,
+      readyDelayMs: 2000,
+      toolsDelayMs: 2000,
+    })
+
+    const startTime = Date.now()
+
+    // Send initialize - should be immediate
+    mockClientTransport.onmessage?.({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    expect(sentToServer.length).toBe(1)
+    expect(sentToServer[0].message.method).toBe('initialize')
+    expect(sentToServer[0].time).toBe(startTime)
+
+    // Send tools/list - should be delayed by 2000ms
+    mockClientTransport.onmessage?.({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+    expect(sentToServer.length).toBe(1) // Not sent yet
+
+    // Advance time by 1999ms - still not sent
+    vi.advanceTimersByTime(1999)
+    expect(sentToServer.length).toBe(1)
+
+    // Advance 1 more ms - now it should be sent
+    vi.advanceTimersByTime(1)
+    expect(sentToServer.length).toBe(2)
+    expect(sentToServer[1].message.method).toBe('tools/list')
+    expect(sentToServer[1].time).toBe(startTime + 2000)
+
+    vi.useRealTimers()
+  })
+
+  it('should not delay when delays are 0', async () => {
+    const sentToServer: any[] = []
+    const mockClientTransport: Transport = {
+      onmessage: undefined,
+      onclose: undefined,
+      onerror: undefined,
+      send: vi.fn(),
+      close: vi.fn(),
+      start: vi.fn(),
+    }
+
+    const mockServerTransport: Transport = {
+      onmessage: undefined,
+      onclose: undefined,
+      onerror: undefined,
+      send: vi.fn((msg) => {
+        sentToServer.push(msg)
+        return Promise.resolve()
+      }),
+      close: vi.fn(),
+      start: vi.fn(),
+    }
+
+    // Create proxy with no delay
+    mcpProxy({
+      transportToClient: mockClientTransport,
+      transportToServer: mockServerTransport,
+      readyDelayMs: 0,
+      toolsDelayMs: 0,
+    })
+
+    // Send messages
+    mockClientTransport.onmessage?.({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+    mockClientTransport.onmessage?.({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+
+    // Both should be sent immediately
+    expect(sentToServer.length).toBe(2)
+    expect(sentToServer[0].method).toBe('initialize')
+    expect(sentToServer[1].method).toBe('tools/list')
+  })
+})

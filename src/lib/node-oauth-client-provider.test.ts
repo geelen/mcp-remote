@@ -302,4 +302,101 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(clientMetadata.scope).toBe('openid email profile')
     })
   })
+
+  describe('noDefaultScope flag (Datadog compatibility)', () => {
+    it('should return undefined scope when noDefaultScope is true and no scope configured', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+      })
+
+      const metadata = provider.clientMetadata
+      // Should not have a scope key at all
+      expect(metadata).not.toHaveProperty('scope')
+    })
+
+    it('should not include scope parameter in authorization URL when noDefaultScope is true', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      await provider.redirectToAuthorization(authUrl)
+
+      // Should not have scope param
+      expect(authUrl.searchParams.has('scope')).toBe(false)
+    })
+
+    it('should still honor explicit scope even when noDefaultScope is true', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+        staticOAuthClientMetadata: {
+          scope: 'custom:read custom:write',
+        } as any,
+      })
+
+      const metadata = provider.clientMetadata
+      expect(metadata.scope).toBe('custom:read custom:write')
+    })
+
+    it('should still honor WWW-Authenticate scope when noDefaultScope is true', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+        wwwAuthenticateScope: 'mcp:read mcp:write',
+      })
+
+      const metadata = provider.clientMetadata
+      expect(metadata.scope).toBe('mcp:read mcp:write')
+    })
+
+    it('should still honor PRM scopes_supported when noDefaultScope is true', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+        protectedResourceMetadata: {
+          resource: 'https://example.com',
+          scopes_supported: ['mcp:read', 'mcp:write'],
+        },
+      })
+
+      const metadata = provider.clientMetadata
+      expect(metadata.scope).toBe('mcp:read mcp:write')
+    })
+
+    it('should still honor AS metadata scopes when noDefaultScope is true', () => {
+      const metadata: AuthorizationServerMetadata = {
+        issuer: 'https://example.com',
+        scopes_supported: ['openid', 'email'],
+      }
+
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: true,
+        authorizationServerMetadata: metadata,
+      })
+
+      const clientMetadata = provider.clientMetadata
+      expect(clientMetadata.scope).toBe('openid email')
+    })
+
+    it('should use default scope when noDefaultScope is false (backward compatibility)', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        noDefaultScope: false,
+      })
+
+      const metadata = provider.clientMetadata
+      expect(metadata.scope).toBe('openid email profile')
+    })
+
+    it('should use default scope when noDefaultScope is not provided (backward compatibility)', () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      const metadata = provider.clientMetadata
+      expect(metadata.scope).toBe('openid email profile')
+    })
+  })
 })

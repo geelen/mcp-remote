@@ -10,7 +10,7 @@
  */
 
 import { EventEmitter } from 'events'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { NormalizingStdioServerTransport } from './lib/stdio-client-transport'
 import {
   connectToRemoteServer,
   log,
@@ -40,6 +40,9 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  noDefaultScope?: boolean,
+  readyDelayMs?: number,
+  toolsDelayMs?: number,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -76,10 +79,11 @@ async function runProxy(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    noDefaultScope,
   })
 
-  // Create the STDIO transport for local connections
-  const localTransport = new StdioServerTransport()
+  // Create the STDIO transport for local connections with params:null normalization
+  const localTransport = new NormalizingStdioServerTransport()
 
   // Keep track of the server instance for cleanup
   let server: any = null
@@ -114,6 +118,8 @@ async function runProxy(
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      readyDelayMs,
+      toolsDelayMs,
     })
 
     // Start the local STDIO server
@@ -180,6 +186,9 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      noDefaultScope,
+      readyDelayMs,
+      toolsDelayMs,
     }) => {
       return runProxy(
         serverUrl,
@@ -193,6 +202,9 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        noDefaultScope,
+        readyDelayMs,
+        toolsDelayMs,
       )
     },
   )

@@ -34,6 +34,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  private noDefaultScope: boolean
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -54,6 +55,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+    this.noDefaultScope = options.noDefaultScope || false
   }
 
   get redirectUrl(): string {
@@ -62,7 +64,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
   get clientMetadata() {
     const effectiveScope = this.getEffectiveScope()
-    return {
+    const metadata: any = {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code', 'refresh_token'],
@@ -72,8 +74,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       software_id: this.softwareId,
       software_version: this.softwareVersion,
       ...this.staticOAuthClientMetadata,
-      scope: effectiveScope,
     }
+
+    // Only set scope if defined (when noDefaultScope is on, this may be undefined)
+    if (effectiveScope !== undefined) {
+      metadata.scope = effectiveScope
+    }
+
+    return metadata
   }
 
   state(): string {
@@ -106,7 +114,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
   }
 
-  private getEffectiveScope(): string {
+  private getEffectiveScope(): string | undefined {
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
       debugLog('Using scope from staticOAuthClientMetadata', { scope: this.staticOAuthClientMetadata.scope })
@@ -145,7 +153,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default
+    // Priority 6: Fallback to hardcoded default (unless noDefaultScope is set)
+    if (this.noDefaultScope) {
+      debugLog('No default scope fallback (noDefaultScope enabled) - returning undefined')
+      return undefined
+    }
+
     debugLog('Using fallback default scope')
     return 'openid email profile'
   }
@@ -263,8 +276,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     const effectiveScope = this.getEffectiveScope()
-    authorizationUrl.searchParams.set('scope', effectiveScope)
-    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    if (effectiveScope !== undefined) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    } else {
+      debugLog('No scope parameter added to authorization URL (undefined)')
+    }
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
