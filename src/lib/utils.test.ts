@@ -7,6 +7,40 @@ import express from 'express'
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
 describe('Feature: Command Line Arguments Parsing', () => {
+  it('Scenario: Show help without parsing server URL', async () => {
+    // Given command line arguments with only the help flag
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as any)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit:${code}`)
+    })
+
+    // When parsing the command line arguments
+    await expect(parseCommandLineArgs(['--help'], 'test usage')).rejects.toThrow('process.exit:0')
+
+    // Then usage should be written before URL validation
+    expect(stdoutSpy).toHaveBeenCalledWith('test usage\n')
+
+    stdoutSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
+  it('Scenario: Show version without parsing server URL', async () => {
+    // Given command line arguments with only the version flag
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as any)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit:${code}`)
+    })
+
+    // When parsing the command line arguments
+    await expect(parseCommandLineArgs(['--version'], 'test usage')).rejects.toThrow('process.exit:0')
+
+    // Then the version should be written before URL validation
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringMatching(/^\d+\.\d+\.\d+\n$/))
+
+    stdoutSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
   it('Scenario: Parse basic server URL', async () => {
     // Given command line arguments with only a server URL
     const args = ['https://example.com/sse']

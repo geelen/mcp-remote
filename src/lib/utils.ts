@@ -735,6 +735,16 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
 export async function parseCommandLineArgs(args: string[], usage: string) {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(`${usage}\n`)
+    process.exit(0)
+  }
+
+  if (args.includes('--version') || args.includes('-v')) {
+    process.stdout.write(`${MCP_REMOTE_VERSION}\n`)
+    process.exit(0)
+  }
+
   // Process headers
   const headers: Record<string, string> = {}
   let i = 0
