@@ -1064,3 +1064,39 @@ describe('Feature: Server URL Hash Generation', () => {
     expect(hash1).toBe(hash2)
   })
 })
+
+describe('Feature: Proxy Support', () => {
+  let originalFetch: typeof globalThis.fetch
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Scenario: --enable-proxy replaces globalThis.fetch with undici fetch', async () => {
+    // Given --enable-proxy is passed
+    const args = ['https://example.com/mcp', '--enable-proxy']
+
+    // When parsing the command line arguments
+    await parseCommandLineArgs(args, 'test usage')
+
+    // Then globalThis.fetch should be replaced with undici's fetch so that
+    // Node.js 22+ built-in fetch (which uses a separate internal undici instance)
+    // also routes through the configured proxy dispatcher
+    expect(globalThis.fetch).not.toBe(originalFetch)
+  })
+
+  it('Scenario: without --enable-proxy, globalThis.fetch is not replaced', async () => {
+    // Given --enable-proxy is NOT passed
+    const args = ['https://example.com/mcp']
+
+    // When parsing the command line arguments
+    await parseCommandLineArgs(args, 'test usage')
+
+    // Then globalThis.fetch should remain unchanged
+    expect(globalThis.fetch).toBe(originalFetch)
+  })
+})
