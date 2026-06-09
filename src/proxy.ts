@@ -10,6 +10,7 @@
  */
 
 import { EventEmitter } from 'events'
+import { pathToFileURL } from 'url'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   connectToRemoteServer,
@@ -28,7 +29,7 @@ import { createLazyAuthCoordinator } from './lib/coordination'
 /**
  * Main function to run the proxy
  */
-async function runProxy(
+export async function runProxy(
   serverUrl: string,
   callbackPort: number,
   headers: Record<string, string>,
@@ -164,9 +165,10 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
   }
 }
 
-// Parse command-line arguments and run the proxy
-parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
-  .then(
+// Parse command-line arguments and run the proxy only when invoked as the CLI.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
+    .then(
     ({
       serverUrl,
       callbackPort,
@@ -196,7 +198,8 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       )
     },
   )
-  .catch((error) => {
-    log('Fatal error:', error)
-    process.exit(1)
-  })
+    .catch((error) => {
+      log('Fatal error:', error)
+      process.exit(1)
+    })
+}

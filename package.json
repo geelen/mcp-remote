@@ -51,7 +51,8 @@
   "tsup": {
     "entry": [
       "src/client.ts",
-      "src/proxy.ts"
+      "src/proxy.ts",
+      "src/index.ts"
     ],
     "format": [
       "esm"
