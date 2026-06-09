@@ -19,6 +19,7 @@
     "LICENSE"
   ],
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "mcp-remote": "dist/proxy.js",
     "mcp-remote-client": "dist/client.js"
@@ -50,6 +51,7 @@
   },
   "tsup": {
     "entry": [
+      "src/index.ts",
       "src/client.ts",
       "src/proxy.ts"
     ],
