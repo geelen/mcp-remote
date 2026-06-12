@@ -216,6 +216,12 @@ export function mcpProxy({
       error: message.error,
     })
 
+    // After initialize response, set the negotiated protocol version on the remote
+    // transport so that subsequent requests include the MCP-Protocol-Version header.
+    if (message.result?.protocolVersion && 'setProtocolVersion' in transportToServer) {
+      ;(transportToServer as any).setProtocolVersion(message.result.protocolVersion)
+    }
+
     transportToClient.send(message).catch(onClientError)
   }
 
