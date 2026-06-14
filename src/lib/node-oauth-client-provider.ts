@@ -1,4 +1,5 @@
 import open from 'open'
+import { z } from 'zod'
 import { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
   OAuthClientInformationFull,
@@ -14,6 +15,19 @@ import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
+
+/**
+ * The OAuth token response only carries the relative `expires_in`, which is
+ * useless once persisted to disk. We extend the SDK token schema with an
+ * absolute `expires_at` timestamp so later reads can detect imminent expiry
+ * and refresh proactively. The base schema uses `.strip()`, which would
+ * otherwise drop `expires_at` on read, so we parse and serialize tokens with
+ * this extended schema instead.
+ */
+const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
+  expires_at: z.coerce.number().optional(),
+})
+type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -193,7 +207,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Reading OAuth tokens')
     debugLog('Token request stack trace:', new Error().stack)
 
-    const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
+    const tokens = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
 
     if (tokens) {
       const timeLeft = tokens.expires_in || 0
@@ -207,14 +221,27 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         })
       }
 
+      // Use the persisted absolute expiry timestamp to detect imminent expiry,
+      // refreshing ~60s early to avoid sending a token that is about to 401.
+      const isExpired = tokens.expires_at ? Date.now() >= tokens.expires_at - 60_000 : false
+
       debugLog('Token result:', {
         found: true,
         hasAccessToken: !!tokens.access_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
-        isExpired: timeLeft <= 0,
-        expiresInValue: tokens.expires_in,
+        expiresAt: tokens.expires_at ? new Date(tokens.expires_at).toISOString() : 'unknown',
+        isExpired,
       })
+
+      // If the token is expired (or about to expire) and we have a refresh
+      // token, blank out the access token so the SDK's auth flow performs a
+      // refresh instead of reusing the stale token. Reusing it would 401 and
+      // trigger a full browser re-auth, which clients like Claude Desktop kill
+      // before the user can complete it (see issue #273).
+      if (isExpired && tokens.refresh_token) {
+        return { ...tokens, access_token: '' }
+      }
     } else {
       debugLog('Token result: Not found')
     }
@@ -245,7 +272,15 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       expiresInValue: tokens.expires_in,
     })
 
-    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+    // Persist an absolute expiry timestamp alongside the token so that future
+    // reads can detect imminent expiry and refresh proactively (the spec only
+    // provides the relative `expires_in`, which is meaningless once stored).
+    const tokensToSave: OAuthTokensWithExpiresAt = {
+      ...tokens,
+      expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
+    }
+
+    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)
   }
 
   /**
