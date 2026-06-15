@@ -72,7 +72,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       software_id: this.softwareId,
       software_version: this.softwareVersion,
       ...this.staticOAuthClientMetadata,
-      scope: effectiveScope,
+      ...(effectiveScope && { scope: effectiveScope }),
     }
   }
 
@@ -145,7 +145,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default
+    // Priority 6: If the server explicitly declares scopes_supported (even empty), respect it
+    if (Array.isArray(this.authorizationServerMetadata?.scopes_supported)) {
+      debugLog('Server declares empty scopes_supported, using no scope')
+      return ''
+    }
+
+    // Priority 7: Fallback to hardcoded default
     debugLog('Using fallback default scope')
     return 'openid email profile'
   }
@@ -263,8 +269,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     const effectiveScope = this.getEffectiveScope()
-    authorizationUrl.searchParams.set('scope', effectiveScope)
-    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    if (effectiveScope) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    }
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
