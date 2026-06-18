@@ -169,35 +169,35 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://server-url> [callback-port] [--debug]')
     .then(
-    ({
-      serverUrl,
-      callbackPort,
-      headers,
-      transportStrategy,
-      host,
-      debug,
-      staticOAuthClientMetadata,
-      staticOAuthClientInfo,
-      authorizeResource,
-      ignoredTools,
-      authTimeoutMs,
-      serverUrlHash,
-    }) => {
-      return runProxy(
+      ({
         serverUrl,
         callbackPort,
         headers,
         transportStrategy,
         host,
+        debug,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
         authorizeResource,
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
-      )
-    },
-  )
+      }) => {
+        return runProxy(
+          serverUrl,
+          callbackPort,
+          headers,
+          transportStrategy,
+          host,
+          staticOAuthClientMetadata,
+          staticOAuthClientInfo,
+          authorizeResource,
+          ignoredTools,
+          authTimeoutMs,
+          serverUrlHash,
+        )
+      },
+    )
     .catch((error) => {
       log('Fatal error:', error)
       process.exit(1)
