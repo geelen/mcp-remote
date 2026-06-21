@@ -685,7 +685,7 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     .map((uri) => new URL(uri))
     .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
-    throw new Error('Cannot find localhost callback URI from existing client information')
+    return undefined
   }
 
   return parseInt(localhostRedirectUri.port)

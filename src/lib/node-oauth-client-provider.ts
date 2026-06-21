@@ -168,6 +168,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     )
 
     if (clientInfo) {
+      // Override redirect_uris to match current callback URL, preventing mismatch
+      // when the server returned different redirect_uris during registration
+      clientInfo.redirect_uris = [this.redirectUrl]
       this._clientInfo = clientInfo
     }
 

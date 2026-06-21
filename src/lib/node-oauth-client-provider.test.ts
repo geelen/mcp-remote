@@ -131,6 +131,41 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('redirect_uris override on load', () => {
+    it('should override server-assigned redirect_uris with local callback URL when loading from disk', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      const savedClientInfo = {
+        client_id: 'test-client',
+        redirect_uris: ['https://mcp.abc.com/callback'],
+        scope: 'openid',
+      }
+
+      mockReadJsonFile.mockResolvedValueOnce(savedClientInfo)
+      const result = await provider.clientInformation()
+
+      expect(result?.redirect_uris).toEqual(['http://localhost:8080/oauth/callback'])
+    })
+
+    it('should preserve other fields from saved client info', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      const savedClientInfo = {
+        client_id: 'my-client-id',
+        client_secret: 'my-secret',
+        redirect_uris: ['https://remote.server/callback'],
+        scope: 'openid email',
+      }
+
+      mockReadJsonFile.mockResolvedValueOnce(savedClientInfo)
+      const result = await provider.clientInformation()
+
+      expect(result?.client_id).toBe('my-client-id')
+      expect(result?.client_secret).toBe('my-secret')
+      expect(result?.scope).toBe('openid email')
+    })
+  })
+
   describe('credential invalidation', () => {
     it('should reset to default scopes after client invalidation', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
