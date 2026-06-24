@@ -889,6 +889,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
+  // Parse callback path
+  let callbackPath = '';
+  const callbackPathIndex = args.indexOf('--callback-path')
+  if (callbackPathIndex !== -1 && callbackPathIndex < args.length - 1) {
+    callbackPath = args[callbackPathIndex + 1]
+    log(`Using callback path: ${callbackPath}`)
+  }
+
   // Use the specified port, or the existing client port or fallback to find an available one
   const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrlHash), findAvailablePort(defaultPort)])
   let callbackPort: number
@@ -931,6 +939,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   return {
     serverUrl,
+    callbackPath,
     callbackPort,
     headers,
     transportStrategy,

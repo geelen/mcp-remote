@@ -31,6 +31,7 @@ import { createLazyAuthCoordinator } from './lib/coordination'
  */
 async function runClient(
   serverUrl: string,
+  callbackPath: string,
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
@@ -44,7 +45,7 @@ async function runClient(
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -182,6 +183,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
   .then(
     ({
       serverUrl,
+      callbackPath,
       callbackPort,
       headers,
       transportStrategy,
@@ -193,6 +195,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx client.ts <https://s
     }) => {
       return runClient(
         serverUrl,
+        callbackPath,
         callbackPort,
         headers,
         transportStrategy,

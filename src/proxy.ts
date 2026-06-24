@@ -30,6 +30,7 @@ import { createLazyAuthCoordinator } from './lib/coordination'
  */
 async function runProxy(
   serverUrl: string,
+  callbackPath: string,
   callbackPort: number,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
@@ -45,7 +46,7 @@ async function runProxy(
   const events = new EventEmitter()
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -66,6 +67,7 @@ async function runProxy(
   // Create the OAuth client provider with discovered server info
   const authProvider = new NodeOAuthClientProvider({
     serverUrl: discoveryResult.authorizationServerUrl,
+    callbackPath,
     callbackPort,
     host,
     clientName: 'MCP CLI Proxy',
@@ -169,6 +171,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
   .then(
     ({
       serverUrl,
+      callbackPath,
       callbackPort,
       headers,
       transportStrategy,
@@ -183,6 +186,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
     }) => {
       return runProxy(
         serverUrl,
+        callbackPath,
         callbackPort,
         headers,
         transportStrategy,
