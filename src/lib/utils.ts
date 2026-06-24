@@ -201,7 +201,25 @@ export function mcpProxy({
       debugLog('Initialize message with modified client info', { clientInfo })
     }
 
-    transportToServer.send(message).catch(onServerError)
+    // Capture the request id so that if the server send fails (e.g. a
+    // transport-level HTTP error) we can propagate a JSON-RPC error response
+    // back to the waiting client instead of leaving its request unanswered.
+    const requestId = 'id' in message ? (message as any).id : undefined
+
+    transportToServer.send(message).catch((error: Error) => {
+      onServerError(error)
+      if (requestId !== undefined) {
+        const errorResponse = {
+          jsonrpc: '2.0' as const,
+          id: requestId,
+          error: {
+            code: -32603,
+            message: error.message ?? 'Internal error forwarding request to remote server',
+          },
+        }
+        transportToClient.send(errorResponse).catch(onClientError)
+      }
+    })
   }
 
   transportToServer.onmessage = (_message) => {
