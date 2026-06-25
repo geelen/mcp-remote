@@ -140,6 +140,13 @@ export function mcpProxy({
   let transportToClientClosed = false
   let transportToServerClosed = false
 
+  // Track in-flight request ids so that if the server transport fires onerror
+  // (e.g. _startOrAuthSse receives a 429 and calls this.onerror?.()) we can
+  // drain all pending requests with a JSON-RPC error instead of leaving them
+  // parked indefinitely.  Only messages that carry an id (requests) are tracked;
+  // notifications (no id) are fire-and-forget and need no response.
+  const pendingRequests = new Map<string | number, true>()
+
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
       // Block tools/call for ignored tools
@@ -206,9 +213,16 @@ export function mcpProxy({
     // back to the waiting client instead of leaving its request unanswered.
     const requestId = 'id' in message ? (message as any).id : undefined
 
+    // Register in-flight before send so that onerror (fired by transport-level
+    // errors like a 429 on the SSE GET path) can drain all pending requests.
+    if (requestId !== undefined) {
+      pendingRequests.set(requestId, true)
+    }
+
     transportToServer.send(message).catch((error: Error) => {
       onServerError(error)
       if (requestId !== undefined) {
+        pendingRequests.delete(requestId)
         const errorResponse = {
           jsonrpc: '2.0' as const,
           id: requestId,
@@ -233,6 +247,11 @@ export function mcpProxy({
       result: message.result ? 'result-present' : undefined,
       error: message.error,
     })
+
+    // Remove from in-flight tracking now that the server responded.
+    if (message.id !== undefined && message.id !== null) {
+      pendingRequests.delete(message.id as string | number)
+    }
 
     transportToClient.send(message).catch(onClientError)
   }
@@ -267,6 +286,26 @@ export function mcpProxy({
   function onServerError(error: Error) {
     log('Error from remote server:', error)
     debugLog('Error from remote server', { stack: error.stack })
+
+    // Drain all in-flight requests: send a JSON-RPC error for each pending id
+    // so that client awaiters are unblocked immediately.  This covers the path
+    // where the transport fires onerror (e.g. _startOrAuthSse / SSE GET gets a
+    // 429) rather than the send().catch() path handled above.
+    if (pendingRequests.size > 0) {
+      const errorMsg = error.message ?? 'Remote server error'
+      for (const id of pendingRequests.keys()) {
+        const errorResponse = {
+          jsonrpc: '2.0' as const,
+          id,
+          error: {
+            code: -32603,
+            message: errorMsg,
+          },
+        }
+        transportToClient.send(errorResponse).catch(onClientError)
+      }
+      pendingRequests.clear()
+    }
   }
 }
 
