@@ -427,14 +427,14 @@ export async function connectToRemoteServer(
   const sseTransport = transportStrategy === 'sse-only' || transportStrategy === 'sse-first'
   const transport = sseTransport
     ? new SSEClientTransport(url, {
-        authProvider,
-        requestInit: { headers },
-        eventSourceInit,
-      })
+      authProvider,
+      requestInit: { headers },
+      eventSourceInit,
+    })
     : new StreamableHTTPClientTransport(url, {
-        authProvider,
-        requestInit: { headers },
-      })
+      authProvider,
+      requestInit: { headers },
+    })
 
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
@@ -453,7 +453,14 @@ export async function connectToRemoteServer(
         debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
-        await testClient.connect(testTransport)
+        try {
+          await testClient.connect(testTransport)
+        } finally {
+          const tt = testTransport as any
+          const mt = transport as any
+          if (tt._resourceMetadataUrl) mt._resourceMetadataUrl = tt._resourceMetadataUrl
+          if (tt._scope) mt._scope = tt._scope
+        }
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`)
