@@ -70,6 +70,19 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.headers).toEqual({ foo: 'taz' })
   })
 
+  it('Scenario: Do not log custom header values', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--header', 'Authorization: Bearer private-token']
+
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    expect(result.headers).toEqual({ Authorization: 'Bearer private-token' })
+    expect(JSON.stringify(consoleSpy.mock.calls)).not.toContain('private-token')
+    expect(JSON.stringify(consoleSpy.mock.calls)).toContain('Authorization')
+
+    consoleSpy.mockRestore()
+  })
+
   it('Scenario: Parse multiple custom headers', async () => {
     // Given command line arguments with multiple custom headers
     const args = ['https://example.com/sse', '--header', 'Authorization: Bearer token123', '--header', 'Content-Type: application/json']

@@ -72,6 +72,29 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 },
 ```
 
+For Xquik's Streamable HTTP server, set the API key in `env` and force HTTP transport:
+
+```json
+{
+  "mcpServers": {
+    "xquik": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://xquik.com/mcp",
+        "--transport",
+        "http-only",
+        "--header",
+        "x-api-key:${XQUIK_API_KEY}"
+      ],
+      "env": {
+        "XQUIK_API_KEY": "<xquik-api-key>"
+      }
+    }
+  }
+}
+```
+
 ### Multiple Instances
 
 To run multiple instances of the same remote server with different configurations (e.g., different Atlassian tenants), use the `--resource` flag to isolate OAuth sessions:

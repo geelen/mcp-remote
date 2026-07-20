@@ -911,7 +911,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   if (Object.keys(headers).length > 0) {
-    log(`Using custom headers: ${JSON.stringify(headers)}`)
+    log(`Using custom header names: ${Object.keys(headers).join(', ')}`)
   }
   // Replace environment variables in headers
   // example `Authorization: Bearer ${TOKEN}` will read process.env.TOKEN
