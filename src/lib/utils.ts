@@ -14,6 +14,7 @@ import {
   type ProtectedResourceMetadata,
 } from './protected-resource-metadata'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
+import { StaleClientRegistrationError } from './stale-client-registration-error'
 import express from 'express'
 import net from 'net'
 import crypto from 'crypto'
@@ -31,6 +32,7 @@ declare global {
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
 export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+export const REASON_STALE_CLIENT_REGISTRATION = 'stale-client-registration'
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
@@ -460,6 +462,16 @@ export async function connectToRemoteServer(
 
     return transport
   } catch (error: any) {
+    if (error instanceof StaleClientRegistrationError) {
+      if (recursionReasons.has(REASON_STALE_CLIENT_REGISTRATION)) {
+        throw error
+      }
+
+      recursionReasons.add(REASON_STALE_CLIENT_REGISTRATION)
+      log(`Recursively reconnecting for reason: ${REASON_STALE_CLIENT_REGISTRATION}`)
+      return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+    }
+
     // Check if it's a protocol error and we should attempt fallback
     // StreamableHTTPError has a `code` property with the HTTP status code
     const isStreamableHTTPError = error instanceof StreamableHTTPError

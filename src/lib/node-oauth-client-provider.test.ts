@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import open from 'open'
 import { NodeOAuthClientProvider } from './node-oauth-client-provider'
 import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
@@ -22,6 +23,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   let mockReadJsonFile: any
   let mockWriteJsonFile: any
   let mockDeleteConfigFile: any
+  let mockFetch: ReturnType<typeof vi.fn>
 
   const defaultOptions: OAuthProviderOptions = {
     serverUrl: 'https://example.com',
@@ -41,6 +43,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   })
 
   afterEach(() => {
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -96,13 +99,132 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(authUrl.searchParams.get('scope')).toBe('github read:user')
     })
 
-    it('should include default scope in authorization URL when none specified', async () => {
+    it('should replace an existing authorization URL scope with the default scope when none is specified', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
-      const authUrl = new URL('https://auth.example.com/authorize')
+      const authUrl = new URL('https://auth.example.com/authorize?scope=existing')
       await provider.redirectToAuthorization(authUrl)
 
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
+    })
+
+    it('invalidates a cached dynamic client when authorization reports it is no longer registered', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'stale-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      await provider.clientInformation()
+      mockFetch = vi.fn().mockResolvedValue({
+        status: 400,
+        json: async () => ({
+          registration_endpoint: 'https://auth.example.com/register',
+          error: 'invalid_request',
+          error_description: "Client ID 'stale-client' is not registered with this server",
+        }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      await expect(
+        provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=stale-client')),
+      ).rejects.toMatchObject({
+        name: 'StaleClientRegistrationError',
+        message: 'Cached OAuth client registration is no longer valid',
+      })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://auth.example.com/authorize?client_id=stale-client&scope=openid+email+profile',
+        expect.objectContaining({
+          redirect: 'manual',
+          headers: { Accept: 'application/json' },
+          signal: expect.any(AbortSignal),
+        }),
+      )
+      expect(mockDeleteConfigFile).toHaveBeenCalledTimes(3)
+      expect(mockDeleteConfigFile.mock.calls.map(([, fileName]: [string, string]) => fileName)).toEqual(
+        expect.arrayContaining(['client_info.json', 'tokens.json', 'code_verifier.txt']),
+      )
+      expect(open).not.toHaveBeenCalled()
+    })
+
+    it('retains cached credentials and opens the browser when authorization redirects', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'active-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      await provider.clientInformation()
+      mockFetch = vi.fn().mockResolvedValue({ status: 302 })
+      vi.stubGlobal('fetch', mockFetch)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=active-client'))
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://auth.example.com/authorize?client_id=active-client&scope=openid+email+profile',
+        expect.objectContaining({
+          redirect: 'manual',
+          headers: { Accept: 'application/json' },
+          signal: expect.any(AbortSignal),
+        }),
+      )
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+      expect(open).toHaveBeenCalledOnce()
+    })
+
+    it('does not invalidate a cached client when its redirect URI is described as not registered', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'active-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      await provider.clientInformation()
+      mockFetch = vi.fn().mockResolvedValue({
+        status: 400,
+        json: async () => ({
+          registration_endpoint: 'https://auth.example.com/register',
+          error: 'invalid_request',
+          error_description: 'The client redirect URI is not registered',
+        }),
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=active-client'))
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+      expect(open).toHaveBeenCalledOnce()
+    })
+
+    it('does not preflight a freshly dynamically registered client', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      await provider.saveClientInformation({
+        client_id: 'fresh-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      mockFetch = vi.fn()
+      vi.stubGlobal('fetch', mockFetch)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=fresh-client'))
+
+      expect(mockFetch).not.toHaveBeenCalled()
+      expect(open).toHaveBeenCalledOnce()
+    })
+
+    it('does not preflight a static client registration', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientInfo: {
+          client_id: 'static-client',
+          redirect_uris: ['http://localhost:8080/oauth/callback'],
+        },
+      })
+      mockFetch = vi.fn()
+      vi.stubGlobal('fetch', mockFetch)
+
+      await provider.clientInformation()
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=static-client'))
+
+      expect(mockFetch).not.toHaveBeenCalled()
+      expect(open).toHaveBeenCalledOnce()
     })
   })
 

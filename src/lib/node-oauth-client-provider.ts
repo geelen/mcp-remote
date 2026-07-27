@@ -14,6 +14,22 @@ import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
+import { StaleClientRegistrationError } from './stale-client-registration-error'
+
+type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
+
+function isStaleClientRegistrationResponse(response: unknown): boolean {
+  if (!response || typeof response !== 'object') {
+    return false
+  }
+
+  const { registration_endpoint: registrationEndpoint, error_description: errorDescription } = response as Record<string, unknown>
+  return (
+    typeof registrationEndpoint === 'string' &&
+    typeof errorDescription === 'string' &&
+    /\bclient(?:\s+id)?\b\s+(?:['"][^'"]+['"]\s+)?is\s+not[\s-]+registered\b/i.test(errorDescription)
+  )
+}
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -31,6 +47,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizeResource: string | undefined
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
+  private clientRegistrationSource: ClientRegistrationSource
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
@@ -51,6 +68,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizeResource = options.authorizeResource
     this._state = randomUUID()
     this._clientInfo = undefined
+    this.clientRegistrationSource = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
@@ -159,6 +177,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
       this._clientInfo = this.staticOAuthClientInfo
+      this.clientRegistrationSource = 'static'
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -169,6 +188,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     if (clientInfo) {
       this._clientInfo = clientInfo
+      if (this.clientRegistrationSource !== 'fresh-dynamic') {
+        this.clientRegistrationSource = 'cached-dynamic'
+      }
     }
 
     debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
@@ -182,6 +204,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
     debugLog('Saving client info', { client_id: clientInformation.client_id })
     this._clientInfo = clientInformation
+    this.clientRegistrationSource = 'fresh-dynamic'
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -270,6 +293,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
+    await this.preflightCachedDynamicClientRegistration(authorizationUrl)
+
     try {
       await open(sanitizeUrl(authorizationUrl.toString()))
       log('Browser opened automatically.')
@@ -277,6 +302,43 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
       debugLog('Failed to open browser', error)
     }
+  }
+
+  private async preflightCachedDynamicClientRegistration(authorizationUrl: URL): Promise<void> {
+    if (this.clientRegistrationSource !== 'cached-dynamic') {
+      return
+    }
+
+    let response: Response
+    try {
+      response = await fetch(authorizationUrl.toString(), {
+        redirect: 'manual',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      })
+    } catch (error) {
+      debugLog('Authorization preflight failed; continuing to browser authorization', error)
+      return
+    }
+
+    if (response.status !== 400 && response.status !== 401) {
+      return
+    }
+
+    let errorResponse: unknown
+    try {
+      errorResponse = await response.json()
+    } catch (error) {
+      debugLog('Authorization preflight returned invalid JSON; continuing to browser authorization', error)
+      return
+    }
+
+    if (!isStaleClientRegistrationResponse(errorResponse)) {
+      return
+    }
+
+    await this.invalidateCredentials('all')
+    throw new StaleClientRegistrationError()
   }
 
   /**
@@ -314,12 +376,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
         ])
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
         debugLog('All credentials invalidated')
         break
 
       case 'client':
         await deleteConfigFile(this.serverUrlHash, 'client_info.json')
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
         debugLog('Client information invalidated')
         break
 

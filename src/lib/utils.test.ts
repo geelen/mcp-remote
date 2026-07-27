@@ -1,10 +1,39 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
+import {
+  connectToRemoteServer,
+  parseCommandLineArgs,
+  shouldIncludeTool,
+  mcpProxy,
+  setupOAuthCallbackServerWithLongPoll,
+  getServerUrlHash,
+} from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { EventEmitter } from 'events'
 import express from 'express'
+import { StaleClientRegistrationError } from './stale-client-registration-error'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
+
+describe('connectToRemoteServer', () => {
+  it('rethrows a stale client registration error after one reconnect attempt', async () => {
+    const error = new StaleClientRegistrationError()
+    const startSpy = vi.spyOn(StreamableHTTPClientTransport.prototype, 'start').mockRejectedValue(error)
+
+    try {
+      await expect(
+        connectToRemoteServer(null, 'https://example.com/mcp', {} as any, {}, async () => ({
+          waitForAuthCode: async () => 'unused',
+          skipBrowserAuth: false,
+        })),
+      ).rejects.toBe(error)
+
+      expect(startSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      startSpy.mockRestore()
+    }
+  })
+})
 
 describe('Feature: Command Line Arguments Parsing', () => {
   it('Scenario: Parse basic server URL', async () => {
