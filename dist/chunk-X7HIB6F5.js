@@ -8856,8 +8856,8 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
             path: iss.path ? [${k}, ...iss.path] : [${k}]
           })));
         }
-
-
+        
+        
         if (${id}.value === undefined) {
           if (${k} in input) {
             newResult[${k}] = undefined;
@@ -8865,7 +8865,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
         } else {
           newResult[${k}] = ${id}.value;
         }
-
+        
       `);
     }
     doc.write(`payload.value = newResult;`);
@@ -21161,7 +21161,7 @@ Please authorize this client by visiting:
 ${authorizationUrl.toString()}
 `);
     debugLog("Redirecting to authorization URL", authorizationUrl.toString());
-    await this.preflightCachedDynamicClientRegistration(authorizationUrl);
+    await this.preflightDynamicClientRegistration(authorizationUrl);
     try {
       await open(sanitizeUrl(authorizationUrl.toString()));
       log("Browser opened automatically.");
@@ -21170,8 +21170,8 @@ ${authorizationUrl.toString()}
       debugLog("Failed to open browser", error2);
     }
   }
-  async preflightCachedDynamicClientRegistration(authorizationUrl) {
-    if (this.clientRegistrationSource !== "cached-dynamic") {
+  async preflightDynamicClientRegistration(authorizationUrl) {
+    if (this.clientRegistrationSource !== "cached-dynamic" && this.clientRegistrationSource !== "fresh-dynamic") {
       return;
     }
     let response;

@@ -293,7 +293,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
-    await this.preflightCachedDynamicClientRegistration(authorizationUrl)
+    await this.preflightDynamicClientRegistration(authorizationUrl)
 
     try {
       await open(sanitizeUrl(authorizationUrl.toString()))
@@ -304,8 +304,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
   }
 
-  private async preflightCachedDynamicClientRegistration(authorizationUrl: URL): Promise<void> {
-    if (this.clientRegistrationSource !== 'cached-dynamic') {
+  private async preflightDynamicClientRegistration(authorizationUrl: URL): Promise<void> {
+    if (this.clientRegistrationSource !== 'cached-dynamic' && this.clientRegistrationSource !== 'fresh-dynamic') {
       return
     }
 
