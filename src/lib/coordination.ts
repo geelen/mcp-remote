@@ -7,7 +7,16 @@ import { unlinkSync } from 'fs'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
+  initializeAuth: () => Promise<{
+    server: Server
+    waitForAuthCode: () => Promise<string>
+    waitForNextAuthCode: () => Promise<string>
+    waitForSharedAuthorization: () => Promise<boolean>
+    beginAuthorization: () => void
+    markAuthCompleted: () => void
+    authTimeoutMs: number
+    skipBrowserAuth: boolean
+  }>
 }
 
 /**
@@ -80,19 +89,27 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
  * @param port The port to connect to
  * @returns True if authentication completed successfully, false otherwise
  */
-export async function waitForAuthentication(port: number): Promise<boolean> {
+export async function waitForAuthentication(port: number, authTimeoutMs: number = 30000): Promise<boolean> {
   log(`Waiting for authentication from the server on port ${port}...`)
 
   try {
     let attempts = 0
-    while (true) {
+    const deadline = Date.now() + authTimeoutMs
+    while (Date.now() < deadline) {
       attempts++
-      const url = `http://127.0.0.1:${port}/wait-for-auth`
+      const url = `http://127.0.0.1:${port}/wait-for-auth?poll=false`
       log(`Querying: ${url}`)
       debugLog(`Poll attempt ${attempts}`)
 
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        break
+      }
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), remainingMs)
       try {
-        const response = await fetch(url)
+        const response = await fetch(url, { signal: controller.signal })
         debugLog(`Poll response status: ${response.status}`)
 
         if (response.status === 200) {
@@ -103,7 +120,10 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
           // Continue polling
           log(`Authentication still in progress`)
           debugLog(`Will retry in 1s`)
-          await new Promise((resolve) => setTimeout(resolve, 1000))
+          const remainingAfterPollMs = deadline - Date.now()
+          if (remainingAfterPollMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1000, remainingAfterPollMs)))
+          }
         } else {
           log(`Unexpected response status: ${response.status}`)
           return false
@@ -111,9 +131,16 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
       } catch (fetchError) {
         debugLog(`Fetch error during poll`, fetchError)
         // If we can't connect, we'll try again after a delay
-        await new Promise((resolve) => setTimeout(resolve, 2000))
+        const remainingAfterErrorMs = deadline - Date.now()
+        if (remainingAfterErrorMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(2000, remainingAfterErrorMs)))
+        }
+      } finally {
+        clearTimeout(timeout)
       }
     }
+    log('OAuth authorization deadline expired while waiting for another instance')
+    return false
   } catch (error) {
     log(`Error waiting for authentication: ${(error as Error).message}`)
     debugLog(`Error waiting for authentication`, error)
@@ -134,7 +161,16 @@ export function createLazyAuthCoordinator(
   events: EventEmitter,
   authTimeoutMs: number,
 ): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
+  let authState: {
+    server: Server
+    waitForAuthCode: () => Promise<string>
+    waitForNextAuthCode: () => Promise<string>
+    waitForSharedAuthorization: () => Promise<boolean>
+    beginAuthorization: () => void
+    markAuthCompleted: () => void
+    authTimeoutMs: number
+    skipBrowserAuth: boolean
+  } | null = null
 
   return {
     initializeAuth: async () => {
@@ -167,7 +203,16 @@ export async function coordinateAuth(
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{
+  server: Server
+  waitForAuthCode: () => Promise<string>
+  waitForNextAuthCode: () => Promise<string>
+  waitForSharedAuthorization: () => Promise<boolean>
+  beginAuthorization: () => void
+  markAuthCompleted: () => void
+  authTimeoutMs: number
+  skipBrowserAuth: boolean
+}> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPort })
 
   // Check for a lockfile (disabled on Windows for the time being)
@@ -182,43 +227,27 @@ export async function coordinateAuth(
   // If there's a valid lockfile, try to use the existing auth process
   if (lockData && (await isLockValid(lockData))) {
     log(`Another instance is handling authentication on port ${lockData.port} (pid: ${lockData.pid})`)
+    // Return immediately: callers can answer their local MCP client with a
+    // retryable pending error while this promise waits for the primary flow.
+    const dummyServer = express().listen(0)
+    const dummyPort = (dummyServer.address() as AddressInfo).port
+    debugLog('Started dummy server', { port: dummyPort })
 
-    try {
-      // Try to wait for the authentication to complete
-      debugLog('Waiting for authentication from other instance')
-      const authCompleted = await waitForAuthentication(lockData.port)
-
-      if (authCompleted) {
-        log('Authentication completed by another instance. Using tokens from disk')
-
-        // Setup a dummy server - the client will use tokens directly from disk
-        const dummyServer = express().listen(0) // Listen on any available port
-        const dummyPort = (dummyServer.address() as AddressInfo).port
-        debugLog('Started dummy server', { port: dummyPort })
-
-        // This shouldn't actually be called in normal operation, but provide it for API compatibility
-        const dummyWaitForAuthCode = () => {
-          log('WARNING: waitForAuthCode called in secondary instance - this is unexpected')
-          // Return a promise that never resolves - the client should use the tokens from disk instead
-          return new Promise<string>(() => {})
-        }
-
-        return {
-          server: dummyServer,
-          waitForAuthCode: dummyWaitForAuthCode,
-          skipBrowserAuth: true,
-        }
-      } else {
-        log('Taking over authentication process...')
-      }
-    } catch (error) {
-      log(`Error waiting for authentication: ${error}`)
-      debugLog('Error waiting for authentication', error)
+    const dummyWaitForAuthCode = () => {
+      log('WARNING: waitForAuthCode called in secondary instance - this is unexpected')
+      return new Promise<string>(() => {})
     }
 
-    // If we get here, the other process didn't complete auth successfully
-    debugLog('Other instance did not complete auth successfully, deleting lockfile')
-    await deleteLockfile(serverUrlHash)
+    return {
+      server: dummyServer,
+      waitForAuthCode: dummyWaitForAuthCode,
+      waitForNextAuthCode: dummyWaitForAuthCode,
+      waitForSharedAuthorization: () => waitForAuthentication(lockData.port, authTimeoutMs),
+      beginAuthorization: () => {},
+      markAuthCompleted: () => {},
+      authTimeoutMs,
+      skipBrowserAuth: true,
+    }
   } else if (lockData) {
     // Invalid lockfile, delete it
     log('Found invalid lockfile, deleting it')
@@ -227,7 +256,7 @@ export async function coordinateAuth(
 
   // Create our own lockfile
   debugLog('Setting up OAuth callback server', { port: callbackPort })
-  const { server, waitForAuthCode, authCompletedPromise } = setupOAuthCallbackServerWithLongPoll({
+  const { server, waitForAuthCode, waitForNextAuthCode, beginAuthorization, markAuthCompleted } = setupOAuthCallbackServerWithLongPoll({
     port: callbackPort,
     path: '/oauth/callback',
     events,
@@ -283,6 +312,11 @@ export async function coordinateAuth(
   return {
     server,
     waitForAuthCode,
+    waitForNextAuthCode,
+    waitForSharedAuthorization: async () => true,
+    beginAuthorization,
+    markAuthCompleted,
+    authTimeoutMs,
     skipBrowserAuth: false,
   }
 }

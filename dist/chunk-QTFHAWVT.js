@@ -19987,6 +19987,20 @@ var StreamableHTTPClientTransport = class {
   }
 };
 
+// src/lib/types.ts
+var OAuthAuthorizationPendingError = class extends Error {
+  constructor() {
+    super("OAuth authorization is already pending; retry after it completes");
+    this.name = "OAuthAuthorizationPendingError";
+  }
+};
+var OAuthTokenVerificationPendingError = class extends Error {
+  constructor() {
+    super("OAuth token is awaiting remote verification; retry the MCP request");
+    this.name = "OAuthTokenVerificationPendingError";
+  }
+};
+
 // src/lib/mcp-auth-config.ts
 import path from "path";
 import os from "os";
@@ -20330,10 +20344,16 @@ function createMessageTransformer({
 function mcpProxy({
   transportToClient,
   transportToServer,
-  ignoredTools = []
+  ignoredTools = [],
+  authorizationRecovery,
+  onAuthorizationVerified,
+  authorizationVerificationTimeoutMs = 3e4
 }) {
   let transportToClientClosed = false;
   let transportToServerClosed = false;
+  let authorizationRecoveryInFlight = null;
+  let authorizationRecoveryError = null;
+  let authorizationVerification = null;
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request) => {
       if (request.method === "tools/call" && request.params?.name) {
@@ -20371,6 +20391,14 @@ function mcpProxy({
     if (isMessageBlocked(message)) {
       return;
     }
+    if (authorizationRecoveryInFlight) {
+      sendAuthorizationPending(message);
+      return;
+    }
+    if (authorizationRecoveryError) {
+      sendAuthorizationFailed(message, authorizationRecoveryError);
+      return;
+    }
     log("[Local\u2192Remote]", message.method || message.id);
     debugLog("Local \u2192 Remote message", {
       method: message.method,
@@ -20383,10 +20411,23 @@ function mcpProxy({
       log(JSON.stringify(message, null, 2));
       debugLog("Initialize message with modified client info", { clientInfo });
     }
-    transportToServer.send(message).catch(onServerError);
+    transportToServer.send(message).catch((error2) => onRequestError(error2, message));
   };
   transportToServer.onmessage = (_message) => {
-    const message = messageTransformer.interceptResponse(_message);
+    const rawMessage = _message;
+    const verification = authorizationVerification;
+    if (verification && verification.id === rawMessage.id) {
+      authorizationVerification = null;
+      clearTimeout(verification.timeout);
+      if (rawMessage.error) {
+        verification.reject(new Error(`Remote OAuth verification failed: ${rawMessage.error.message ?? "unknown error"}`));
+      } else {
+        onAuthorizationVerified?.();
+        verification.resolve();
+      }
+      return;
+    }
+    const message = messageTransformer.interceptResponse(rawMessage);
     log("[Remote\u2192Local]", message.method || message.id);
     debugLog("Remote \u2192 Local message", {
       method: message.method,
@@ -20405,6 +20446,7 @@ function mcpProxy({
     transportToServer.close().catch(onServerError);
   };
   transportToServer.onclose = () => {
+    rejectAuthorizationVerification(new Error("Remote transport closed while verifying OAuth authorization"));
     if (transportToClientClosed) {
       return;
     }
@@ -20419,8 +20461,89 @@ function mcpProxy({
     debugLog("Error from local client", { stack: error2.stack });
   }
   function onServerError(error2) {
+    if (startAuthorizationRecovery(error2)) {
+      return;
+    }
     log("Error from remote server:", error2);
     debugLog("Error from remote server", { stack: error2.stack });
+  }
+  function onRequestError(error2, message) {
+    if (startAuthorizationRecovery(error2)) {
+      sendAuthorizationPending(message);
+      return;
+    }
+    log("Error from remote server:", error2);
+    debugLog("Error from remote server", { stack: error2.stack });
+    sendRemoteError(message, -32603, `Remote MCP request failed: ${error2.message}`);
+  }
+  function startAuthorizationRecovery(error2) {
+    if (isAuthorizationPendingError(error2)) {
+      return true;
+    }
+    if (!authorizationRecovery || !isUnauthorizedError(error2)) {
+      return false;
+    }
+    if (!authorizationRecoveryInFlight) {
+      authorizationRecoveryInFlight = Promise.resolve().then(authorizationRecovery).then(verifyRemoteAuthorization).catch((recoveryError) => {
+        authorizationRecoveryError = recoveryError;
+        log("OAuth authorization recovery failed:", recoveryError);
+        debugLog("OAuth authorization recovery failed", { stack: recoveryError.stack });
+      }).finally(() => {
+        authorizationRecoveryInFlight = null;
+      });
+    }
+    return true;
+  }
+  function isUnauthorizedError(error2) {
+    return error2.message.includes("Unauthorized");
+  }
+  function isAuthorizationPendingError(error2) {
+    return error2 instanceof OAuthAuthorizationPendingError || error2 instanceof OAuthTokenVerificationPendingError || error2.name === "OAuthAuthorizationPendingError" || error2.name === "OAuthTokenVerificationPendingError";
+  }
+  function verifyRemoteAuthorization() {
+    return new Promise((resolve, reject) => {
+      const id = `mcp-remote-oauth-verification-${crypto2.randomUUID()}`;
+      const timeout = setTimeout(() => {
+        rejectAuthorizationVerification(
+          new Error(`OAuth verification timed out after ${authorizationVerificationTimeoutMs / 1e3} seconds`)
+        );
+      }, authorizationVerificationTimeoutMs);
+      authorizationVerification = { id, resolve, reject, timeout };
+      transportToServer.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/list",
+        params: {}
+      }).catch((error2) => rejectAuthorizationVerification(error2));
+    });
+  }
+  function rejectAuthorizationVerification(error2) {
+    if (!authorizationVerification) {
+      return;
+    }
+    const verification = authorizationVerification;
+    authorizationVerification = null;
+    clearTimeout(verification.timeout);
+    verification.reject(error2);
+  }
+  function sendAuthorizationPending(message) {
+    sendRemoteError(message, -32001, "OAuth authorization is pending; retry this request shortly");
+  }
+  function sendAuthorizationFailed(message, error2) {
+    sendRemoteError(message, -32002, `OAuth authorization failed: ${error2.message}. Run mcp-restart to retry.`);
+  }
+  function sendRemoteError(message, code, errorMessage) {
+    if (message.id === void 0) {
+      return;
+    }
+    transportToClient.send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code,
+        message: errorMessage
+      }
+    }).catch(onClientError);
   }
 }
 async function discoverOAuthServerInfo(serverUrl, headers = {}) {
@@ -20486,6 +20609,21 @@ async function discoverOAuthServerInfo(serverUrl, headers = {}) {
     wwwAuthenticateScope
   };
 }
+async function finishOAuthAuthorization(finishAuth, authorizationCode, authTimeoutMs = 3e4) {
+  let timeout;
+  try {
+    await Promise.race([
+      finishAuth(authorizationCode),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`OAuth token exchange timed out after ${authTimeoutMs / 1e3} seconds`)), authTimeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
 async function connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy = "http-first", recursionReasons = /* @__PURE__ */ new Set()) {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`);
   const url2 = new URL(serverUrl);
@@ -20531,6 +20669,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`);
+    authProvider.markRemoteAuthorizationVerified?.();
     return transport;
   } catch (error2) {
     if (error2 instanceof StaleClientRegistrationError) {
@@ -20570,18 +20709,27 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
         stack: error2.stack
       });
       debugLog("Calling authInitializer to start auth flow");
-      const { waitForAuthCode, skipBrowserAuth } = await authInitializer();
+      const { waitForAuthCode, waitForSharedAuthorization, markAuthCompleted, authTimeoutMs, skipBrowserAuth } = await authInitializer();
       if (skipBrowserAuth) {
-        log("Authentication required but skipping browser auth - using shared auth");
-      } else {
-        log("Authentication required. Waiting for authorization...");
+        const sharedAuthorizationCompleted = await waitForSharedAuthorization();
+        if (!sharedAuthorizationCompleted) {
+          throw new Error(`Shared OAuth authorization did not complete within ${authTimeoutMs / 1e3} seconds`);
+        }
+        if (recursionReasons.has(REASON_AUTH_NEEDED)) {
+          throw new Error("Shared OAuth token was not accepted by the remote server");
+        }
+        recursionReasons.add(REASON_AUTH_NEEDED);
+        log("Authentication completed by another process; reconnecting with the shared token");
+        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons);
       }
+      log("Authentication required. Waiting for authorization...");
       debugLog("Waiting for auth code from callback server");
       const code = await waitForAuthCode();
       debugLog("Received auth code from callback server");
       try {
         log("Completing authorization...");
-        await transport.finishAuth(code);
+        await finishOAuthAuthorization((authorizationCode) => transport.finishAuth(authorizationCode), code, authTimeoutMs);
+        markAuthCompleted();
         debugLog("Authorization completed successfully");
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
           const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`;
@@ -20616,13 +20764,35 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
 }
 function setupOAuthCallbackServerWithLongPoll(options) {
   let authCode = null;
+  let authCompleted = false;
   const app = express();
-  let authCompletedResolve;
-  const authCompletedPromise = new Promise((resolve) => {
-    authCompletedResolve = resolve;
+  const authTimeoutMs = options.authTimeoutMs ?? 3e4;
+  let authCompletedResolve = () => {
+  };
+  let authCompletedPromise;
+  const resetAuthCompletion = () => {
+    authCompletedPromise = new Promise((resolve) => {
+      authCompletedResolve = resolve;
+    });
+  };
+  resetAuthCompletion();
+  const beginAuthorization = () => {
+    authCode = null;
+    authCompleted = false;
+    resetAuthCompletion();
+  };
+  options.events.on("auth-code-received", (code) => {
+    authCode = code;
   });
+  const markAuthCompleted = () => {
+    if (authCompleted) {
+      return;
+    }
+    authCompleted = true;
+    authCompletedResolve();
+  };
   app.get("/wait-for-auth", (req, res) => {
-    if (authCode) {
+    if (authCompleted) {
       log("Auth already completed, returning 200");
       res.status(200).send("Authentication completed");
       return;
@@ -20635,7 +20805,7 @@ function setupOAuthCallbackServerWithLongPoll(options) {
     const longPollTimeout = setTimeout(() => {
       log("Long poll timeout reached, responding with 202");
       res.status(202).send("Authentication in progress");
-    }, options.authTimeoutMs || 3e4);
+    }, authTimeoutMs);
     authCompletedPromise.then(() => {
       clearTimeout(longPollTimeout);
       if (!res.headersSent) {
@@ -20657,8 +20827,7 @@ function setupOAuthCallbackServerWithLongPoll(options) {
       return;
     }
     authCode = code;
-    log("Auth code received, resolving promise");
-    authCompletedResolve(code);
+    log("Auth code received, resolving authorization-code waiters");
     res.send(`
       Authorization successful!
       You may close this window and return to the CLI.
@@ -20675,17 +20844,50 @@ function setupOAuthCallbackServerWithLongPoll(options) {
     log(`OAuth callback server running at http://127.0.0.1:${options.port}`);
   });
   const waitForAuthCode = () => {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (authCode) {
         resolve(authCode);
         return;
       }
-      options.events.once("auth-code-received", (code) => {
+      const onAuthCode = (code) => {
+        clearTimeout(timeout);
         resolve(code);
-      });
+      };
+      const timeout = setTimeout(() => {
+        options.events.removeListener("auth-code-received", onAuthCode);
+        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1e3} seconds`));
+      }, authTimeoutMs);
+      options.events.once("auth-code-received", onAuthCode);
     });
   };
-  return { server, authCode, waitForAuthCode, authCompletedPromise };
+  const waitForNextAuthCode = () => {
+    return new Promise((resolve, reject) => {
+      if (authCode) {
+        resolve(authCode);
+        return;
+      }
+      const onAuthCode = (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      };
+      const timeout = setTimeout(() => {
+        options.events.removeListener("auth-code-received", onAuthCode);
+        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1e3} seconds`));
+      }, authTimeoutMs);
+      options.events.once("auth-code-received", onAuthCode);
+    });
+  };
+  return {
+    server,
+    authCode,
+    waitForAuthCode,
+    waitForNextAuthCode,
+    beginAuthorization,
+    markAuthCompleted,
+    get authCompletedPromise() {
+      return authCompletedPromise;
+    }
+  };
 }
 async function findExistingClientPort(serverUrlHash) {
   const clientInfo = await readJsonFile(serverUrlHash, "client_info.json", OAuthClientInformationFullSchema);
@@ -20965,6 +21167,7 @@ var NodeOAuthClientProvider = class {
     this.authorizationServerMetadata = options.authorizationServerMetadata;
     this.protectedResourceMetadata = options.protectedResourceMetadata;
     this.wwwAuthenticateScope = options.wwwAuthenticateScope;
+    this.authorizationState = "ready";
   }
   serverUrlHash;
   callbackPath;
@@ -20981,6 +21184,14 @@ var NodeOAuthClientProvider = class {
   authorizationServerMetadata;
   protectedResourceMetadata;
   wwwAuthenticateScope;
+  authorizationState;
+  /**
+   * Marks a successfully processed MCP response as proof that the most
+   * recently exchanged token is accepted by the remote resource server.
+   */
+  markRemoteAuthorizationVerified() {
+    this.authorizationState = "ready";
+  }
   get redirectUrl() {
     return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`;
   }
@@ -21142,12 +21353,30 @@ var NodeOAuthClientProvider = class {
       expiresInValue: tokens.expires_in
     });
     await writeJsonFile(this.serverUrlHash, "tokens.json", tokens);
+    this.authorizationState = "verifying";
   }
   /**
    * Redirects the user to the authorization URL
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl) {
+    if (this.authorizationState === "authorizing") {
+      throw new OAuthAuthorizationPendingError();
+    }
+    if (this.authorizationState === "verifying") {
+      throw new OAuthTokenVerificationPendingError();
+    }
+    this.authorizationState = "authorizing";
+    try {
+      const preparation = await this.options.prepareAuthorization?.();
+      if (preparation?.skipBrowserAuth) {
+        this.authorizationState = "ready";
+        return;
+      }
+    } catch (error2) {
+      this.authorizationState = "ready";
+      throw error2;
+    }
     this.getAuthorizationServerMetadata().catch(() => {
     });
     if (this.authorizeResource) {
@@ -21161,7 +21390,12 @@ Please authorize this client by visiting:
 ${authorizationUrl.toString()}
 `);
     debugLog("Redirecting to authorization URL", authorizationUrl.toString());
-    await this.preflightDynamicClientRegistration(authorizationUrl);
+    try {
+      await this.preflightDynamicClientRegistration(authorizationUrl);
+    } catch (error2) {
+      this.authorizationState = "ready";
+      throw error2;
+    }
     try {
       await open(sanitizeUrl(authorizationUrl.toString()));
       log("Browser opened automatically.");
@@ -21234,6 +21468,7 @@ ${authorizationUrl.toString()}
         ]);
         this._clientInfo = void 0;
         this.clientRegistrationSource = void 0;
+        this.authorizationState = "ready";
         debugLog("All credentials invalidated");
         break;
       case "client":
@@ -21244,6 +21479,7 @@ ${authorizationUrl.toString()}
         break;
       case "tokens":
         await deleteConfigFile(this.serverUrlHash, "tokens.json");
+        this.authorizationState = "ready";
         debugLog("OAuth tokens invalidated");
         break;
       case "verifier":
@@ -21302,17 +21538,24 @@ async function isLockValid(lockData) {
     return false;
   }
 }
-async function waitForAuthentication(port) {
+async function waitForAuthentication(port, authTimeoutMs = 3e4) {
   log(`Waiting for authentication from the server on port ${port}...`);
   try {
     let attempts = 0;
-    while (true) {
+    const deadline = Date.now() + authTimeoutMs;
+    while (Date.now() < deadline) {
       attempts++;
-      const url2 = `http://127.0.0.1:${port}/wait-for-auth`;
+      const url2 = `http://127.0.0.1:${port}/wait-for-auth?poll=false`;
       log(`Querying: ${url2}`);
       debugLog(`Poll attempt ${attempts}`);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), remainingMs);
       try {
-        const response = await fetch(url2);
+        const response = await fetch(url2, { signal: controller.signal });
         debugLog(`Poll response status: ${response.status}`);
         if (response.status === 200) {
           log(`Authentication completed by other instance`);
@@ -21320,16 +21563,26 @@ async function waitForAuthentication(port) {
         } else if (response.status === 202) {
           log(`Authentication still in progress`);
           debugLog(`Will retry in 1s`);
-          await new Promise((resolve) => setTimeout(resolve, 1e3));
+          const remainingAfterPollMs = deadline - Date.now();
+          if (remainingAfterPollMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, remainingAfterPollMs)));
+          }
         } else {
           log(`Unexpected response status: ${response.status}`);
           return false;
         }
       } catch (fetchError) {
         debugLog(`Fetch error during poll`, fetchError);
-        await new Promise((resolve) => setTimeout(resolve, 2e3));
+        const remainingAfterErrorMs = deadline - Date.now();
+        if (remainingAfterErrorMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(2e3, remainingAfterErrorMs)));
+        }
+      } finally {
+        clearTimeout(timeout);
       }
     }
+    log("OAuth authorization deadline expired while waiting for another instance");
+    return false;
   } catch (error2) {
     log(`Error waiting for authentication: ${error2.message}`);
     debugLog(`Error waiting for authentication`, error2);
@@ -21362,39 +21615,32 @@ async function coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs
   }
   if (lockData && await isLockValid(lockData)) {
     log(`Another instance is handling authentication on port ${lockData.port} (pid: ${lockData.pid})`);
-    try {
-      debugLog("Waiting for authentication from other instance");
-      const authCompleted = await waitForAuthentication(lockData.port);
-      if (authCompleted) {
-        log("Authentication completed by another instance. Using tokens from disk");
-        const dummyServer = express2().listen(0);
-        const dummyPort = dummyServer.address().port;
-        debugLog("Started dummy server", { port: dummyPort });
-        const dummyWaitForAuthCode = () => {
-          log("WARNING: waitForAuthCode called in secondary instance - this is unexpected");
-          return new Promise(() => {
-          });
-        };
-        return {
-          server: dummyServer,
-          waitForAuthCode: dummyWaitForAuthCode,
-          skipBrowserAuth: true
-        };
-      } else {
-        log("Taking over authentication process...");
-      }
-    } catch (error2) {
-      log(`Error waiting for authentication: ${error2}`);
-      debugLog("Error waiting for authentication", error2);
-    }
-    debugLog("Other instance did not complete auth successfully, deleting lockfile");
-    await deleteLockfile(serverUrlHash);
+    const dummyServer = express2().listen(0);
+    const dummyPort = dummyServer.address().port;
+    debugLog("Started dummy server", { port: dummyPort });
+    const dummyWaitForAuthCode = () => {
+      log("WARNING: waitForAuthCode called in secondary instance - this is unexpected");
+      return new Promise(() => {
+      });
+    };
+    return {
+      server: dummyServer,
+      waitForAuthCode: dummyWaitForAuthCode,
+      waitForNextAuthCode: dummyWaitForAuthCode,
+      waitForSharedAuthorization: () => waitForAuthentication(lockData.port, authTimeoutMs),
+      beginAuthorization: () => {
+      },
+      markAuthCompleted: () => {
+      },
+      authTimeoutMs,
+      skipBrowserAuth: true
+    };
   } else if (lockData) {
     log("Found invalid lockfile, deleting it");
     await deleteLockfile(serverUrlHash);
   }
   debugLog("Setting up OAuth callback server", { port: callbackPort });
-  const { server, waitForAuthCode, authCompletedPromise } = setupOAuthCallbackServerWithLongPoll({
+  const { server, waitForAuthCode, waitForNextAuthCode, beginAuthorization, markAuthCompleted } = setupOAuthCallbackServerWithLongPoll({
     port: callbackPort,
     path: "/oauth/callback",
     events,
@@ -21438,6 +21684,11 @@ async function coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs
   return {
     server,
     waitForAuthCode,
+    waitForNextAuthCode,
+    waitForSharedAuthorization: async () => true,
+    beginAuthorization,
+    markAuthCompleted,
+    authTimeoutMs,
     skipBrowserAuth: false
   };
 }
@@ -21452,6 +21703,7 @@ export {
   log,
   mcpProxy,
   discoverOAuthServerInfo,
+  finishOAuthAuthorization,
   connectToRemoteServer,
   parseCommandLineArgs,
   setupSignalHandlers,

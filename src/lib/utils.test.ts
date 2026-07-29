@@ -4,6 +4,7 @@ import {
   parseCommandLineArgs,
   shouldIncludeTool,
   mcpProxy,
+  finishOAuthAuthorization,
   setupOAuthCallbackServerWithLongPoll,
   getServerUrlHash,
 } from './utils'
@@ -12,8 +13,17 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { EventEmitter } from 'events'
 import express from 'express'
 import { StaleClientRegistrationError } from './stale-client-registration-error'
+import { OAuthAuthorizationPendingError } from './types'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
+
+describe('finishOAuthAuthorization', () => {
+  it('rejects when token exchange does not complete before the authorization deadline', async () => {
+    await expect(finishOAuthAuthorization(() => new Promise<void>(() => {}), 'authorization-code', 20)).rejects.toThrow(
+      'OAuth token exchange timed out after 0.02 seconds',
+    )
+  })
+})
 
 describe('connectToRemoteServer', () => {
   it('rethrows a stale client registration error after one reconnect attempt', async () => {
@@ -24,6 +34,9 @@ describe('connectToRemoteServer', () => {
       await expect(
         connectToRemoteServer(null, 'https://example.com/mcp', {} as any, {}, async () => ({
           waitForAuthCode: async () => 'unused',
+          waitForSharedAuthorization: async () => true,
+          markAuthCompleted: () => {},
+          authTimeoutMs: 30000,
           skipBrowserAuth: false,
         })),
       ).rejects.toBe(error)
@@ -608,6 +621,225 @@ describe('Feature: MCP Proxy', () => {
     )
   })
 
+  it('returns an authorization-pending response while one remote OAuth recovery is running', async () => {
+    const authorizationRecovery = vi.fn(() => new Promise<void>(() => {}))
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Unauthorized')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    ;(mcpProxy as (options: Record<string, unknown>) => void)({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+      authorizationRecovery,
+    })
+
+    const request = {
+      jsonrpc: '2.0' as const,
+      id: 'tools-request',
+      method: 'tools/list',
+      params: {},
+    }
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(request)
+    }
+
+    await vi.waitFor(() => expect(authorizationRecovery).toHaveBeenCalledOnce())
+    expect(mockTransportToClient.send).toHaveBeenCalledWith({
+      jsonrpc: '2.0',
+      id: 'tools-request',
+      error: {
+        code: -32001,
+        message: 'OAuth authorization is pending; retry this request shortly',
+      },
+    })
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage({ ...request, id: 'second-tools-request' })
+    }
+
+    await vi.waitFor(() => expect(mockTransportToClient.send).toHaveBeenCalledTimes(2))
+    expect(authorizationRecovery).toHaveBeenCalledOnce()
+    expect(mockTransportToServer.send).toHaveBeenCalledOnce()
+  })
+
+  it('returns a retryable response when the OAuth provider reports an existing authorization', async () => {
+    const authorizationRecovery = vi.fn()
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new OAuthAuthorizationPendingError()),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+      authorizationRecovery,
+    })
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage({
+        jsonrpc: '2.0',
+        id: 'tools-request',
+        method: 'tools/list',
+        params: {},
+      })
+    }
+
+    await vi.waitFor(() =>
+      expect(mockTransportToClient.send).toHaveBeenCalledWith({
+        jsonrpc: '2.0',
+        id: 'tools-request',
+        error: {
+          code: -32001,
+          message: 'OAuth authorization is pending; retry this request shortly',
+        },
+      }),
+    )
+    expect(authorizationRecovery).not.toHaveBeenCalled()
+  })
+
+  it('marks OAuth verified only after its internal tools/list request succeeds', async () => {
+    const onAuthorizationVerified = vi.fn()
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValueOnce(new Error('Unauthorized')).mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+      authorizationRecovery: async () => undefined,
+      onAuthorizationVerified,
+    })
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage({
+        jsonrpc: '2.0',
+        id: 'tools-request',
+        method: 'tools/list',
+        params: {},
+      })
+    }
+
+    await vi.waitFor(() => expect(mockTransportToServer.send).toHaveBeenCalledTimes(2))
+    const verificationRequest = vi.mocked(mockTransportToServer.send).mock.calls[1][0] as { id: string }
+    expect(verificationRequest).toMatchObject({
+      jsonrpc: '2.0',
+      method: 'tools/list',
+      params: {},
+    })
+
+    if (mockTransportToServer.onmessage) {
+      mockTransportToServer.onmessage({
+        jsonrpc: '2.0',
+        id: verificationRequest.id,
+        result: { tools: [] },
+      })
+    }
+
+    expect(onAuthorizationVerified).toHaveBeenCalledOnce()
+    expect(mockTransportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ id: verificationRequest.id }))
+  })
+
+  it('fails recovery after the verification response deadline', async () => {
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValueOnce(new Error('Unauthorized')).mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+      authorizationRecovery: async () => undefined,
+      authorizationVerificationTimeoutMs: 20,
+    })
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage({
+        jsonrpc: '2.0',
+        id: 'initial-request',
+        method: 'tools/list',
+        params: {},
+      })
+    }
+
+    await vi.waitFor(() => expect(mockTransportToServer.send).toHaveBeenCalledTimes(2))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage({
+        jsonrpc: '2.0',
+        id: 'retry-request',
+        method: 'tools/list',
+        params: {},
+      })
+    }
+
+    await vi.waitFor(() =>
+      expect(mockTransportToClient.send).toHaveBeenCalledWith({
+        jsonrpc: '2.0',
+        id: 'retry-request',
+        error: {
+          code: -32002,
+          message: expect.stringContaining('OAuth verification timed out after 0.02 seconds'),
+        },
+      }),
+    )
+  })
+
   it('Scenario: Proxy server response back to client', async () => {
     // Given mock transports for client and server
     const mockTransportToClient = {
@@ -1053,6 +1285,96 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+
+  it('waits for the next callback code when a new authorization cycle begins', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs: 100,
+    })
+
+    server = result.server
+
+    const nextCode = result.waitForNextAuthCode()
+    events.emit('auth-code-received', 'new-authorization-code')
+
+    await expect(nextCode).resolves.toBe('new-authorization-code')
+  })
+
+  it('returns the current-cycle callback code when the browser redirects before recovery begins waiting', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs: 100,
+    })
+
+    server = result.server
+    result.beginAuthorization()
+    events.emit('auth-code-received', 'fast-authorization-code')
+
+    await expect(result.waitForNextAuthCode()).resolves.toBe('fast-authorization-code')
+  })
+
+  it('does not report cross-process authentication complete until the token exchange is marked complete', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs: 100,
+    })
+    server = result.server
+
+    let completed = false
+    result.authCompletedPromise.then(() => {
+      completed = true
+    })
+    events.emit('auth-code-received', 'authorization-code')
+    await Promise.resolve()
+
+    expect(completed).toBe(false)
+    result.markAuthCompleted()
+    await Promise.resolve()
+    expect(completed).toBe(true)
+  })
+
+  it('returns to a pending state when a primary process begins another authorization cycle', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs: 100,
+    })
+    server = result.server
+
+    result.markAuthCompleted()
+    result.beginAuthorization()
+
+    let completed = false
+    result.authCompletedPromise.then(() => {
+      completed = true
+    })
+    await Promise.resolve()
+    expect(completed).toBe(false)
+
+    result.markAuthCompleted()
+    await Promise.resolve()
+    expect(completed).toBe(true)
+  })
+
+  it('rejects the authorization wait when the callback deadline expires', async () => {
+    const result = setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      authTimeoutMs: 20,
+    })
+
+    server = result.server
+
+    await expect(result.waitForAuthCode()).rejects.toThrow('OAuth authorization timed out')
   })
 })
 

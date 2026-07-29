@@ -62,6 +62,9 @@ async function runClient(
     debugLog('No Protected Resource Metadata found, using server URL as authorization server')
   }
 
+  // Keep track of the callback server instance for cleanup.
+  let server: any = null
+
   // Create the OAuth client provider with discovered server info
   const authProvider = new NodeOAuthClientProvider({
     serverUrl: discoveryResult.authorizationServerUrl,
@@ -74,6 +77,14 @@ async function runClient(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    prepareAuthorization: async () => {
+      const authState = await authCoordinator.initializeAuth()
+      server = authState.server
+      if (!authState.skipBrowserAuth) {
+        authState.beginAuthorization()
+      }
+      return { skipBrowserAuth: authState.skipBrowserAuth }
+    },
   })
 
   // Create the client
@@ -87,9 +98,6 @@ async function runClient(
     },
   )
 
-  // Keep track of the server instance for cleanup
-  let server: any = null
-
   // Define an auth initializer function
   const authInitializer = async () => {
     const authState = await authCoordinator.initializeAuth()
@@ -97,16 +105,16 @@ async function runClient(
     // Store server in outer scope for cleanup
     server = authState.server
 
-    // If auth was completed by another instance, just log that we'll use the auth from disk
+    // If auth was completed by another instance, reconnect with its persisted token.
     if (authState.skipBrowserAuth) {
       log('Authentication was completed by another instance - will use tokens from disk...')
-      // TODO: remove, the callback is happening before the tokens are exchanged
-      //  so we're slightly too early
-      await new Promise((res) => setTimeout(res, 1_000))
     }
 
     return {
       waitForAuthCode: authState.waitForAuthCode,
+      waitForSharedAuthorization: authState.waitForSharedAuthorization,
+      markAuthCompleted: authState.markAuthCompleted,
+      authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth,
     }
   }

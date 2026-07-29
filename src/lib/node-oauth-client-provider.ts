@@ -8,7 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
-import { StaticOAuthClientInformationFull } from './types'
+import { OAuthAuthorizationPendingError, OAuthTokenVerificationPendingError, StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
@@ -17,6 +17,7 @@ import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 import { StaleClientRegistrationError } from './stale-client-registration-error'
 
 type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
+type AuthorizationState = 'ready' | 'authorizing' | 'verifying'
 
 function isStaleClientRegistrationResponse(response: unknown): boolean {
   if (!response || typeof response !== 'object') {
@@ -51,6 +52,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  private authorizationState: AuthorizationState
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -72,6 +74,15 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+    this.authorizationState = 'ready'
+  }
+
+  /**
+   * Marks a successfully processed MCP response as proof that the most
+   * recently exchanged token is accepted by the remote resource server.
+   */
+  markRemoteAuthorizationVerified(): void {
+    this.authorizationState = 'ready'
   }
 
   get redirectUrl(): string {
@@ -269,6 +280,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     })
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+    this.authorizationState = 'verifying'
   }
 
   /**
@@ -276,6 +288,29 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    if (this.authorizationState === 'authorizing') {
+      throw new OAuthAuthorizationPendingError()
+    }
+
+    if (this.authorizationState === 'verifying') {
+      throw new OAuthTokenVerificationPendingError()
+    }
+
+    this.authorizationState = 'authorizing'
+
+    try {
+      const preparation = await this.options.prepareAuthorization?.()
+      if (preparation?.skipBrowserAuth) {
+        // Another process has persisted a usable token. The caller will
+        // reconnect with that shared token instead of launching a second flow.
+        this.authorizationState = 'ready'
+        return
+      }
+    } catch (error) {
+      this.authorizationState = 'ready'
+      throw error
+    }
+
     // Optionally fetch metadata for debugging/informational purposes (non-blocking)
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
@@ -293,7 +328,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
-    await this.preflightDynamicClientRegistration(authorizationUrl)
+    try {
+      await this.preflightDynamicClientRegistration(authorizationUrl)
+    } catch (error) {
+      this.authorizationState = 'ready'
+      throw error
+    }
 
     try {
       await open(sanitizeUrl(authorizationUrl.toString()))
@@ -377,6 +417,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         ])
         this._clientInfo = undefined
         this.clientRegistrationSource = undefined
+        this.authorizationState = 'ready'
         debugLog('All credentials invalidated')
         break
 
@@ -389,6 +430,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
       case 'tokens':
         await deleteConfigFile(this.serverUrlHash, 'tokens.json')
+        this.authorizationState = 'ready'
         debugLog('OAuth tokens invalidated')
         break
 

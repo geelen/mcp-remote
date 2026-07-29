@@ -12,7 +12,7 @@ import {
   parseCommandLineArgs,
   setupSignalHandlers,
   version
-} from "./chunk-X7HIB6F5.js";
+} from "./chunk-QTFHAWVT.js";
 
 // src/client.ts
 import { EventEmitter } from "events";
@@ -31,6 +31,7 @@ async function runClient(serverUrl, callbackPort, headers, transportStrategy = "
   } else {
     debugLog("No Protected Resource Metadata found, using server URL as authorization server");
   }
+  let server = null;
   const authProvider = new NodeOAuthClientProvider({
     serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
@@ -41,7 +42,15 @@ async function runClient(serverUrl, callbackPort, headers, transportStrategy = "
     serverUrlHash,
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
-    wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope
+    wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    prepareAuthorization: async () => {
+      const authState = await authCoordinator.initializeAuth();
+      server = authState.server;
+      if (!authState.skipBrowserAuth) {
+        authState.beginAuthorization();
+      }
+      return { skipBrowserAuth: authState.skipBrowserAuth };
+    }
   });
   const client = new Client(
     {
@@ -52,16 +61,17 @@ async function runClient(serverUrl, callbackPort, headers, transportStrategy = "
       capabilities: {}
     }
   );
-  let server = null;
   const authInitializer = async () => {
     const authState = await authCoordinator.initializeAuth();
     server = authState.server;
     if (authState.skipBrowserAuth) {
       log("Authentication was completed by another instance - will use tokens from disk...");
-      await new Promise((res) => setTimeout(res, 1e3));
     }
     return {
       waitForAuthCode: authState.waitForAuthCode,
+      waitForSharedAuthorization: authState.waitForSharedAuthorization,
+      markAuthCompleted: authState.markAuthCompleted,
+      authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth
     };
   };

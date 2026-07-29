@@ -4,6 +4,28 @@ import type { AuthorizationServerMetadata } from './authorization-server-metadat
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
+ * Raised when an OAuth flow is already awaiting a browser callback. Callers
+ * should retry after the flow completes instead of initiating another flow.
+ */
+export class OAuthAuthorizationPendingError extends Error {
+  constructor() {
+    super('OAuth authorization is already pending; retry after it completes')
+    this.name = 'OAuthAuthorizationPendingError'
+  }
+}
+
+/**
+ * Raised when a freshly exchanged token has not yet been accepted by the MCP
+ * server. A second browser flow cannot make that token valid.
+ */
+export class OAuthTokenVerificationPendingError extends Error {
+  constructor() {
+    super('OAuth token is awaiting remote verification; retry the MCP request')
+    this.name = 'OAuthTokenVerificationPendingError'
+  }
+}
+
+/**
  * Options for creating an OAuth client provider
  */
 export interface OAuthProviderOptions {
@@ -39,6 +61,12 @@ export interface OAuthProviderOptions {
   protectedResourceMetadata?: ProtectedResourceMetadata
   /** Scope extracted from WWW-Authenticate header */
   wwwAuthenticateScope?: string
+  /**
+   * Prepares the local OAuth callback coordination before a browser is opened.
+   * A secondary process can report that a primary process completed the flow,
+   * in which case this provider must not start another browser authorization.
+   */
+  prepareAuthorization?: () => Promise<{ skipBrowserAuth: boolean }>
 }
 
 /**
@@ -51,7 +79,7 @@ export interface OAuthCallbackServerOptions {
   path: string
   /** Event emitter to signal when auth code is received */
   events: EventEmitter
-  /** Timeout in milliseconds for the auth callback server's long poll */
+  /** Timeout in milliseconds for waiting for the OAuth callback and long polls */
   authTimeoutMs?: number
 }
 

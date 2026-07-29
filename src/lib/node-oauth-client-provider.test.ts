@@ -108,6 +108,47 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
     })
 
+    it('opens only one browser while an authorization is already pending', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?attempt=one'))
+
+      await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?attempt=two'))).rejects.toThrow(
+        'OAuth authorization is already pending',
+      )
+
+      expect(open).toHaveBeenCalledOnce()
+    })
+
+    it('does not reopen the browser after exchanging a token until the remote server accepts it', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))
+      await provider.saveTokens({
+        access_token: 'access-token',
+        token_type: 'Bearer',
+      })
+
+      await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(
+        'OAuth token is awaiting remote verification',
+      )
+
+      expect(open).toHaveBeenCalledOnce()
+    })
+
+    it('does not open a browser when another local process has completed the authorization', async () => {
+      const prepareAuthorization = vi.fn().mockResolvedValue({ skipBrowserAuth: true })
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        prepareAuthorization,
+      })
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))
+
+      expect(prepareAuthorization).toHaveBeenCalledOnce()
+      expect(open).not.toHaveBeenCalled()
+    })
+
     it('invalidates a cached dynamic client when authorization reports it is no longer registered', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
       mockReadJsonFile.mockResolvedValueOnce({
