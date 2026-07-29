@@ -18,6 +18,12 @@ import { OAuthAuthorizationPendingError } from './types'
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
 describe('finishOAuthAuthorization', () => {
+  it('rejects immediately when the shared authorization deadline has already expired', async () => {
+    await expect(finishOAuthAuthorization(async () => undefined, 'authorization-code', 20, Date.now() - 1)).rejects.toThrow(
+      'OAuth authorization deadline expired before token exchange',
+    )
+  })
+
   it('rejects when token exchange does not complete before the authorization deadline', async () => {
     await expect(finishOAuthAuthorization(() => new Promise<void>(() => {}), 'authorization-code', 20)).rejects.toThrow(
       'OAuth token exchange timed out after 0.02 seconds',

@@ -547,13 +547,19 @@ export async function finishOAuthAuthorization(
   finishAuth: (authorizationCode: string) => Promise<void>,
   authorizationCode: string,
   authTimeoutMs: number = 30000,
+  authorizationDeadlineMs: number = Date.now() + authTimeoutMs,
 ): Promise<void> {
+  const remainingMs = authorizationDeadlineMs - Date.now()
+  if (remainingMs <= 0) {
+    throw new Error('OAuth authorization deadline expired before token exchange')
+  }
+
   let timeout: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
       finishAuth(authorizationCode),
       new Promise<void>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`OAuth token exchange timed out after ${authTimeoutMs / 1000} seconds`)), authTimeoutMs)
+        timeout = setTimeout(() => reject(new Error(`OAuth token exchange timed out after ${remainingMs / 1000} seconds`)), remainingMs)
       }),
     ])
   } finally {
@@ -728,12 +734,18 @@ export async function connectToRemoteServer(
 
       // Wait for the authorization code from the callback
       debugLog('Waiting for auth code from callback server')
+      const authorizationDeadlineMs = Date.now() + authTimeoutMs
       const code = await waitForAuthCode()
       debugLog('Received auth code from callback server')
 
       try {
         log('Completing authorization...')
-        await finishOAuthAuthorization((authorizationCode) => transport.finishAuth(authorizationCode), code, authTimeoutMs)
+        await finishOAuthAuthorization(
+          (authorizationCode) => transport.finishAuth(authorizationCode),
+          code,
+          authTimeoutMs,
+          authorizationDeadlineMs,
+        )
         markAuthCompleted()
         debugLog('Authorization completed successfully')
 

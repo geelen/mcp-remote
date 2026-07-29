@@ -11,7 +11,7 @@ import {
   mcpProxy,
   parseCommandLineArgs,
   setupSignalHandlers
-} from "./chunk-QTFHAWVT.js";
+} from "./chunk-YZXW5VW3.js";
 
 // src/proxy.ts
 import { EventEmitter } from "events";
@@ -174,13 +174,14 @@ async function runProxy(serverUrl, callbackPort, headers, transportStrategy = "h
         log("OAuth was completed by another process; verifying the shared token");
         return;
       }
+      const authorizationDeadlineMs = Date.now() + authState.authTimeoutMs;
       const code = await authState.waitForNextAuthCode();
       const oauthTransport = remoteTransport;
       if (!oauthTransport.finishAuth) {
         throw new Error("Remote transport does not support OAuth authorization completion");
       }
       log("Completing renewed authorization...");
-      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs);
+      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs, authorizationDeadlineMs);
       authState.markAuthCompleted();
       log("Renewed OAuth token; verifying it with the remote MCP server");
     };

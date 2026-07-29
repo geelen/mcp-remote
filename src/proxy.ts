@@ -130,6 +130,7 @@ async function runProxy(
         return
       }
 
+      const authorizationDeadlineMs = Date.now() + authState.authTimeoutMs
       const code = await authState.waitForNextAuthCode()
       const oauthTransport = remoteTransport as typeof remoteTransport & {
         finishAuth?: (authorizationCode: string) => Promise<void>
@@ -138,7 +139,7 @@ async function runProxy(
         throw new Error('Remote transport does not support OAuth authorization completion')
       }
       log('Completing renewed authorization...')
-      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs)
+      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs, authorizationDeadlineMs)
       authState.markAuthCompleted()
       log('Renewed OAuth token; verifying it with the remote MCP server')
     }

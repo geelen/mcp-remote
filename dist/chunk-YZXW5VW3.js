@@ -20609,13 +20609,17 @@ async function discoverOAuthServerInfo(serverUrl, headers = {}) {
     wwwAuthenticateScope
   };
 }
-async function finishOAuthAuthorization(finishAuth, authorizationCode, authTimeoutMs = 3e4) {
+async function finishOAuthAuthorization(finishAuth, authorizationCode, authTimeoutMs = 3e4, authorizationDeadlineMs = Date.now() + authTimeoutMs) {
+  const remainingMs = authorizationDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error("OAuth authorization deadline expired before token exchange");
+  }
   let timeout;
   try {
     await Promise.race([
       finishAuth(authorizationCode),
       new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`OAuth token exchange timed out after ${authTimeoutMs / 1e3} seconds`)), authTimeoutMs);
+        timeout = setTimeout(() => reject(new Error(`OAuth token exchange timed out after ${remainingMs / 1e3} seconds`)), remainingMs);
       })
     ]);
   } finally {
@@ -20724,11 +20728,17 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
       }
       log("Authentication required. Waiting for authorization...");
       debugLog("Waiting for auth code from callback server");
+      const authorizationDeadlineMs = Date.now() + authTimeoutMs;
       const code = await waitForAuthCode();
       debugLog("Received auth code from callback server");
       try {
         log("Completing authorization...");
-        await finishOAuthAuthorization((authorizationCode) => transport.finishAuth(authorizationCode), code, authTimeoutMs);
+        await finishOAuthAuthorization(
+          (authorizationCode) => transport.finishAuth(authorizationCode),
+          code,
+          authTimeoutMs,
+          authorizationDeadlineMs
+        );
         markAuthCompleted();
         debugLog("Authorization completed successfully");
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
