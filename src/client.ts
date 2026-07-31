@@ -77,6 +77,7 @@ async function runClient(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    authTimeoutMs,
     prepareAuthorization: async () => {
       const authState = await authCoordinator.initializeAuth()
       server = authState.server
@@ -114,6 +115,7 @@ async function runClient(
       waitForAuthCode: authState.waitForAuthCode,
       waitForSharedAuthorization: authState.waitForSharedAuthorization,
       markAuthCompleted: authState.markAuthCompleted,
+      abortAuthorization: authState.abortAuthorization,
       authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth,
     }

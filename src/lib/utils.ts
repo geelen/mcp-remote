@@ -7,6 +7,8 @@ import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import {
   OAuthAuthorizationPendingError,
+  OAuthCallbackStateError,
+  OAuthCallback,
   OAuthCallbackServerOptions,
   OAuthTokenVerificationPendingError,
   StaticOAuthClientInformationFull,
@@ -142,19 +144,20 @@ export function mcpProxy({
   ignoredTools = [],
   authorizationRecovery,
   onAuthorizationVerified,
+  onAuthorizationRecoveryFailed,
   authorizationVerificationTimeoutMs = 30000,
 }: {
   transportToClient: Transport
   transportToServer: Transport
   ignoredTools?: string[]
   authorizationRecovery?: () => Promise<void>
-  onAuthorizationVerified?: () => void
+  onAuthorizationVerified?: () => Promise<void> | void
+  onAuthorizationRecoveryFailed?: (error: Error) => Promise<void> | void
   authorizationVerificationTimeoutMs?: number
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
   let authorizationRecoveryInFlight: Promise<void> | null = null
-  let authorizationRecoveryError: Error | null = null
   let authorizationVerification: {
     id: string
     resolve: () => void
@@ -212,11 +215,6 @@ export function mcpProxy({
       return
     }
 
-    if (authorizationRecoveryError) {
-      sendAuthorizationFailed(message, authorizationRecoveryError)
-      return
-    }
-
     log('[Local→Remote]', message.method || message.id)
 
     debugLog('Local → Remote message', {
@@ -246,8 +244,7 @@ export function mcpProxy({
       if (rawMessage.error) {
         verification.reject(new Error(`Remote OAuth verification failed: ${rawMessage.error.message ?? 'unknown error'}`))
       } else {
-        onAuthorizationVerified?.()
-        verification.resolve()
+        Promise.resolve(onAuthorizationVerified?.()).then(verification.resolve, verification.reject)
       }
       return
     }
@@ -327,10 +324,15 @@ export function mcpProxy({
       authorizationRecoveryInFlight = Promise.resolve()
         .then(authorizationRecovery)
         .then(verifyRemoteAuthorization)
-        .catch((recoveryError: Error) => {
-          authorizationRecoveryError = recoveryError
+        .catch(async (recoveryError: Error) => {
           log('OAuth authorization recovery failed:', recoveryError)
           debugLog('OAuth authorization recovery failed', { stack: recoveryError.stack })
+          try {
+            await onAuthorizationRecoveryFailed?.(recoveryError)
+          } catch (cleanupError) {
+            log('OAuth authorization recovery cleanup failed:', cleanupError)
+            debugLog('OAuth authorization recovery cleanup failed', cleanupError)
+          }
         })
         .finally(() => {
           authorizationRecoveryInFlight = null
@@ -387,10 +389,6 @@ export function mcpProxy({
 
   function sendAuthorizationPending(message: Message) {
     sendRemoteError(message, -32001, 'OAuth authorization is pending; retry this request shortly')
-  }
-
-  function sendAuthorizationFailed(message: Message, error: Error) {
-    sendRemoteError(message, -32002, `OAuth authorization failed: ${error.message}. Run mcp-restart to retry.`)
   }
 
   function sendRemoteError(message: Message, code: number, errorMessage: string) {
@@ -531,16 +529,45 @@ export async function discoverOAuthServerInfo(
  * Type for the auth initialization function
  */
 export type AuthInitializer = () => Promise<{
-  waitForAuthCode: () => Promise<string>
-  waitForNextAuthCode?: () => Promise<string>
+  waitForAuthCode: (timeoutMs?: number) => Promise<OAuthCallback>
+  waitForNextAuthCode?: (timeoutMs?: number) => Promise<OAuthCallback>
   waitForSharedAuthorization: () => Promise<boolean>
-  markAuthCompleted: () => void
+  markAuthCompleted: () => Promise<void>
+  abortAuthorization: () => Promise<void>
   authTimeoutMs: number
   skipBrowserAuth: boolean
 }>
 
 type RemoteAuthorizationAwareProvider = OAuthClientProvider & {
-  markRemoteAuthorizationVerified?: () => void
+  markRemoteAuthorizationVerified?: () => Promise<void> | void
+  acceptAuthorizationCallback?: (state: string) => Promise<void>
+  handleAuthorizationFailure?: (error: unknown) => Promise<void>
+  runAuthorizationExchange?: <T>(state: string, exchange: () => Promise<T>) => Promise<T>
+}
+
+async function acceptAuthorizationCallback(authProvider: OAuthClientProvider, callback: OAuthCallback): Promise<void> {
+  await (authProvider as RemoteAuthorizationAwareProvider).acceptAuthorizationCallback?.(callback.state)
+}
+
+async function handleAuthorizationFailure(authProvider: OAuthClientProvider, error: unknown): Promise<void> {
+  await (authProvider as RemoteAuthorizationAwareProvider).handleAuthorizationFailure?.(error)
+}
+
+export async function finishOAuthCallbackAuthorization(
+  authProvider: OAuthClientProvider,
+  callback: OAuthCallback,
+  finishAuth: (authorizationCode: string) => Promise<void>,
+  authTimeoutMs: number,
+  authorizationDeadlineMs: number,
+): Promise<void> {
+  await acceptAuthorizationCallback(authProvider, callback)
+  const exchange = () => finishOAuthAuthorization(finishAuth, callback.code, authTimeoutMs, authorizationDeadlineMs)
+  const provider = authProvider as RemoteAuthorizationAwareProvider
+  if (provider.runAuthorizationExchange) {
+    await provider.runAuthorizationExchange(callback.state, exchange)
+    return
+  }
+  await exchange()
 }
 
 export async function finishOAuthAuthorization(
@@ -650,7 +677,7 @@ export async function connectToRemoteServer(
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`)
-    ;(authProvider as RemoteAuthorizationAwareProvider).markRemoteAuthorizationVerified?.()
+    await (authProvider as RemoteAuthorizationAwareProvider).markRemoteAuthorizationVerified?.()
 
     return transport
   } catch (error: any) {
@@ -713,40 +740,73 @@ export async function connectToRemoteServer(
 
       // Initialize authentication on-demand
       debugLog('Calling authInitializer to start auth flow')
-      const { waitForAuthCode, waitForSharedAuthorization, markAuthCompleted, authTimeoutMs, skipBrowserAuth } = await authInitializer()
+      const { waitForAuthCode, waitForSharedAuthorization, markAuthCompleted, abortAuthorization, authTimeoutMs, skipBrowserAuth } =
+        await authInitializer()
 
       if (skipBrowserAuth) {
-        const sharedAuthorizationCompleted = await waitForSharedAuthorization()
-        if (!sharedAuthorizationCompleted) {
-          throw new Error(`Shared OAuth authorization did not complete within ${authTimeoutMs / 1000} seconds`)
-        }
+        try {
+          const sharedAuthorizationCompleted = await waitForSharedAuthorization()
+          if (!sharedAuthorizationCompleted) {
+            throw new Error(`Shared OAuth authorization did not complete within ${authTimeoutMs / 1000} seconds`)
+          }
 
-        if (recursionReasons.has(REASON_AUTH_NEEDED)) {
-          throw new Error('Shared OAuth token was not accepted by the remote server')
-        }
+          if (recursionReasons.has(REASON_AUTH_NEEDED)) {
+            throw new Error('Shared OAuth token was not accepted by the remote server')
+          }
 
-        recursionReasons.add(REASON_AUTH_NEEDED)
-        log('Authentication completed by another process; reconnecting with the shared token')
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+          recursionReasons.add(REASON_AUTH_NEEDED)
+          log('Authentication completed by another process; reconnecting with the shared token')
+          const connectedTransport = await connectToRemoteServer(
+            client,
+            serverUrl,
+            authProvider,
+            headers,
+            authInitializer,
+            transportStrategy,
+            recursionReasons,
+          )
+          await markAuthCompleted()
+          return connectedTransport
+        } catch (sharedAuthorizationError) {
+          await handleAuthorizationFailure(authProvider, sharedAuthorizationError)
+          await abortAuthorization()
+          throw sharedAuthorizationError
+        }
       }
 
-      log('Authentication required. Waiting for authorization...')
-
-      // Wait for the authorization code from the callback
-      debugLog('Waiting for auth code from callback server')
-      const authorizationDeadlineMs = Date.now() + authTimeoutMs
-      const code = await waitForAuthCode()
-      debugLog('Received auth code from callback server')
-
       try {
-        log('Completing authorization...')
-        await finishOAuthAuthorization(
-          (authorizationCode) => transport.finishAuth(authorizationCode),
-          code,
-          authTimeoutMs,
-          authorizationDeadlineMs,
-        )
-        markAuthCompleted()
+        log('Authentication required. Waiting for authorization...')
+
+        // Wait for the authorization code from the callback
+        debugLog('Waiting for auth code from callback server')
+        const authorizationDeadlineMs = Date.now() + authTimeoutMs
+        while (true) {
+          const remainingMs = authorizationDeadlineMs - Date.now()
+          if (remainingMs <= 0) {
+            throw new Error('OAuth authorization deadline expired before token exchange')
+          }
+
+          const callback = await waitForAuthCode(remainingMs)
+          debugLog('Received auth code from callback server')
+
+          try {
+            log('Completing authorization...')
+            await finishOAuthCallbackAuthorization(
+              authProvider,
+              callback,
+              (authorizationCode) => transport.finishAuth(authorizationCode),
+              authTimeoutMs,
+              authorizationDeadlineMs,
+            )
+            break
+          } catch (callbackError) {
+            if (callbackError instanceof OAuthCallbackStateError) {
+              log('Ignoring stale OAuth callback and waiting for the active authorization')
+              continue
+            }
+            throw callbackError
+          }
+        }
         debugLog('Authorization completed successfully')
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
@@ -764,8 +824,20 @@ export async function connectToRemoteServer(
         debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+        const connectedTransport = await connectToRemoteServer(
+          client,
+          serverUrl,
+          authProvider,
+          headers,
+          authInitializer,
+          transportStrategy,
+          recursionReasons,
+        )
+        await markAuthCompleted()
+        return connectedTransport
       } catch (authError: any) {
+        await handleAuthorizationFailure(authProvider, authError)
+        await abortAuthorization()
         log('Authorization error:', authError)
         debugLog('Authorization error during finishAuth', {
           errorMessage: authError.message,
@@ -791,7 +863,9 @@ export async function connectToRemoteServer(
  * @returns An object with the server, authCode, and waitForAuthCode function
  */
 export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
-  let authCode: string | null = null
+  let authCallback: OAuthCallback | null = null
+  let callbackSequence = 0
+  let lastDeliveredCallbackSequence = 0
   let authCompleted = false
   const app = express()
   const authTimeoutMs = options.authTimeoutMs ?? 30000
@@ -806,13 +880,14 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
   resetAuthCompletion()
 
   const beginAuthorization = () => {
-    authCode = null
+    authCallback = null
     authCompleted = false
     resetAuthCompletion()
   }
 
-  options.events.on('auth-code-received', (code: string) => {
-    authCode = code
+  options.events.on('auth-code-received', (callback: OAuthCallback) => {
+    authCallback = callback
+    callbackSequence++
   })
 
   const markAuthCompleted = () => {
@@ -867,12 +942,14 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
   // OAuth callback endpoint
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
-    if (!code) {
-      res.status(400).send('Error: No authorization code received')
+    const state = req.query.state as string | undefined
+    if (!code || !state) {
+      res.status(400).send('Error: Authorization callback requires both code and state')
       return
     }
 
-    authCode = code
+    const callback = { code, state }
+    authCallback = callback
     log('Auth code received, resolving authorization-code waiters')
 
     res.send(`
@@ -887,56 +964,41 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     `)
 
     // Notify main flow that auth code is available
-    options.events.emit('auth-code-received', code)
+    options.events.emit('auth-code-received', callback)
   })
 
   const server = app.listen(options.port, '127.0.0.1', () => {
     log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
   })
 
-  const waitForAuthCode = (): Promise<string> => {
+  const waitForCallback = (timeoutMs: number): Promise<OAuthCallback> => {
     return new Promise((resolve, reject) => {
-      if (authCode) {
-        resolve(authCode)
+      if (authCallback && callbackSequence > lastDeliveredCallbackSequence) {
+        lastDeliveredCallbackSequence = callbackSequence
+        resolve(authCallback)
         return
       }
 
-      const onAuthCode = (code: string) => {
+      const onAuthCode = (callback: OAuthCallback) => {
         clearTimeout(timeout)
-        resolve(code)
+        lastDeliveredCallbackSequence = callbackSequence
+        resolve(callback)
       }
       const timeout = setTimeout(() => {
         options.events.removeListener('auth-code-received', onAuthCode)
-        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1000} seconds`))
-      }, authTimeoutMs)
+        reject(new Error(`OAuth authorization timed out after ${timeoutMs / 1000} seconds`))
+      }, timeoutMs)
 
       options.events.once('auth-code-received', onAuthCode)
     })
   }
 
-  const waitForNextAuthCode = (): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      if (authCode) {
-        resolve(authCode)
-        return
-      }
-
-      const onAuthCode = (code: string) => {
-        clearTimeout(timeout)
-        resolve(code)
-      }
-      const timeout = setTimeout(() => {
-        options.events.removeListener('auth-code-received', onAuthCode)
-        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1000} seconds`))
-      }, authTimeoutMs)
-
-      options.events.once('auth-code-received', onAuthCode)
-    })
-  }
+  const waitForAuthCode = (timeoutMs = authTimeoutMs): Promise<OAuthCallback> => waitForCallback(timeoutMs)
+  const waitForNextAuthCode = (timeoutMs = authTimeoutMs): Promise<OAuthCallback> => waitForCallback(timeoutMs)
 
   return {
     server,
-    authCode,
+    authCode: undefined as string | undefined,
     waitForAuthCode,
     waitForNextAuthCode,
     beginAuthorization,

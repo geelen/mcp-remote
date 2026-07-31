@@ -2,16 +2,17 @@
 import {
   JSONRPCMessageSchema,
   NodeOAuthClientProvider,
+  OAuthCallbackStateError,
   connectToRemoteServer,
   createLazyAuthCoordinator,
   debugLog,
   discoverOAuthServerInfo,
-  finishOAuthAuthorization,
+  finishOAuthCallbackAuthorization,
   log,
   mcpProxy,
   parseCommandLineArgs,
   setupSignalHandlers
-} from "./chunk-YZXW5VW3.js";
+} from "./chunk-BJUMBZCX.js";
 
 // src/proxy.ts
 import { EventEmitter } from "events";
@@ -137,6 +138,7 @@ async function runProxy(serverUrl, callbackPort, headers, transportStrategy = "h
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    authTimeoutMs,
     prepareAuthorization: async () => {
       const authState = await authCoordinator.initializeAuth();
       server = authState.server;
@@ -158,12 +160,14 @@ async function runProxy(serverUrl, callbackPort, headers, transportStrategy = "h
       waitForNextAuthCode: authState.waitForNextAuthCode,
       waitForSharedAuthorization: authState.waitForSharedAuthorization,
       markAuthCompleted: authState.markAuthCompleted,
+      abortAuthorization: authState.abortAuthorization,
       authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth
     };
   };
   try {
     const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy);
+    let markRecoveredAuthorizationCompleted;
     const authorizationRecovery = async () => {
       const authState = await authInitializer();
       if (authState.skipBrowserAuth) {
@@ -175,14 +179,35 @@ async function runProxy(serverUrl, callbackPort, headers, transportStrategy = "h
         return;
       }
       const authorizationDeadlineMs = Date.now() + authState.authTimeoutMs;
-      const code = await authState.waitForNextAuthCode();
       const oauthTransport = remoteTransport;
       if (!oauthTransport.finishAuth) {
         throw new Error("Remote transport does not support OAuth authorization completion");
       }
-      log("Completing renewed authorization...");
-      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs, authorizationDeadlineMs);
-      authState.markAuthCompleted();
+      while (true) {
+        const remainingMs = authorizationDeadlineMs - Date.now();
+        if (remainingMs <= 0) {
+          throw new Error("OAuth authorization deadline expired before token exchange");
+        }
+        const callback = await authState.waitForNextAuthCode(remainingMs);
+        try {
+          log("Completing renewed authorization...");
+          await finishOAuthCallbackAuthorization(
+            authProvider,
+            callback,
+            oauthTransport.finishAuth.bind(oauthTransport),
+            authState.authTimeoutMs,
+            authorizationDeadlineMs
+          );
+        } catch (error) {
+          if (error instanceof OAuthCallbackStateError) {
+            log("Ignoring stale OAuth callback and waiting for the active authorization");
+            continue;
+          }
+          throw error;
+        }
+        markRecoveredAuthorizationCompleted = authState.markAuthCompleted;
+        break;
+      }
       log("Renewed OAuth token; verifying it with the remote MCP server");
     };
     mcpProxy({
@@ -190,7 +215,15 @@ async function runProxy(serverUrl, callbackPort, headers, transportStrategy = "h
       transportToServer: remoteTransport,
       ignoredTools,
       authorizationRecovery,
-      onAuthorizationVerified: () => authProvider.markRemoteAuthorizationVerified()
+      onAuthorizationVerified: async () => {
+        await authProvider.markRemoteAuthorizationVerified();
+        await markRecoveredAuthorizationCompleted?.();
+        markRecoveredAuthorizationCompleted = void 0;
+      },
+      onAuthorizationRecoveryFailed: async (error) => {
+        await authProvider.handleAuthorizationFailure(error);
+        await authCoordinator.abortAuthorization();
+      }
     });
     await localTransport.start();
     log("Local STDIO server running");

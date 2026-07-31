@@ -13,7 +13,7 @@ import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   connectToRemoteServer,
-  finishOAuthAuthorization,
+  finishOAuthCallbackAuthorization,
   log,
   debugLog,
   mcpProxy,
@@ -22,7 +22,7 @@ import {
   TransportStrategy,
   discoverOAuthServerInfo,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { OAuthCallbackStateError, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
@@ -80,6 +80,7 @@ async function runProxy(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    authTimeoutMs,
     prepareAuthorization: async () => {
       const authState = await authCoordinator.initializeAuth()
       server = authState.server
@@ -110,6 +111,7 @@ async function runProxy(
       waitForNextAuthCode: authState.waitForNextAuthCode,
       waitForSharedAuthorization: authState.waitForSharedAuthorization,
       markAuthCompleted: authState.markAuthCompleted,
+      abortAuthorization: authState.abortAuthorization,
       authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth,
     }
@@ -119,6 +121,7 @@ async function runProxy(
     // Connect to remote server with lazy authentication
     const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
+    let markRecoveredAuthorizationCompleted: (() => Promise<void>) | undefined
     const authorizationRecovery = async () => {
       const authState = await authInitializer()
       if (authState.skipBrowserAuth) {
@@ -131,16 +134,39 @@ async function runProxy(
       }
 
       const authorizationDeadlineMs = Date.now() + authState.authTimeoutMs
-      const code = await authState.waitForNextAuthCode()
       const oauthTransport = remoteTransport as typeof remoteTransport & {
         finishAuth?: (authorizationCode: string) => Promise<void>
       }
       if (!oauthTransport.finishAuth) {
         throw new Error('Remote transport does not support OAuth authorization completion')
       }
-      log('Completing renewed authorization...')
-      await finishOAuthAuthorization(oauthTransport.finishAuth.bind(oauthTransport), code, authState.authTimeoutMs, authorizationDeadlineMs)
-      authState.markAuthCompleted()
+
+      while (true) {
+        const remainingMs = authorizationDeadlineMs - Date.now()
+        if (remainingMs <= 0) {
+          throw new Error('OAuth authorization deadline expired before token exchange')
+        }
+
+        const callback = await authState.waitForNextAuthCode(remainingMs)
+        try {
+          log('Completing renewed authorization...')
+          await finishOAuthCallbackAuthorization(
+            authProvider,
+            callback,
+            oauthTransport.finishAuth.bind(oauthTransport),
+            authState.authTimeoutMs,
+            authorizationDeadlineMs,
+          )
+        } catch (error) {
+          if (error instanceof OAuthCallbackStateError) {
+            log('Ignoring stale OAuth callback and waiting for the active authorization')
+            continue
+          }
+          throw error
+        }
+        markRecoveredAuthorizationCompleted = authState.markAuthCompleted
+        break
+      }
       log('Renewed OAuth token; verifying it with the remote MCP server')
     }
 
@@ -150,7 +176,15 @@ async function runProxy(
       transportToServer: remoteTransport,
       ignoredTools,
       authorizationRecovery,
-      onAuthorizationVerified: () => authProvider.markRemoteAuthorizationVerified(),
+      onAuthorizationVerified: async () => {
+        await authProvider.markRemoteAuthorizationVerified()
+        await markRecoveredAuthorizationCompleted?.()
+        markRecoveredAuthorizationCompleted = undefined
+      },
+      onAuthorizationRecoveryFailed: async (error) => {
+        await authProvider.handleAuthorizationFailure(error)
+        await authCoordinator.abortAuthorization()
+      },
     })
 
     // Start the local STDIO server

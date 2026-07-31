@@ -18151,6 +18151,26 @@ var Client = class extends Protocol {
   }
 };
 
+// src/lib/types.ts
+var OAuthAuthorizationPendingError = class extends Error {
+  constructor() {
+    super("OAuth authorization is already pending; retry after it completes");
+    this.name = "OAuthAuthorizationPendingError";
+  }
+};
+var OAuthTokenVerificationPendingError = class extends Error {
+  constructor() {
+    super("OAuth token is awaiting remote verification; retry the MCP request");
+    this.name = "OAuthTokenVerificationPendingError";
+  }
+};
+var OAuthCallbackStateError = class extends Error {
+  constructor() {
+    super("OAuth callback state does not match the pending authorization");
+    this.name = "OAuthCallbackStateError";
+  }
+};
+
 // package.json
 var version2 = "0.1.38";
 
@@ -19987,38 +20007,49 @@ var StreamableHTTPClientTransport = class {
   }
 };
 
-// src/lib/types.ts
-var OAuthAuthorizationPendingError = class extends Error {
-  constructor() {
-    super("OAuth authorization is already pending; retry after it completes");
-    this.name = "OAuthAuthorizationPendingError";
-  }
-};
-var OAuthTokenVerificationPendingError = class extends Error {
-  constructor() {
-    super("OAuth token is awaiting remote verification; retry the MCP request");
-    this.name = "OAuthTokenVerificationPendingError";
-  }
-};
-
 // src/lib/mcp-auth-config.ts
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
-async function createLockfile(serverUrlHash, pid2, port) {
+import { randomUUID } from "node:crypto";
+async function createLockfile(serverUrlHash, pid2, port, authTimeoutMs = 3e4) {
+  const timestamp = Date.now();
   const lockData = {
     pid: pid2,
     port,
-    timestamp: Date.now()
+    timestamp,
+    leaseId: randomUUID(),
+    expiresAt: timestamp + authTimeoutMs
   };
-  await writeJsonFile(serverUrlHash, "lock.json", lockData);
+  await ensureConfigDir();
+  const filePath = getConfigFilePath(serverUrlHash, "lock.json");
+  const temporaryPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(lockData, null, 2), { encoding: "utf-8", mode: 384 });
+    await fs.link(temporaryPath, filePath);
+    return lockData;
+  } catch (error2) {
+    if (error2.code === "EEXIST") {
+      return null;
+    }
+    log("Error creating OAuth lockfile:", error2);
+    throw error2;
+  } finally {
+    try {
+      await fs.unlink(temporaryPath);
+    } catch (error2) {
+      if (error2.code !== "ENOENT") {
+        log("Error removing temporary OAuth lockfile:", error2);
+      }
+    }
+  }
 }
 async function checkLockfile(serverUrlHash) {
   try {
     const lockfile = await readJsonFile(serverUrlHash, "lock.json", {
       async parseAsync(data) {
         if (typeof data !== "object" || data === null) return null;
-        if (typeof data.pid !== "number" || typeof data.port !== "number" || typeof data.timestamp !== "number") {
+        if (typeof data.pid !== "number" || typeof data.port !== "number" || typeof data.timestamp !== "number" || data.leaseId !== void 0 && typeof data.leaseId !== "string" || data.expiresAt !== void 0 && typeof data.expiresAt !== "number") {
           return null;
         }
         return data;
@@ -20029,8 +20060,33 @@ async function checkLockfile(serverUrlHash) {
     return null;
   }
 }
-async function deleteLockfile(serverUrlHash) {
+async function deleteLockfile(serverUrlHash, expectedLeaseId) {
+  const lockData = await checkLockfile(serverUrlHash);
+  if (!lockData) {
+    return true;
+  }
+  if (expectedLeaseId ? lockData.leaseId !== expectedLeaseId : lockData.leaseId !== void 0) {
+    return false;
+  }
   await deleteConfigFile(serverUrlHash, "lock.json");
+  return true;
+}
+async function writeAuthorizationCompletion(serverUrlHash, leaseId) {
+  await writeJsonFile(serverUrlHash, "authorization-completion.json", {
+    leaseId,
+    completedAt: Date.now()
+  });
+}
+async function checkAuthorizationCompletion(serverUrlHash) {
+  const completion = await readJsonFile(serverUrlHash, "authorization-completion.json", {
+    async parseAsync(data) {
+      if (!data || typeof data !== "object") return null;
+      const candidate = data;
+      if (typeof candidate.leaseId !== "string" || typeof candidate.completedAt !== "number") return null;
+      return candidate;
+    }
+  });
+  return completion ?? null;
 }
 function getConfigDir() {
   const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), ".mcp-auth");
@@ -20075,11 +20131,23 @@ async function readJsonFile(serverUrlHash, filename, schema) {
   }
 }
 async function writeJsonFile(serverUrlHash, filename, data) {
+  let temporaryPath;
   try {
     await ensureConfigDir();
     const filePath = getConfigFilePath(serverUrlHash, filename);
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 384 });
+    temporaryPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+    await fs.writeFile(temporaryPath, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 384 });
+    await fs.rename(temporaryPath, filePath);
   } catch (error2) {
+    if (temporaryPath) {
+      try {
+        await fs.unlink(temporaryPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== "ENOENT") {
+          log(`Error removing temporary ${filename}:`, cleanupError);
+        }
+      }
+    }
     log(`Error writing ${filename}:`, error2);
     throw error2;
   }
@@ -20091,16 +20159,6 @@ async function readTextFile(serverUrlHash, filename, errorMessage) {
     return await fs.readFile(filePath, "utf-8");
   } catch (error2) {
     throw new Error(errorMessage || `Error reading ${filename}`);
-  }
-}
-async function writeTextFile(serverUrlHash, filename, text) {
-  try {
-    await ensureConfigDir();
-    const filePath = getConfigFilePath(serverUrlHash, filename);
-    await fs.writeFile(filePath, text, { encoding: "utf-8", mode: 384 });
-  } catch (error2) {
-    log(`Error writing ${filename}:`, error2);
-    throw error2;
   }
 }
 
@@ -20347,12 +20405,12 @@ function mcpProxy({
   ignoredTools = [],
   authorizationRecovery,
   onAuthorizationVerified,
+  onAuthorizationRecoveryFailed,
   authorizationVerificationTimeoutMs = 3e4
 }) {
   let transportToClientClosed = false;
   let transportToServerClosed = false;
   let authorizationRecoveryInFlight = null;
-  let authorizationRecoveryError = null;
   let authorizationVerification = null;
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request) => {
@@ -20395,10 +20453,6 @@ function mcpProxy({
       sendAuthorizationPending(message);
       return;
     }
-    if (authorizationRecoveryError) {
-      sendAuthorizationFailed(message, authorizationRecoveryError);
-      return;
-    }
     log("[Local\u2192Remote]", message.method || message.id);
     debugLog("Local \u2192 Remote message", {
       method: message.method,
@@ -20422,8 +20476,7 @@ function mcpProxy({
       if (rawMessage.error) {
         verification.reject(new Error(`Remote OAuth verification failed: ${rawMessage.error.message ?? "unknown error"}`));
       } else {
-        onAuthorizationVerified?.();
-        verification.resolve();
+        Promise.resolve(onAuthorizationVerified?.()).then(verification.resolve, verification.reject);
       }
       return;
     }
@@ -20484,10 +20537,15 @@ function mcpProxy({
       return false;
     }
     if (!authorizationRecoveryInFlight) {
-      authorizationRecoveryInFlight = Promise.resolve().then(authorizationRecovery).then(verifyRemoteAuthorization).catch((recoveryError) => {
-        authorizationRecoveryError = recoveryError;
+      authorizationRecoveryInFlight = Promise.resolve().then(authorizationRecovery).then(verifyRemoteAuthorization).catch(async (recoveryError) => {
         log("OAuth authorization recovery failed:", recoveryError);
         debugLog("OAuth authorization recovery failed", { stack: recoveryError.stack });
+        try {
+          await onAuthorizationRecoveryFailed?.(recoveryError);
+        } catch (cleanupError) {
+          log("OAuth authorization recovery cleanup failed:", cleanupError);
+          debugLog("OAuth authorization recovery cleanup failed", cleanupError);
+        }
       }).finally(() => {
         authorizationRecoveryInFlight = null;
       });
@@ -20528,9 +20586,6 @@ function mcpProxy({
   }
   function sendAuthorizationPending(message) {
     sendRemoteError(message, -32001, "OAuth authorization is pending; retry this request shortly");
-  }
-  function sendAuthorizationFailed(message, error2) {
-    sendRemoteError(message, -32002, `OAuth authorization failed: ${error2.message}. Run mcp-restart to retry.`);
   }
   function sendRemoteError(message, code, errorMessage) {
     if (message.id === void 0) {
@@ -20609,6 +20664,22 @@ async function discoverOAuthServerInfo(serverUrl, headers = {}) {
     wwwAuthenticateScope
   };
 }
+async function acceptAuthorizationCallback(authProvider, callback) {
+  await authProvider.acceptAuthorizationCallback?.(callback.state);
+}
+async function handleAuthorizationFailure(authProvider, error2) {
+  await authProvider.handleAuthorizationFailure?.(error2);
+}
+async function finishOAuthCallbackAuthorization(authProvider, callback, finishAuth, authTimeoutMs, authorizationDeadlineMs) {
+  await acceptAuthorizationCallback(authProvider, callback);
+  const exchange = () => finishOAuthAuthorization(finishAuth, callback.code, authTimeoutMs, authorizationDeadlineMs);
+  const provider = authProvider;
+  if (provider.runAuthorizationExchange) {
+    await provider.runAuthorizationExchange(callback.state, exchange);
+    return;
+  }
+  await exchange();
+}
 async function finishOAuthAuthorization(finishAuth, authorizationCode, authTimeoutMs = 3e4, authorizationDeadlineMs = Date.now() + authTimeoutMs) {
   const remainingMs = authorizationDeadlineMs - Date.now();
   if (remainingMs <= 0) {
@@ -20673,7 +20744,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
       }
     }
     log(`Connected to remote server using ${transport.constructor.name}`);
-    authProvider.markRemoteAuthorizationVerified?.();
+    await authProvider.markRemoteAuthorizationVerified?.();
     return transport;
   } catch (error2) {
     if (error2 instanceof StaleClientRegistrationError) {
@@ -20713,33 +20784,64 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
         stack: error2.stack
       });
       debugLog("Calling authInitializer to start auth flow");
-      const { waitForAuthCode, waitForSharedAuthorization, markAuthCompleted, authTimeoutMs, skipBrowserAuth } = await authInitializer();
+      const { waitForAuthCode, waitForSharedAuthorization, markAuthCompleted, abortAuthorization, authTimeoutMs, skipBrowserAuth } = await authInitializer();
       if (skipBrowserAuth) {
-        const sharedAuthorizationCompleted = await waitForSharedAuthorization();
-        if (!sharedAuthorizationCompleted) {
-          throw new Error(`Shared OAuth authorization did not complete within ${authTimeoutMs / 1e3} seconds`);
+        try {
+          const sharedAuthorizationCompleted = await waitForSharedAuthorization();
+          if (!sharedAuthorizationCompleted) {
+            throw new Error(`Shared OAuth authorization did not complete within ${authTimeoutMs / 1e3} seconds`);
+          }
+          if (recursionReasons.has(REASON_AUTH_NEEDED)) {
+            throw new Error("Shared OAuth token was not accepted by the remote server");
+          }
+          recursionReasons.add(REASON_AUTH_NEEDED);
+          log("Authentication completed by another process; reconnecting with the shared token");
+          const connectedTransport = await connectToRemoteServer(
+            client,
+            serverUrl,
+            authProvider,
+            headers,
+            authInitializer,
+            transportStrategy,
+            recursionReasons
+          );
+          await markAuthCompleted();
+          return connectedTransport;
+        } catch (sharedAuthorizationError) {
+          await handleAuthorizationFailure(authProvider, sharedAuthorizationError);
+          await abortAuthorization();
+          throw sharedAuthorizationError;
         }
-        if (recursionReasons.has(REASON_AUTH_NEEDED)) {
-          throw new Error("Shared OAuth token was not accepted by the remote server");
-        }
-        recursionReasons.add(REASON_AUTH_NEEDED);
-        log("Authentication completed by another process; reconnecting with the shared token");
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons);
       }
-      log("Authentication required. Waiting for authorization...");
-      debugLog("Waiting for auth code from callback server");
-      const authorizationDeadlineMs = Date.now() + authTimeoutMs;
-      const code = await waitForAuthCode();
-      debugLog("Received auth code from callback server");
       try {
-        log("Completing authorization...");
-        await finishOAuthAuthorization(
-          (authorizationCode) => transport.finishAuth(authorizationCode),
-          code,
-          authTimeoutMs,
-          authorizationDeadlineMs
-        );
-        markAuthCompleted();
+        log("Authentication required. Waiting for authorization...");
+        debugLog("Waiting for auth code from callback server");
+        const authorizationDeadlineMs = Date.now() + authTimeoutMs;
+        while (true) {
+          const remainingMs = authorizationDeadlineMs - Date.now();
+          if (remainingMs <= 0) {
+            throw new Error("OAuth authorization deadline expired before token exchange");
+          }
+          const callback = await waitForAuthCode(remainingMs);
+          debugLog("Received auth code from callback server");
+          try {
+            log("Completing authorization...");
+            await finishOAuthCallbackAuthorization(
+              authProvider,
+              callback,
+              (authorizationCode) => transport.finishAuth(authorizationCode),
+              authTimeoutMs,
+              authorizationDeadlineMs
+            );
+            break;
+          } catch (callbackError) {
+            if (callbackError instanceof OAuthCallbackStateError) {
+              log("Ignoring stale OAuth callback and waiting for the active authorization");
+              continue;
+            }
+            throw callbackError;
+          }
+        }
         debugLog("Authorization completed successfully");
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
           const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`;
@@ -20752,8 +20854,20 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
         recursionReasons.add(REASON_AUTH_NEEDED);
         log(`Recursively reconnecting for reason: ${REASON_AUTH_NEEDED}`);
         debugLog("Recursively reconnecting after auth", { recursionReasons: Array.from(recursionReasons) });
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons);
+        const connectedTransport = await connectToRemoteServer(
+          client,
+          serverUrl,
+          authProvider,
+          headers,
+          authInitializer,
+          transportStrategy,
+          recursionReasons
+        );
+        await markAuthCompleted();
+        return connectedTransport;
       } catch (authError) {
+        await handleAuthorizationFailure(authProvider, authError);
+        await abortAuthorization();
         log("Authorization error:", authError);
         debugLog("Authorization error during finishAuth", {
           errorMessage: authError.message,
@@ -20773,7 +20887,9 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
   }
 }
 function setupOAuthCallbackServerWithLongPoll(options) {
-  let authCode = null;
+  let authCallback = null;
+  let callbackSequence = 0;
+  let lastDeliveredCallbackSequence = 0;
   let authCompleted = false;
   const app = express();
   const authTimeoutMs = options.authTimeoutMs ?? 3e4;
@@ -20787,12 +20903,13 @@ function setupOAuthCallbackServerWithLongPoll(options) {
   };
   resetAuthCompletion();
   const beginAuthorization = () => {
-    authCode = null;
+    authCallback = null;
     authCompleted = false;
     resetAuthCompletion();
   };
-  options.events.on("auth-code-received", (code) => {
-    authCode = code;
+  options.events.on("auth-code-received", (callback) => {
+    authCallback = callback;
+    callbackSequence++;
   });
   const markAuthCompleted = () => {
     if (authCompleted) {
@@ -20832,11 +20949,13 @@ function setupOAuthCallbackServerWithLongPoll(options) {
   });
   app.get(options.path, (req, res) => {
     const code = req.query.code;
-    if (!code) {
-      res.status(400).send("Error: No authorization code received");
+    const state = req.query.state;
+    if (!code || !state) {
+      res.status(400).send("Error: Authorization callback requires both code and state");
       return;
     }
-    authCode = code;
+    const callback = { code, state };
+    authCallback = callback;
     log("Auth code received, resolving authorization-code waiters");
     res.send(`
       Authorization successful!
@@ -20848,48 +20967,35 @@ function setupOAuthCallbackServerWithLongPoll(options) {
         window.close();
       </script>
     `);
-    options.events.emit("auth-code-received", code);
+    options.events.emit("auth-code-received", callback);
   });
   const server = app.listen(options.port, "127.0.0.1", () => {
     log(`OAuth callback server running at http://127.0.0.1:${options.port}`);
   });
-  const waitForAuthCode = () => {
+  const waitForCallback = (timeoutMs) => {
     return new Promise((resolve, reject) => {
-      if (authCode) {
-        resolve(authCode);
+      if (authCallback && callbackSequence > lastDeliveredCallbackSequence) {
+        lastDeliveredCallbackSequence = callbackSequence;
+        resolve(authCallback);
         return;
       }
-      const onAuthCode = (code) => {
+      const onAuthCode = (callback) => {
         clearTimeout(timeout);
-        resolve(code);
+        lastDeliveredCallbackSequence = callbackSequence;
+        resolve(callback);
       };
       const timeout = setTimeout(() => {
         options.events.removeListener("auth-code-received", onAuthCode);
-        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1e3} seconds`));
-      }, authTimeoutMs);
+        reject(new Error(`OAuth authorization timed out after ${timeoutMs / 1e3} seconds`));
+      }, timeoutMs);
       options.events.once("auth-code-received", onAuthCode);
     });
   };
-  const waitForNextAuthCode = () => {
-    return new Promise((resolve, reject) => {
-      if (authCode) {
-        resolve(authCode);
-        return;
-      }
-      const onAuthCode = (code) => {
-        clearTimeout(timeout);
-        resolve(code);
-      };
-      const timeout = setTimeout(() => {
-        options.events.removeListener("auth-code-received", onAuthCode);
-        reject(new Error(`OAuth authorization timed out after ${authTimeoutMs / 1e3} seconds`));
-      }, authTimeoutMs);
-      options.events.once("auth-code-received", onAuthCode);
-    });
-  };
+  const waitForAuthCode = (timeoutMs = authTimeoutMs) => waitForCallback(timeoutMs);
+  const waitForNextAuthCode = (timeoutMs = authTimeoutMs) => waitForCallback(timeoutMs);
   return {
     server,
-    authCode,
+    authCode: void 0,
     waitForAuthCode,
     waitForNextAuthCode,
     beginAuthorization,
@@ -21147,7 +21253,20 @@ function shouldIncludeTool(ignorePatterns, toolName) {
 // src/lib/node-oauth-client-provider.ts
 import open from "open";
 import { sanitizeUrl } from "strict-url-sanitise";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+var AuthorizationTransactionSchema = {
+  async parseAsync(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const candidate = value;
+    if (candidate.version !== 1 || typeof candidate.state !== "string" || typeof candidate.codeVerifier !== "string" || typeof candidate.createdAt !== "number") {
+      return null;
+    }
+    return candidate;
+  }
+};
 function isStaleClientRegistrationResponse(response) {
   if (!response || typeof response !== "object") {
     return false;
@@ -21171,13 +21290,14 @@ var NodeOAuthClientProvider = class {
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata;
     this.staticOAuthClientInfo = options.staticOAuthClientInfo;
     this.authorizeResource = options.authorizeResource;
-    this._state = randomUUID();
+    this._state = randomUUID2();
     this._clientInfo = void 0;
     this.clientRegistrationSource = void 0;
     this.authorizationServerMetadata = options.authorizationServerMetadata;
     this.protectedResourceMetadata = options.protectedResourceMetadata;
     this.wwwAuthenticateScope = options.wwwAuthenticateScope;
     this.authorizationState = "ready";
+    this.callbackState = void 0;
   }
   serverUrlHash;
   callbackPath;
@@ -21195,12 +21315,23 @@ var NodeOAuthClientProvider = class {
   protectedResourceMetadata;
   wwwAuthenticateScope;
   authorizationState;
+  callbackState;
+  authorizationPrepared = false;
+  sharedAuthorization = false;
+  authorizationExchangeState = new AsyncLocalStorage();
   /**
    * Marks a successfully processed MCP response as proof that the most
    * recently exchanged token is accepted by the remote resource server.
    */
-  markRemoteAuthorizationVerified() {
-    this.authorizationState = "ready";
+  async markRemoteAuthorizationVerified() {
+    if (this.authorizationState !== "verifying") {
+      return;
+    }
+    await Promise.all([
+      deleteConfigFile(this.serverUrlHash, "authorization.json"),
+      deleteConfigFile(this.serverUrlHash, "code_verifier.txt")
+    ]);
+    this.resetAuthorizationState();
   }
   get redirectUrl() {
     return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`;
@@ -21348,6 +21479,11 @@ var NodeOAuthClientProvider = class {
    * @param tokens The tokens to save
    */
   async saveTokens(tokens) {
+    const exchangeState = this.authorizationExchangeState.getStore();
+    if (exchangeState && exchangeState !== this.callbackState) {
+      debugLog("Ignoring tokens from a retired OAuth authorization exchange");
+      return;
+    }
     const timeLeft = tokens.expires_in || 0;
     if (typeof tokens.expires_in !== "number" || tokens.expires_in < 0) {
       debugLog("\u26A0\uFE0F WARNING: Invalid expires_in detected in tokens \u26A0\uFE0F", {
@@ -21370,22 +21506,20 @@ var NodeOAuthClientProvider = class {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl) {
-    if (this.authorizationState === "authorizing") {
-      throw new OAuthAuthorizationPendingError();
-    }
     if (this.authorizationState === "verifying") {
       throw new OAuthTokenVerificationPendingError();
     }
-    this.authorizationState = "authorizing";
-    try {
-      const preparation = await this.options.prepareAuthorization?.();
-      if (preparation?.skipBrowserAuth) {
-        this.authorizationState = "ready";
+    if (this.authorizationState === "authorizing") {
+      const transaction = await this.readAuthorizationTransaction();
+      if (!transaction || transaction.state !== authorizationUrl.searchParams.get("state")) {
+        throw new OAuthAuthorizationPendingError();
+      }
+    } else {
+      await this.prepareAuthorization();
+      if (this.sharedAuthorization) {
         return;
       }
-    } catch (error2) {
-      this.authorizationState = "ready";
-      throw error2;
+      this.authorizationState = "authorizing";
     }
     this.getAuthorizationServerMetadata().catch(() => {
     });
@@ -21450,15 +21584,79 @@ ${authorizationUrl.toString()}
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier) {
-    debugLog("Saving code verifier");
-    await writeTextFile(this.serverUrlHash, "code_verifier.txt", codeVerifier);
+    if (this.authorizationState === "authorizing") {
+      throw new OAuthAuthorizationPendingError();
+    }
+    if (this.authorizationState === "verifying") {
+      throw new OAuthTokenVerificationPendingError();
+    }
+    await this.prepareAuthorization();
+    if (this.sharedAuthorization) {
+      return;
+    }
+    const transaction = {
+      version: 1,
+      state: this._state,
+      codeVerifier,
+      createdAt: Date.now()
+    };
+    debugLog("Saving state-bound PKCE authorization transaction");
+    this.authorizationState = "authorizing";
+    this.callbackState = void 0;
+    try {
+      await writeJsonFile(this.serverUrlHash, "authorization.json", transaction);
+    } catch (error2) {
+      this.resetAuthorizationState();
+      throw error2;
+    }
+  }
+  /**
+   * Binds a browser callback to the verifier produced for that exact state.
+   * A stale callback must never exchange a code with a newer verifier.
+   */
+  async acceptAuthorizationCallback(state) {
+    const transaction = await this.readAuthorizationTransaction();
+    if (!transaction || transaction.state !== state) {
+      throw new OAuthCallbackStateError();
+    }
+    if (this.isTransactionExpired(transaction)) {
+      await this.invalidateCredentials("verifier");
+      throw new OAuthCallbackStateError();
+    }
+    this.callbackState = state;
+  }
+  /**
+   * Retires an authorization that cannot be completed, while preserving a
+   * current transaction when an old browser callback arrives out of order.
+   */
+  async handleAuthorizationFailure(error2) {
+    if (error2 instanceof OAuthCallbackStateError || error2 instanceof Error && error2.name === "OAuthCallbackStateError") {
+      return;
+    }
+    if (this.sharedAuthorization) {
+      this.resetAuthorizationState();
+      return;
+    }
+    await this.invalidateCredentials("tokens");
+  }
+  /** Runs one code exchange in a state-bound async context. */
+  async runAuthorizationExchange(state, exchange) {
+    return await this.authorizationExchangeState.run(state, exchange);
   }
   /**
    * Gets the PKCE code verifier
    * @returns The code verifier
    */
   async codeVerifier() {
-    debugLog("Reading code verifier");
+    const transaction = await this.readAuthorizationTransaction();
+    if (transaction) {
+      if (this.callbackState !== transaction.state) {
+        throw new OAuthCallbackStateError();
+      }
+      debugLog("Reading verifier for state-bound PKCE authorization transaction");
+      return transaction.codeVerifier;
+    }
+    debugLog("Reading legacy code verifier");
     const verifier = await readTextFile(this.serverUrlHash, "code_verifier.txt", "No code verifier saved for session");
     debugLog("Code verifier found:", !!verifier);
     return verifier;
@@ -21474,11 +21672,12 @@ ${authorizationUrl.toString()}
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, "client_info.json"),
           deleteConfigFile(this.serverUrlHash, "tokens.json"),
+          deleteConfigFile(this.serverUrlHash, "authorization.json"),
           deleteConfigFile(this.serverUrlHash, "code_verifier.txt")
         ]);
         this._clientInfo = void 0;
         this.clientRegistrationSource = void 0;
-        this.authorizationState = "ready";
+        this.resetAuthorizationState();
         debugLog("All credentials invalidated");
         break;
       case "client":
@@ -21488,23 +21687,170 @@ ${authorizationUrl.toString()}
         debugLog("Client information invalidated");
         break;
       case "tokens":
-        await deleteConfigFile(this.serverUrlHash, "tokens.json");
-        this.authorizationState = "ready";
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, "tokens.json"),
+          deleteConfigFile(this.serverUrlHash, "authorization.json"),
+          deleteConfigFile(this.serverUrlHash, "code_verifier.txt")
+        ]);
+        this.resetAuthorizationState();
         debugLog("OAuth tokens invalidated");
         break;
       case "verifier":
-        await deleteConfigFile(this.serverUrlHash, "code_verifier.txt");
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, "authorization.json"),
+          deleteConfigFile(this.serverUrlHash, "code_verifier.txt")
+        ]);
+        this.resetAuthorizationState();
         debugLog("Code verifier invalidated");
         break;
       default:
         throw new Error(`Unknown credential scope: ${scope}`);
     }
   }
+  async prepareAuthorization() {
+    if (this.authorizationPrepared) {
+      return;
+    }
+    try {
+      const preparation = await this.options.prepareAuthorization?.();
+      this.sharedAuthorization = preparation?.skipBrowserAuth === true;
+      this.authorizationPrepared = true;
+    } catch (error2) {
+      this.resetAuthorizationState();
+      throw error2;
+    }
+  }
+  async readAuthorizationTransaction() {
+    return await readJsonFile(this.serverUrlHash, "authorization.json", AuthorizationTransactionSchema);
+  }
+  isTransactionExpired(transaction) {
+    const authTimeoutMs = this.options.authTimeoutMs ?? 3e4;
+    return transaction.createdAt + authTimeoutMs < Date.now();
+  }
+  resetAuthorizationState() {
+    this.authorizationState = "ready";
+    this.callbackState = void 0;
+    this.authorizationPrepared = false;
+    this.sharedAuthorization = false;
+    this._state = randomUUID2();
+  }
 };
 
 // src/lib/coordination.ts
 import express2 from "express";
-import { unlinkSync } from "fs";
+import net2 from "net";
+var LEASE_GUARD_PORT_BASE = 49152;
+var LEASE_GUARD_PORT_COUNT = 16384;
+var LEASE_GUARD_PORT_ATTEMPTS = 32;
+var LEASE_GUARD_RETRY_MS = 25;
+var LEASE_GUARD_PROBE_TIMEOUT_MS = 250;
+function getLeaseGuardPort(serverUrlHash, attempt) {
+  const initial = Number.parseInt(serverUrlHash.slice(0, 8), 16);
+  const seed = Number.isNaN(initial) ? Array.from(serverUrlHash).reduce((total, character) => total + character.charCodeAt(0), 0) : initial;
+  return LEASE_GUARD_PORT_BASE + (seed + attempt * 6425) % LEASE_GUARD_PORT_COUNT;
+}
+async function isLeaseGuard(port, signature) {
+  return await new Promise((resolve) => {
+    const socket = net2.createConnection({ host: "127.0.0.1", port });
+    let response = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      finish("ambiguous");
+    }, LEASE_GUARD_PROBE_TIMEOUT_MS);
+    socket.once("connect", () => socket.write(signature));
+    socket.on("data", (chunk) => {
+      response += chunk.toString();
+      if (response === signature) {
+        finish("guard");
+      } else if (!signature.startsWith(response)) {
+        finish("unrelated");
+      }
+    });
+    socket.once("end", () => {
+      finish(response === signature ? "guard" : "unrelated");
+    });
+    socket.once("error", () => {
+      finish("ambiguous");
+    });
+  });
+}
+async function acquireLeaseMutationGuard(serverUrlHash, timeoutMs) {
+  const signature = `mcp-remote-oauth-lease:${serverUrlHash}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let waitForExistingGuard = false;
+    for (let attempt = 0; attempt < LEASE_GUARD_PORT_ATTEMPTS; attempt++) {
+      const port = getLeaseGuardPort(serverUrlHash, attempt);
+      const server = net2.createServer((socket) => {
+        let request = "";
+        let completed = false;
+        const timeout = setTimeout(() => {
+          socket.destroy();
+        }, LEASE_GUARD_PROBE_TIMEOUT_MS);
+        socket.on("data", (chunk) => {
+          if (completed) return;
+          request += chunk.toString();
+          if (request === signature) {
+            completed = true;
+            clearTimeout(timeout);
+            socket.end(signature);
+            return;
+          }
+          if (!signature.startsWith(request)) {
+            completed = true;
+            clearTimeout(timeout);
+            socket.destroy();
+          }
+        });
+        socket.once("end", () => clearTimeout(timeout));
+        socket.once("error", () => clearTimeout(timeout));
+      });
+      try {
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(port, "127.0.0.1", () => {
+            server.off("error", reject);
+            resolve();
+          });
+        });
+        return async () => {
+          await new Promise((resolve) => server.close(() => resolve()));
+        };
+      } catch (error2) {
+        if (error2.code !== "EADDRINUSE") {
+          throw error2;
+        }
+        if (await isLeaseGuard(port, signature) !== "unrelated") {
+          waitForExistingGuard = true;
+          break;
+        }
+      }
+    }
+    if (!waitForExistingGuard) {
+      throw new Error("Unable to reserve a local OAuth lease-mutation guard port");
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(LEASE_GUARD_RETRY_MS, remainingMs)));
+    }
+  }
+  throw new Error(`Timed out waiting for the OAuth lease-mutation guard after ${timeoutMs / 1e3} seconds`);
+}
+async function withLeaseMutationGuard(serverUrlHash, timeoutMs, action) {
+  const release = await acquireLeaseMutationGuard(serverUrlHash, timeoutMs);
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
 async function isPidRunning(pid2) {
   try {
     process.kill(pid2, 0);
@@ -21517,20 +21863,13 @@ async function isPidRunning(pid2) {
 }
 async function isLockValid(lockData) {
   debugLog("Checking if lockfile is valid", lockData);
-  const MAX_LOCK_AGE = 30 * 60 * 1e3;
-  if (Date.now() - lockData.timestamp > MAX_LOCK_AGE) {
-    log("Lockfile is too old");
-    debugLog("Lockfile is too old", {
-      age: Date.now() - lockData.timestamp,
-      maxAge: MAX_LOCK_AGE
-    });
-    return false;
-  }
   if (!await isPidRunning(lockData.pid)) {
     log("Process from lockfile is not running");
     debugLog("Process from lockfile is not running", { pid: lockData.pid });
     return false;
   }
+  const LOCK_STARTUP_GRACE_MS = 5e3;
+  const leaseDeadlineMs = lockData.expiresAt ?? lockData.timestamp + 3e4;
   try {
     debugLog("Checking if endpoint is accessible", { port: lockData.port });
     const controller = new AbortController();
@@ -21543,18 +21882,48 @@ async function isLockValid(lockData) {
     debugLog(`Endpoint check result: ${isValid2 ? "valid" : "invalid"}`, { status: response.status });
     return isValid2;
   } catch (error2) {
-    log(`Error connecting to auth server: ${error2.message}`);
-    debugLog("Error connecting to auth server", error2);
-    return false;
+    if (Date.now() >= leaseDeadlineMs) {
+      debugLog("OAuth callback endpoint is unavailable after its authorization deadline", { port: lockData.port, leaseDeadlineMs });
+      return false;
+    }
+    if (Date.now() - lockData.timestamp < LOCK_STARTUP_GRACE_MS) {
+      debugLog("OAuth callback server is still starting; retaining its lease", { port: lockData.port });
+      return true;
+    }
+    debugLog("OAuth callback endpoint is unavailable but owner is still alive; retaining its lease", error2);
+    return true;
   }
 }
-async function waitForAuthentication(port, authTimeoutMs = 3e4) {
-  log(`Waiting for authentication from the server on port ${port}...`);
+async function waitForAuthentication(portOrServerUrlHash, authTimeoutMs = 3e4, expectedLeaseId) {
+  const serverUrlHash = typeof portOrServerUrlHash === "string" ? portOrServerUrlHash : void 0;
+  let port = typeof portOrServerUrlHash === "number" ? portOrServerUrlHash : void 0;
+  log(`Waiting for authentication from the server on ${port ? `port ${port}` : "the shared OAuth lease"}...`);
   try {
     let attempts = 0;
     const deadline = Date.now() + authTimeoutMs;
     while (Date.now() < deadline) {
       attempts++;
+      if (serverUrlHash) {
+        const lockData = await checkLockfile(serverUrlHash);
+        if (!lockData) {
+          const completion = expectedLeaseId ? await checkAuthorizationCompletion(serverUrlHash) : null;
+          return completion?.leaseId === expectedLeaseId;
+        }
+        if (expectedLeaseId && lockData.leaseId !== expectedLeaseId) {
+          return false;
+        }
+        if (!await isPidRunning(lockData.pid)) {
+          return false;
+        }
+        port = lockData.port;
+      }
+      if (!port) {
+        const remainingAfterLeaseReadMs = deadline - Date.now();
+        if (remainingAfterLeaseReadMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(50, remainingAfterLeaseReadMs)));
+        }
+        continue;
+      }
       const url2 = `http://127.0.0.1:${port}/wait-for-auth?poll=false`;
       log(`Querying: ${url2}`);
       debugLog(`Poll attempt ${attempts}`);
@@ -21601,106 +21970,203 @@ async function waitForAuthentication(port, authTimeoutMs = 3e4) {
 }
 function createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs) {
   let authState = null;
+  let initialization = null;
+  let cleanup = null;
+  const closeCallbackServer = async (server) => {
+    if (!server.listening) {
+      return;
+    }
+    server.closeAllConnections?.();
+    await new Promise((resolve) => {
+      server.close(() => resolve());
+    });
+  };
+  const releaseAuthorization = async (state, completed) => {
+    if (authState !== state) {
+      await cleanup;
+      return;
+    }
+    authState = null;
+    const currentCleanup = (async () => {
+      if (!state.skipBrowserAuth) {
+        await withLeaseMutationGuard(serverUrlHash, state.authTimeoutMs, async () => {
+          if (completed && state.leaseId) {
+            await writeAuthorizationCompletion(serverUrlHash, state.leaseId);
+          }
+          await deleteLockfile(serverUrlHash, state.leaseId);
+          await closeCallbackServer(state.server);
+        });
+        return;
+      }
+      await closeCallbackServer(state.server);
+    })();
+    cleanup = currentCleanup;
+    try {
+      await currentCleanup;
+    } finally {
+      if (cleanup === currentCleanup) {
+        cleanup = null;
+      }
+    }
+  };
   return {
     initializeAuth: async () => {
       if (authState) {
         debugLog("Auth already initialized, reusing existing state");
         return authState;
       }
+      if (initialization) {
+        debugLog("Auth coordination is already initializing, waiting for it");
+        return await initialization;
+      }
+      if (cleanup) {
+        debugLog("Waiting for the previous OAuth round to release its lease");
+        await cleanup;
+      }
       log("Initializing auth coordination on-demand");
       debugLog("Initializing auth coordination on-demand", { serverUrlHash, callbackPort });
-      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs);
-      debugLog("Auth coordination completed", { skipBrowserAuth: authState.skipBrowserAuth });
-      return authState;
+      initialization = (async () => {
+        const coordinated = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs);
+        const state = {
+          ...coordinated,
+          markAuthCompleted: async () => {
+            coordinated.markAuthCompleted();
+            await releaseAuthorization(state, true);
+          },
+          abortAuthorization: async () => {
+            await releaseAuthorization(state, false);
+          }
+        };
+        authState = state;
+        debugLog("Auth coordination completed", { skipBrowserAuth: state.skipBrowserAuth });
+        return state;
+      })();
+      try {
+        return await initialization;
+      } finally {
+        initialization = null;
+      }
+    },
+    resetSharedAuthorization: async () => {
+      if (!authState?.skipBrowserAuth) {
+        return;
+      }
+      await authState.abortAuthorization();
+    },
+    abortAuthorization: async () => {
+      if (authState) {
+        await authState.abortAuthorization();
+        return;
+      }
+      await cleanup;
     }
   };
 }
 async function coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs) {
   debugLog("Coordinating authentication", { serverUrlHash, callbackPort });
-  const lockData = process.platform === "win32" ? null : await checkLockfile(serverUrlHash);
-  if (process.platform === "win32") {
-    debugLog("Skipping lockfile check on Windows");
-  } else {
-    debugLog("Lockfile check result", { found: !!lockData, lockData });
-  }
-  if (lockData && await isLockValid(lockData)) {
-    log(`Another instance is handling authentication on port ${lockData.port} (pid: ${lockData.pid})`);
-    const dummyServer = express2().listen(0);
-    const dummyPort = dummyServer.address().port;
-    debugLog("Started dummy server", { port: dummyPort });
-    const dummyWaitForAuthCode = () => {
-      log("WARNING: waitForAuthCode called in secondary instance - this is unexpected");
-      return new Promise(() => {
-      });
-    };
-    return {
-      server: dummyServer,
-      waitForAuthCode: dummyWaitForAuthCode,
-      waitForNextAuthCode: dummyWaitForAuthCode,
-      waitForSharedAuthorization: () => waitForAuthentication(lockData.port, authTimeoutMs),
-      beginAuthorization: () => {
-      },
-      markAuthCompleted: () => {
-      },
-      authTimeoutMs,
-      skipBrowserAuth: true
-    };
-  } else if (lockData) {
-    log("Found invalid lockfile, deleting it");
-    await deleteLockfile(serverUrlHash);
-  }
-  debugLog("Setting up OAuth callback server", { port: callbackPort });
-  const { server, waitForAuthCode, waitForNextAuthCode, beginAuthorization, markAuthCompleted } = setupOAuthCallbackServerWithLongPoll({
-    port: callbackPort,
-    path: "/oauth/callback",
-    events,
-    authTimeoutMs
-  });
-  let address = server.address();
-  if (!address) {
-    await new Promise((resolve) => server.once("listening", resolve));
-    address = server.address();
-  }
-  if (!address) {
-    throw new Error("Failed to get server address after listening event");
-  }
-  const actualPort = address.port;
-  debugLog("OAuth callback server running", { port: actualPort });
-  log(`Creating lockfile for server ${serverUrlHash} with process ${process.pid} on port ${actualPort}`);
-  await createLockfile(serverUrlHash, process.pid, actualPort);
-  const cleanupHandler = async () => {
-    try {
-      log(`Cleaning up lockfile for server ${serverUrlHash}`);
-      await deleteLockfile(serverUrlHash);
-    } catch (error2) {
-      log(`Error cleaning up lockfile: ${error2}`);
-      debugLog("Error cleaning up lockfile", error2);
+  while (true) {
+    const coordinated = await withLeaseMutationGuard(serverUrlHash, authTimeoutMs, async () => {
+      const lockData = process.platform === "win32" ? null : await checkLockfile(serverUrlHash);
+      if (process.platform === "win32") {
+        debugLog("Skipping lockfile check on Windows");
+      } else {
+        debugLog("Lockfile check result", { found: !!lockData, lockData });
+      }
+      if (lockData && await isLockValid(lockData)) {
+        log(`Another instance is handling authentication on port ${lockData.port} (pid: ${lockData.pid})`);
+        const dummyServer = express2().listen(0);
+        const dummyPort = dummyServer.address().port;
+        debugLog("Started dummy server", { port: dummyPort });
+        const dummyWaitForAuthCode = () => {
+          log("WARNING: waitForAuthCode called in secondary instance - this is unexpected");
+          return new Promise(() => {
+          });
+        };
+        return {
+          server: dummyServer,
+          waitForAuthCode: dummyWaitForAuthCode,
+          waitForNextAuthCode: dummyWaitForAuthCode,
+          waitForSharedAuthorization: () => waitForAuthentication(serverUrlHash, authTimeoutMs, lockData.leaseId),
+          beginAuthorization: () => {
+          },
+          markAuthCompleted: () => {
+          },
+          authTimeoutMs,
+          skipBrowserAuth: true,
+          leaseId: lockData.leaseId
+        };
+      }
+      if (lockData) {
+        log("Found invalid lockfile, deleting it");
+        await deleteLockfile(serverUrlHash, lockData.leaseId);
+      }
+      const claimedCallbackPort = callbackPort || await findAvailablePort();
+      const claimedLease = await createLockfile(serverUrlHash, process.pid, claimedCallbackPort, authTimeoutMs);
+      if (!claimedLease) {
+        return null;
+      }
+      debugLog("Setting up OAuth callback server", { port: claimedCallbackPort });
+      let server;
+      let waitForAuthCode;
+      let waitForNextAuthCode;
+      let beginAuthorization;
+      let markAuthCompleted;
+      try {
+        ;
+        ({ server, waitForAuthCode, waitForNextAuthCode, beginAuthorization, markAuthCompleted } = setupOAuthCallbackServerWithLongPoll({
+          port: claimedCallbackPort,
+          path: "/oauth/callback",
+          events,
+          authTimeoutMs
+        }));
+        if (!server.listening) {
+          await new Promise((resolve, reject) => {
+            function onListening() {
+              server.off("error", onError);
+              resolve();
+            }
+            function onError(listenError) {
+              server.off("listening", onListening);
+              reject(listenError);
+            }
+            server.once("listening", onListening);
+            server.once("error", onError);
+          });
+        }
+      } catch (error2) {
+        await deleteLockfile(serverUrlHash, claimedLease.leaseId);
+        throw error2;
+      }
+      const address = server.address();
+      if (!address) {
+        await deleteLockfile(serverUrlHash, claimedLease.leaseId);
+        server.close();
+        throw new Error("Failed to get server address after listening event");
+      }
+      const actualPort = address.port;
+      debugLog("OAuth callback server running", { port: actualPort });
+      if (actualPort !== claimedCallbackPort) {
+        await deleteLockfile(serverUrlHash, claimedLease.leaseId);
+        server.close();
+        throw new Error("OAuth callback server bound a port different from its claimed lease");
+      }
+      debugLog("Auth coordination complete, returning primary instance handlers");
+      return {
+        server,
+        waitForAuthCode,
+        waitForNextAuthCode,
+        waitForSharedAuthorization: async () => true,
+        beginAuthorization,
+        markAuthCompleted,
+        authTimeoutMs,
+        skipBrowserAuth: false,
+        leaseId: claimedLease.leaseId
+      };
+    });
+    if (coordinated) {
+      return coordinated;
     }
-  };
-  process.once("exit", () => {
-    try {
-      const configPath = getConfigFilePath(serverUrlHash, "lock.json");
-      unlinkSync(configPath);
-      debugLog(`Removed lockfile on exit: ${configPath}`);
-    } catch (error2) {
-      debugLog(`Error removing lockfile on exit:`, error2);
-    }
-  });
-  process.once("SIGINT", async () => {
-    debugLog("Received SIGINT signal, cleaning up");
-    await cleanupHandler();
-  });
-  debugLog("Auth coordination complete, returning primary instance handlers");
-  return {
-    server,
-    waitForAuthCode,
-    waitForNextAuthCode,
-    waitForSharedAuthorization: async () => true,
-    beginAuthorization,
-    markAuthCompleted,
-    authTimeoutMs,
-    skipBrowserAuth: false
-  };
+  }
 }
 
 export {
@@ -21708,12 +22174,13 @@ export {
   ListResourcesResultSchema,
   ListToolsResultSchema,
   Client,
+  OAuthCallbackStateError,
   version2 as version,
   debugLog,
   log,
   mcpProxy,
   discoverOAuthServerInfo,
-  finishOAuthAuthorization,
+  finishOAuthCallbackAuthorization,
   connectToRemoteServer,
   parseCommandLineArgs,
   setupSignalHandlers,

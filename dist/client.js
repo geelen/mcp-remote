@@ -12,7 +12,7 @@ import {
   parseCommandLineArgs,
   setupSignalHandlers,
   version
-} from "./chunk-YZXW5VW3.js";
+} from "./chunk-BJUMBZCX.js";
 
 // src/client.ts
 import { EventEmitter } from "events";
@@ -43,6 +43,7 @@ async function runClient(serverUrl, callbackPort, headers, transportStrategy = "
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    authTimeoutMs,
     prepareAuthorization: async () => {
       const authState = await authCoordinator.initializeAuth();
       server = authState.server;
@@ -71,6 +72,7 @@ async function runClient(serverUrl, callbackPort, headers, transportStrategy = "
       waitForAuthCode: authState.waitForAuthCode,
       waitForSharedAuthorization: authState.waitForSharedAuthorization,
       markAuthCompleted: authState.markAuthCompleted,
+      abortAuthorization: authState.abortAuthorization,
       authTimeoutMs: authState.authTimeoutMs,
       skipBrowserAuth: authState.skipBrowserAuth
     };

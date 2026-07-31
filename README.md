@@ -311,15 +311,11 @@ Know of more resources you'd like to share? Please add them to this Readme and s
 
 ## Troubleshooting
 
-### Clear your `~/.mcp-auth` directory
+### OAuth recovery
 
-`mcp-remote` stores all the credential information inside `~/.mcp-auth` (or wherever your `MCP_REMOTE_CONFIG_DIR` points to). If you're having persistent issues, try running:
+`mcp-remote` stores credentials in `~/.mcp-auth` (or `MCP_REMOTE_CONFIG_DIR`), scoped to each remote-server configuration. Expired or rejected tokens, stale dynamic client registrations, delayed callbacks, and concurrent local clients recover automatically: one process owns the browser flow while other clients receive a retryable pending response.
 
-```sh
-rm -rf ~/.mcp-auth
-```
-
-Then restarting your MCP client.
+Do not delete the whole directory for a recoverable authentication error. If recovery still fails, enable debug logging and retain the affected server's files so the failure can be diagnosed.
 
 ### Check your Node version
 
@@ -387,7 +383,7 @@ Authentication Error
 Token exchange failed: HTTP 400
 ```
 
-You can run `rm -rf ~/.mcp-auth` to clear any locally stored state and tokens.
+The failed transaction is retired automatically; retry the MCP request to begin one fresh authorization flow. A repeated HTTP 400 may instead indicate a server-side or static-client configuration problem, so use debug logs rather than clearing unrelated server credentials.
 
 ### "Client" mode
 
@@ -397,4 +393,4 @@ Run the following on the command line (not from an MCP server):
 npx -p mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
 ```
 
-This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Try this after running `rm -rf ~/.mcp-auth` to see if stale credentials are your problem, otherwise hopefully the issue will be more obvious in these logs than those in your MCP client.
+This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Use it to distinguish a remote OAuth/server error from an MCP-client integration issue.

@@ -22,6 +22,8 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   let provider: NodeOAuthClientProvider
   let mockReadJsonFile: any
   let mockWriteJsonFile: any
+  let mockReadTextFile: any
+  let mockWriteTextFile: any
   let mockDeleteConfigFile: any
   let mockFetch: ReturnType<typeof vi.fn>
 
@@ -35,10 +37,14 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   beforeEach(() => {
     mockReadJsonFile = vi.mocked(mcpAuthConfig.readJsonFile)
     mockWriteJsonFile = vi.mocked(mcpAuthConfig.writeJsonFile)
+    mockReadTextFile = vi.mocked(mcpAuthConfig.readTextFile)
+    mockWriteTextFile = vi.mocked(mcpAuthConfig.writeTextFile)
     mockDeleteConfigFile = vi.mocked(mcpAuthConfig.deleteConfigFile)
 
     mockReadJsonFile.mockResolvedValue(undefined)
     mockWriteJsonFile.mockResolvedValue(undefined)
+    mockReadTextFile.mockResolvedValue('legacy-verifier')
+    mockWriteTextFile.mockResolvedValue(undefined)
     mockDeleteConfigFile.mockResolvedValue(undefined)
   })
 
@@ -181,9 +187,9 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
           signal: expect.any(AbortSignal),
         }),
       )
-      expect(mockDeleteConfigFile).toHaveBeenCalledTimes(3)
+      expect(mockDeleteConfigFile).toHaveBeenCalledTimes(4)
       expect(mockDeleteConfigFile.mock.calls.map(([, fileName]: [string, string]) => fileName)).toEqual(
-        expect.arrayContaining(['client_info.json', 'tokens.json', 'code_verifier.txt']),
+        expect.arrayContaining(['client_info.json', 'tokens.json', 'authorization.json', 'code_verifier.txt']),
       )
       expect(open).not.toHaveBeenCalled()
     })
@@ -499,6 +505,122 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       const clientMetadata = provider.clientMetadata
       // Empty scope should fallback to default
       expect(clientMetadata.scope).toBe('openid email profile')
+    })
+  })
+
+  describe('PKCE authorization transactions', () => {
+    it('creates one state-bound transaction and rejects a concurrent verifier write', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      const state = provider.state()
+
+      await provider.saveCodeVerifier('verifier-one')
+
+      expect(mockWriteJsonFile).toHaveBeenCalledWith(
+        'test-hash',
+        'authorization.json',
+        expect.objectContaining({
+          version: 1,
+          state,
+          codeVerifier: 'verifier-one',
+          createdAt: expect.any(Number),
+        }),
+      )
+      await expect(provider.saveCodeVerifier('verifier-two')).rejects.toMatchObject({
+        name: 'OAuthAuthorizationPendingError',
+      })
+      expect(mockWriteJsonFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('accepts a callback only when its state matches the persisted PKCE transaction', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      const state = provider.state()
+      mockReadJsonFile.mockResolvedValue({
+        version: 1,
+        state,
+        codeVerifier: 'verifier-one',
+        createdAt: Date.now(),
+      })
+
+      await expect(provider.acceptAuthorizationCallback('old-state')).rejects.toMatchObject({
+        name: 'OAuthCallbackStateError',
+      })
+      expect(mockReadTextFile).not.toHaveBeenCalled()
+
+      await provider.acceptAuthorizationCallback(state)
+      await expect(provider.codeVerifier()).resolves.toBe('verifier-one')
+      expect(mockReadTextFile).not.toHaveBeenCalled()
+    })
+
+    it('uses a legacy verifier only when no state-bound transaction exists', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValue(undefined)
+
+      await expect(provider.codeVerifier()).resolves.toBe('legacy-verifier')
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', 'code_verifier.txt', 'No code verifier saved for session')
+    })
+
+    it('retires an expired transaction when its delayed callback arrives', async () => {
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, authTimeoutMs: 20 })
+      const state = provider.state()
+      mockReadJsonFile.mockResolvedValue({
+        version: 1,
+        state,
+        codeVerifier: 'expired-verifier',
+        createdAt: Date.now() - 21,
+      })
+
+      await expect(provider.acceptAuthorizationCallback(state)).rejects.toMatchObject({
+        name: 'OAuthCallbackStateError',
+      })
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'authorization.json')
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'code_verifier.txt')
+    })
+
+    it('does not retire a transaction owned by another process when reusing an existing token', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.markRemoteAuthorizationVerified()
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('resets a failed secondary authorization without deleting the owner credentials', async () => {
+      const prepareAuthorization = vi.fn().mockResolvedValue({ skipBrowserAuth: true })
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, prepareAuthorization })
+      await provider.saveCodeVerifier('secondary-verifier')
+
+      await provider.handleAuthorizationFailure(new Error('Shared OAuth authorization did not complete'))
+      await provider.saveCodeVerifier('fresh-verifier')
+
+      expect(prepareAuthorization).toHaveBeenCalledTimes(2)
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('ignores late tokens from a timed-out authorization exchange', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      const state = provider.state()
+      mockReadJsonFile.mockResolvedValue({ version: 1, state, codeVerifier: 'verifier-one', createdAt: Date.now() })
+      await provider.acceptAuthorizationCallback(state)
+
+      const lateExchange = provider.runAuthorizationExchange(state, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        await provider.saveTokens({ access_token: 'late-token', token_type: 'Bearer' })
+      })
+      await provider.invalidateCredentials('tokens')
+      await lateExchange
+
+      expect(mockWriteJsonFile).not.toHaveBeenCalledWith('test-hash', 'tokens.json', expect.anything())
+    })
+
+    it('retires the authorization transaction when an OAuth token is invalidated', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.invalidateCredentials('tokens')
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'authorization.json')
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'code_verifier.txt')
     })
   })
 })

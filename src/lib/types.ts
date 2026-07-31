@@ -26,6 +26,23 @@ export class OAuthTokenVerificationPendingError extends Error {
 }
 
 /**
+ * Raised when an OAuth callback does not belong to the authorization
+ * transaction currently owned by this provider.
+ */
+export class OAuthCallbackStateError extends Error {
+  constructor() {
+    super('OAuth callback state does not match the pending authorization')
+    this.name = 'OAuthCallbackStateError'
+  }
+}
+
+/** A browser callback that can be safely paired with its PKCE transaction. */
+export type OAuthCallback = {
+  code: string
+  state: string
+}
+
+/**
  * Options for creating an OAuth client provider
  */
 export interface OAuthProviderOptions {
@@ -61,6 +78,8 @@ export interface OAuthProviderOptions {
   protectedResourceMetadata?: ProtectedResourceMetadata
   /** Scope extracted from WWW-Authenticate header */
   wwwAuthenticateScope?: string
+  /** Maximum lifetime for one browser authorization transaction. */
+  authTimeoutMs?: number
   /**
    * Prepares the local OAuth callback coordination before a browser is opened.
    * A secondary process can report that a primary process completed the flow,
