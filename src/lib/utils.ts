@@ -201,7 +201,26 @@ export function mcpProxy({
       debugLog('Initialize message with modified client info', { clientInfo })
     }
 
-    transportToServer.send(message).catch(onServerError)
+    transportToServer.send(message).catch((error) => {
+      onServerError(error)
+
+      // If forwarding a request fails, the local client would wait forever
+      // for a response that never arrives (e.g. the server expired the
+      // session and answers 404, see #106). Surface the failure as a
+      // JSON-RPC error response instead. Notifications carry no id and
+      // must not be answered.
+      if (message.id !== undefined && message.id !== null) {
+        const errorResponse = {
+          jsonrpc: '2.0' as const,
+          id: message.id,
+          error: {
+            code: -32603,
+            message: `Failed to forward message to remote server: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        }
+        transportToClient.send(errorResponse).catch(onClientError)
+      }
+    })
   }
 
   transportToServer.onmessage = (_message) => {
