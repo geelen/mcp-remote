@@ -4,6 +4,8 @@ Connect an MCP Client that only supports local (stdio) servers to a Remote MCP S
 
 **Note: this is a working proof-of-concept** but should be considered **experimental**.
 
+Requires Node.js 22.5 or later.
+
 ## Why is this necessary?
 
 So far, the majority of MCP servers in the wild are installed locally, using the stdio transport. This has some benefits: both the client and the server can implicitly trust each other as the user has granted them both permission to run. Adding secrets like API keys can be done using environment variables and never leave your machine. And building on `npx` and `uvx` has allowed users to avoid explicit install steps, too.
@@ -103,6 +105,17 @@ To run multiple instances of the same remote server with different configuration
 
 Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
 
+### Credential storage
+
+`mcp-remote` keeps local OAuth state in `~/.config/mcp-remote`, following the same storage layout as the gcloud CLI:
+
+- `credentials.db` holds refresh tokens, dynamic client registrations, and PKCE verifiers.
+- `access_tokens.db` holds short-lived access tokens and expiry timestamps.
+
+The directory is owner-only (`0700`) and both databases are owner-read/write only (`0600`). Set `MCP_REMOTE_CONFIG_DIR` to use another owner-controlled directory.
+
+Previous `~/.mcp-auth` JSON records are not imported automatically. Reauthorize each connection after upgrading so that long-lived OAuth credentials do not remain duplicated across storage formats.
+
 ### Flags
 
 * If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.
@@ -156,7 +169,7 @@ Each unique combination of server URL, resource, and custom headers will maintai
       ]
 ```
 
-* To enable detailed debugging logs, add the `--debug` flag. This will write verbose logs to `~/.mcp-auth/{server_hash}_debug.log` with timestamps and detailed information about the auth process, connections, and token refreshing.
+* To enable detailed debugging logs, add the `--debug` flag. This will write verbose logs to `~/.config/mcp-remote/{server_hash}_debug.log` with timestamps and detailed information about the auth process, connections, and token refreshing.
 
 ```json
       "args": [
@@ -311,20 +324,19 @@ Know of more resources you'd like to share? Please add them to this Readme and s
 
 ## Troubleshooting
 
-### Clear your `~/.mcp-auth` directory
+### Clear stored credentials
 
-`mcp-remote` stores all the credential information inside `~/.mcp-auth` (or wherever your `MCP_REMOTE_CONFIG_DIR` points to). If you're having persistent issues, try running:
+To remove the OAuth credentials for all remote servers on this machine, run:
 
 ```sh
-rm -rf ~/.mcp-auth
+rm -f ~/.config/mcp-remote/credentials.db ~/.config/mcp-remote/access_tokens.db
 ```
 
 Then restarting your MCP client.
 
 ### Check your Node version
 
-Make sure that the version of Node you have installed is [18 or
-higher](https://modelcontextprotocol.io/quickstart/server). Claude
+Make sure that the version of Node you have installed is 22.5 or higher. Claude
 Desktop will use your system version of Node, even if you have a newer
 version installed elsewhere.
 
@@ -376,7 +388,7 @@ For troubleshooting complex issues, especially with token refreshing or authenti
 ]
 ```
 
-This creates detailed logs in `~/.mcp-auth/{server_hash}_debug.log` with timestamps and complete information about every step of the connection and authentication process. When you find issues with token refreshing, laptop sleep/resume issues, or auth problems, provide these logs when seeking support.
+This creates detailed logs in `~/.config/mcp-remote/{server_hash}_debug.log` with timestamps and complete information about every step of the connection and authentication process. When you find issues with token refreshing, laptop sleep/resume issues, or auth problems, provide these logs when seeking support.
 
 ### Authentication Errors
 
@@ -387,7 +399,7 @@ Authentication Error
 Token exchange failed: HTTP 400
 ```
 
-You can run `rm -rf ~/.mcp-auth` to clear any locally stored state and tokens.
+You can remove `~/.config/mcp-remote/credentials.db` and `~/.config/mcp-remote/access_tokens.db` to clear locally stored credentials and tokens.
 
 ### "Client" mode
 
@@ -397,4 +409,4 @@ Run the following on the command line (not from an MCP server):
 npx -p mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
 ```
 
-This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Try this after running `rm -rf ~/.mcp-auth` to see if stale credentials are your problem, otherwise hopefully the issue will be more obvious in these logs than those in your MCP client.
+This will run through the entire authorization flow and attempt to list the tools and resources at the remote URL. Try this after removing the credential databases to see if stale credentials are the issue, otherwise the logs should show the connection failure.

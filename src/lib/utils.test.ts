@@ -86,6 +86,20 @@ describe('Feature: Command Line Arguments Parsing', () => {
     })
   })
 
+  it('Scenario: Does not log custom header values', async () => {
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      await parseCommandLineArgs(['https://example.com/sse', '--header', 'Authorization: Bearer not-a-real-secret'], 'test usage')
+
+      const logOutput = logSpy.mock.calls.flat().join(' ')
+      expect(logOutput).toContain('Using custom header names: Authorization')
+      expect(logOutput).not.toContain('not-a-real-secret')
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
   it('Scenario: Ignore invalid header format', async () => {
     // Given command line arguments with an invalid header format
     const args = ['https://example.com/sse', '--header', 'invalid-header-format']
