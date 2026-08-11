@@ -3,6 +3,7 @@ import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackSe
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
+import net from 'net'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
@@ -1024,6 +1025,37 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+
+  it('should fall back to an available port instead of crashing when the port is already in use', async () => {
+    // Given another process already listening on the callback port
+    const blocker = net.createServer()
+    const blockedPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
+    })
+
+    try {
+      // When setting up the callback server on that same port
+      const result = setupOAuthCallbackServerWithLongPoll({
+        port: blockedPort,
+        path: '/oauth/callback',
+        events,
+      })
+      server = result.server
+
+      // Then it should end up listening on a different port rather than emitting an unhandled 'error'
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('callback server never started listening')), 5000)
+        server.once('listening', () => {
+          clearTimeout(timeout)
+          resolve()
+        })
+      })
+
+      expect((server.address() as net.AddressInfo).port).not.toBe(blockedPort)
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
   })
 })
 

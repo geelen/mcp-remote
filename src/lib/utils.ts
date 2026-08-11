@@ -645,8 +645,27 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, '127.0.0.1', () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  const server = app.listen(options.port, '127.0.0.1')
+
+  server.on('listening', () => {
+    const { port } = server.address() as net.AddressInfo
+    log(`OAuth callback server running at http://127.0.0.1:${port}`)
+  })
+
+  // Without an 'error' listener a failed bind is an unhandled 'error' event, which takes down the whole
+  // process. EADDRINUSE is expected here: the callback port is derived from the server URL hash and then
+  // pinned in client_info.json, so concurrent instances for the same server all try to bind the same port.
+  // Retry on an OS-assigned port instead, the same way findAvailablePort() does.
+  let retriedOnAvailablePort = false
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && !retriedOnAvailablePort) {
+      retriedOnAvailablePort = true
+      log(`Callback port ${options.port} is already in use, retrying on an available port`)
+      server.listen(0, '127.0.0.1')
+      return
+    }
+
+    log(`OAuth callback server error: ${err.message}`)
   })
 
   const waitForAuthCode = (): Promise<string> => {
