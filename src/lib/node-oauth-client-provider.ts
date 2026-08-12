@@ -15,6 +15,15 @@ import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
 
+function scopeNames(scope: string | undefined): Set<string> {
+  return new Set(scope?.trim().split(/\s+/).filter(Boolean) ?? [])
+}
+
+function includesRequestedScopes(grantedScope: string | undefined, requestedScope: string): boolean {
+  const granted = scopeNames(grantedScope)
+  return [...scopeNames(requestedScope)].every((scope) => granted.has(scope))
+}
+
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
  * Handles OAuth flow and token storage for MCP clients.
@@ -196,6 +205,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
 
     if (tokens) {
+      const requestedScope = this.getEffectiveScope()
+      if (!includesRequestedScopes(tokens.scope, requestedScope)) {
+        debugLog('Stored OAuth token does not cover the requested scopes; reauthorization is required', {
+          grantedScopes: tokens.scope ?? '(not recorded)',
+          requestedScopes: requestedScope,
+        })
+        await this.invalidateCredentials('tokens')
+        return undefined
+      }
+
       const timeLeft = tokens.expires_in || 0
 
       // Alert if expires_in is invalid
@@ -245,7 +264,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       expiresInValue: tokens.expires_in,
     })
 
-    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+    // OAuth servers may omit scope when granting exactly what was requested. Persist the effective
+    // scope so that a later connection requesting an additional scope can trigger reauthorization.
+    await writeJsonFile(this.serverUrlHash, 'tokens.json', {
+      ...tokens,
+      scope: tokens.scope ?? this.getEffectiveScope(),
+    })
   }
 
   /**

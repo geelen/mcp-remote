@@ -161,6 +161,63 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('stored token scopes', () => {
+    it('requests reauthorization when the stored token is missing a requested scope', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+      mockReadJsonFile.mockResolvedValue({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.read',
+      })
+
+      await expect(provider.tokens()).resolves.toBeUndefined()
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+    })
+
+    it('reuses a stored token when it covers every requested scope', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+      const tokens = {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.write license.read offline_access',
+      }
+      mockReadJsonFile.mockResolvedValue(tokens)
+
+      await expect(provider.tokens()).resolves.toEqual(tokens)
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('records the requested scope when an OAuth server omits it from the token response', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+
+      await provider.saveTokens({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+      })
+
+      expect(mockWriteJsonFile).toHaveBeenCalledWith('test-hash', 'tokens.json', {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.read license.write',
+      })
+    })
+  })
+
   describe('scopes_supported parsing', () => {
     it('should use custom scopes without filtering', () => {
       const metadata: AuthorizationServerMetadata = {
