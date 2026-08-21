@@ -80,24 +80,18 @@ describe('connectToRemoteServer', () => {
       skipBrowserAuth: false,
     })
 
-    // Proxy mode passes `client = null`, which drives the throwaway test-transport probe path.
+    // Proxy mode passes `client = null`. This branch reuses the *same* transport for the
+    // capability probe rather than building a throwaway one, so the 401 - and the
+    // resource_metadata URL the SDK stores from it - lands on the transport we finish auth on.
     await connectToRemoteServer(null, 'https://mcp.example.com/mcp', {} as any, {}, authInitializer, 'http-first')
 
-    // Instances, in construction order:
-    //   [0] first attempt's main transport   (never sees the 401)
-    //   [1] first attempt's test transport    (receives the 401 -> stores resource_metadata)
-    //   [2] second attempt's main transport   (connects successfully after auth)
-    //   [3] second attempt's test transport
-    const [mainTransport, testTransport] = mockState.httpTransports
-    expect(mockState.httpTransports.length).toBeGreaterThanOrEqual(2)
+    expect(mockState.httpTransports.length).toBeGreaterThanOrEqual(1)
+    const [challengeTransport] = mockState.httpTransports
 
-    // The fix: finishAuth must run on the transport that actually handled the challenge,
-    // so the stored resource_metadata URL drives token_endpoint discovery.
-    expect(testTransport.finishAuth).toHaveBeenCalledTimes(1)
-    expect(testTransport.finishAuth).toHaveBeenCalledWith('auth-code-123')
-
-    // Regression guard: it must NOT be called on the main transport (which never saw the 401).
-    expect(mainTransport.finishAuth).not.toHaveBeenCalled()
+    // The invariant behind #270: finishAuth must run on whichever transport handled the
+    // challenge, so the stored resource_metadata URL drives token_endpoint discovery.
+    expect(challengeTransport.finishAuth).toHaveBeenCalledTimes(1)
+    expect(challengeTransport.finishAuth).toHaveBeenCalledWith('auth-code-123')
   })
 
   it('completes auth on the main transport in with-client mode (parity with the working standalone client path)', async () => {
