@@ -9,7 +9,7 @@ import {
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
-import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
@@ -61,7 +61,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
-    return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
+    return buildRedirectUrl(this.options.host, this.options.callbackPort, this.callbackPath)
   }
 
   get clientMetadata() {

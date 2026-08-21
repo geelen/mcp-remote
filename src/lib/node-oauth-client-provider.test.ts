@@ -14,6 +14,9 @@ vi.mock('./utils', () => ({
   debugLog: vi.fn(),
   DEBUG: false,
   MCP_REMOTE_VERSION: '1.0.0',
+  // Must mirror the real implementation: the redirect URI registered with the authorization
+  // server and the one checked against a cached registration have to match exactly.
+  buildRedirectUrl: (host: string, port: number, callbackPath = '/oauth/callback') => `http://${host}:${port}${callbackPath}`,
 }))
 vi.mock('open', () => ({ default: vi.fn() }))
 

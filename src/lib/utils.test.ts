@@ -1,9 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
+import {
+  parseCommandLineArgs,
+  shouldIncludeTool,
+  mcpProxy,
+  setupOAuthCallbackServerWithLongPoll,
+  getServerUrlHash,
+  MCP_REMOTE_VERSION,
+} from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
 import net from 'net'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
@@ -1307,5 +1317,100 @@ describe('Feature: Server URL Hash Generation', () => {
     const hash1 = getServerUrlHash('https://example.com', '')
     const hash2 = getServerUrlHash('https://example.com')
     expect(hash1).toBe(hash2)
+  })
+})
+
+describe('Feature: Stale Client Registration Invalidation', () => {
+  const originalConfigDir = process.env.MCP_REMOTE_CONFIG_DIR
+  let baseDir: string
+  let versionDir: string
+
+  const clientInfoPath = (serverUrl: string, headers: Record<string, string> = {}) =>
+    path.join(versionDir, `${getServerUrlHash(serverUrl, undefined, headers)}_client_info.json`)
+
+  const writeRegistration = (serverUrl: string, redirectUris: string[]) => {
+    fs.mkdirSync(versionDir, { recursive: true })
+    fs.writeFileSync(clientInfoPath(serverUrl), JSON.stringify({ client_id: 'registered-id', redirect_uris: redirectUris }))
+  }
+
+  beforeEach(() => {
+    baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-remote-test-'))
+    process.env.MCP_REMOTE_CONFIG_DIR = baseDir
+    versionDir = path.join(baseDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+  })
+
+  afterEach(() => {
+    if (originalConfigDir === undefined) delete process.env.MCP_REMOTE_CONFIG_DIR
+    else process.env.MCP_REMOTE_CONFIG_DIR = originalConfigDir
+    fs.rmSync(baseDir, { recursive: true, force: true })
+  })
+
+  it('Scenario: Reuse a registration whose redirect_uri still matches', async () => {
+    // Given a registration made for a localhost port
+    const serverUrl = 'https://reuse.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When starting with no port override
+    const result = await parseCommandLineArgs([serverUrl], 'test usage')
+
+    // Then that port is reused and the registration is kept
+    expect(result.callbackPort).toBe(5599)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
+  })
+
+  it('Scenario: Discard a registration whose redirect_uri is not reachable locally', async () => {
+    // Given a registration pointing at a reverse proxy - no local port can be derived from it.
+    // This used to throw "Cannot find localhost callback URI" and kill the process.
+    const serverUrl = 'https://proxied.example.com/mcp'
+    writeRegistration(serverUrl, ['https://proxy.example.com/oauth/callback'])
+
+    // When starting
+    const result = await parseCommandLineArgs([serverUrl], 'test usage')
+
+    // Then it does not throw, and the unusable registration is gone so the next request
+    // re-registers with a redirect_uri the authorization server will actually accept
+    expect(result.callbackPort).toBeGreaterThan(0)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Discard a registration when the callback host changes', async () => {
+    // Given a registration made against localhost
+    const serverUrl = 'https://hostchange.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When the same server is started with a different callback host
+    const result = await parseCommandLineArgs([serverUrl, '--host', '127.0.0.1'], 'test usage')
+
+    // Then the registration is discarded - 127.0.0.1 and localhost are distinct redirect_uris
+    expect(result.callbackPort).toBe(5599)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Discard a registration when an explicit port conflicts', async () => {
+    // Given a registration on one port
+    const serverUrl = 'https://portconflict.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When a different port is demanded
+    const result = await parseCommandLineArgs([serverUrl, '7788'], 'test usage')
+
+    // Then the stale registration is discarded
+    expect(result.callbackPort).toBe(7788)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Never discard a user-pinned static client registration', async () => {
+    // Given a registration that does not match, but static client info was supplied
+    const serverUrl = 'https://static.example.com/mcp'
+    writeRegistration(serverUrl, ['https://proxy.example.com/oauth/callback'])
+
+    // When starting with --static-oauth-client-info
+    await parseCommandLineArgs(
+      [serverUrl, '--static-oauth-client-info', '{"client_id":"pinned","redirect_uris":["https://proxy.example.com/oauth/callback"]}'],
+      'test usage',
+    )
+
+    // Then it is left alone - the user pinned it deliberately
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
   })
 })
