@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
@@ -32,6 +33,40 @@ declare global {
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
 export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+
+/**
+ * Extract the JSON-RPC method from a request body for method-aware HTTP gateways.
+ *
+ * Some MCP gateways route or validate POST requests using the `Mcp-Method` header
+ * in addition to the JSON-RPC body. The SDK does not add that extension header,
+ * so mcp-remote must derive it at the transport boundary.
+ */
+function mcpMethodFromBody(body: RequestInit['body']): string | undefined {
+  if (typeof body !== 'string') return undefined
+
+  try {
+    const message: unknown = JSON.parse(body)
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return undefined
+
+    const method = (message as { method?: unknown }).method
+    return typeof method === 'string' && method.length > 0 ? method : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Add the method-aware MCP header without replacing caller-supplied headers.
+ */
+const fetchWithMcpMethod = async (url: string | URL, init?: RequestInit) => {
+  const method = mcpMethodFromBody(init?.body)
+  if (!method) return fetch(url, init)
+
+  const headers = new Headers(init?.headers)
+  if (!headers.has('Mcp-Method')) headers.set('Mcp-Method', method)
+
+  return fetch(url, { ...init, headers })
+}
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
@@ -454,10 +489,12 @@ export async function connectToRemoteServer(
         authProvider,
         requestInit: { headers },
         eventSourceInit,
+        fetch: fetchWithMcpMethod as unknown as FetchLike,
       })
     : new StreamableHTTPClientTransport(url, {
         authProvider,
         requestInit: { headers },
+        fetch: fetchWithMcpMethod as unknown as FetchLike,
       })
 
   // When connecting without a Client (proxy mode), the auth challenge (401) is not received by

@@ -1,8 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
+import {
+  connectToRemoteServer,
+  getServerUrlHash,
+  mcpProxy,
+  parseCommandLineArgs,
+  setupOAuthCallbackServerWithLongPoll,
+  shouldIncludeTool,
+} from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { EventEmitter } from 'events'
 import express from 'express'
+import { createServer } from 'node:http'
 import net from 'net'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
@@ -481,6 +491,78 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(consoleSpy).not.toHaveBeenCalled()
 
     consoleSpy.mockRestore()
+  })
+})
+
+describe('Feature: Method-aware MCP HTTP gateways', () => {
+  it('mirrors the JSON-RPC method in the Mcp-Method header', async () => {
+    const requests: Array<{ method: string; header: string | undefined }> = []
+    const server = createServer((request, response) => {
+      if (request.method !== 'POST') {
+        response.writeHead(405)
+        response.end()
+        return
+      }
+
+      let body = ''
+      request.setEncoding('utf8')
+      request.on('data', (chunk: string) => {
+        body += chunk
+      })
+      request.on('end', () => {
+        const message = JSON.parse(body) as { id?: string | number; method: string }
+        const header = request.headers['mcp-method']
+        requests.push({ method: message.method, header: Array.isArray(header) ? header[0] : header })
+
+        if (message.id === undefined) {
+          response.writeHead(202)
+          response.end()
+          return
+        }
+
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              protocolVersion: '2025-03-26',
+              capabilities: {},
+              serverInfo: { name: 'test-server', version: '1.0.0' },
+            },
+          }),
+        )
+      })
+    })
+
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('test server did not expose a port')
+
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(
+        client,
+        `http://127.0.0.1:${address.port}/mcp`,
+        undefined as unknown as OAuthClientProvider,
+        {},
+        async () => {
+          throw new Error('the test server should not request OAuth')
+        },
+        'http-only',
+      )
+
+      expect(requests[0]).toEqual({ method: 'initialize', header: 'initialize' })
+      await transport.send({ jsonrpc: '2.0', method: 'server/discover', params: {} })
+      expect(requests).toContainEqual({ method: 'server/discover', header: 'server/discover' })
+      await transport.close()
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    }
   })
 })
 
