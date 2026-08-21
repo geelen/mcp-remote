@@ -436,6 +436,16 @@ export async function connectToRemoteServer(
         requestInit: { headers },
       })
 
+  // When connecting without a Client (proxy mode), the auth challenge (401) is not received by
+  // `transport` itself but by the one-off `testTransport` created below. The SDK stores the
+  // `resource_metadata` URL from the WWW-Authenticate header on the transport that received the
+  // 401, and `finishAuth` reads it back to discover the authorization server. If we call
+  // `finishAuth` on `transport` (which never saw the 401) that URL is missing, so the token
+  // exchange falls back to POSTing at the resource origin instead of the discovered
+  // `token_endpoint` (see https://github.com/geelen/mcp-remote/issues/270). Track the transport
+  // that actually handled the challenge so we can complete auth on it.
+  let authChallengeTransport: SSEClientTransport | StreamableHTTPClientTransport | undefined
+
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
 
@@ -452,6 +462,8 @@ export async function connectToRemoteServer(
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        // This transport is the one that will receive (and store the metadata from) any 401 challenge.
+        authChallengeTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
@@ -524,7 +536,10 @@ export async function connectToRemoteServer(
 
       try {
         log('Completing authorization...')
-        await transport.finishAuth(code)
+        // Complete auth on the transport that received the 401 challenge (in proxy mode this is the
+        // one-off test transport, not `transport`), so the stored resource_metadata URL is used to
+        // discover the correct token_endpoint. Falls back to `transport` for the with-client path.
+        await (authChallengeTransport ?? transport).finishAuth(code)
         debugLog('Authorization completed successfully')
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
