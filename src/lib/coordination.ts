@@ -7,7 +7,7 @@ import { unlinkSync } from 'fs'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }>
+  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }>
 }
 
 /**
@@ -126,6 +126,7 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
  * @param serverUrlHash The hash of the server URL
  * @param callbackPort The port to use for the callback server
  * @param events The event emitter to use for signaling
+ * @param strictPort If true, fail rather than fall back to a random port on EADDRINUSE
  * @returns An AuthCoordinator object with an initializeAuth method
  */
 export function createLazyAuthCoordinator(
@@ -133,8 +134,9 @@ export function createLazyAuthCoordinator(
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
+  strictPort = false,
 ): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean } | null = null
+  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number } | null = null
 
   return {
     initializeAuth: async () => {
@@ -148,8 +150,8 @@ export function createLazyAuthCoordinator(
       debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort })
 
       // Initialize auth using the existing coordinateAuth logic
-      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs)
-      debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth })
+      authState = await coordinateAuth(serverUrlHash, callbackPort, events, authTimeoutMs, strictPort)
+      debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth, actualPort: authState.actualPort })
       return authState
     },
   }
@@ -160,14 +162,16 @@ export function createLazyAuthCoordinator(
  * @param serverUrlHash The hash of the server URL
  * @param callbackPort The port to use for the callback server
  * @param events The event emitter to use for signaling
- * @returns An object with the server, waitForAuthCode function, and a flag indicating if browser auth can be skipped
+ * @param strictPort If true, fail rather than fall back to a random port on EADDRINUSE
+ * @returns An object with the server, actualPort, waitForAuthCode function, and a flag indicating if browser auth can be skipped
  */
 export async function coordinateAuth(
   serverUrlHash: string,
   callbackPort: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+  strictPort = false,
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPort })
 
   // Check for a lockfile (disabled on Windows for the time being)
@@ -205,6 +209,11 @@ export async function coordinateAuth(
 
         return {
           server: dummyServer,
+          // Report the caller's original callback port, not the dummy server's OS-assigned one.
+          // This instance never serves callbacks, so its port did not "change" - returning
+          // dummyPort here makes callers think the port moved and needlessly re-register the
+          // OAuth client (deleting client_info.json) on every successful secondary startup.
+          actualPort: callbackPort,
           waitForAuthCode: dummyWaitForAuthCode,
           skipBrowserAuth: true,
         }
@@ -227,25 +236,14 @@ export async function coordinateAuth(
 
   // Create our own lockfile
   debugLog('Setting up OAuth callback server', { port: callbackPort })
-  const { server, waitForAuthCode, authCompletedPromise } = setupOAuthCallbackServerWithLongPoll({
+  const { server, actualPort, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll({
     port: callbackPort,
     path: '/oauth/callback',
     events,
     authTimeoutMs,
+    strictPort,
   })
 
-  // Get the actual port the server is running on
-  let address = server.address() as AddressInfo | null
-  if (!address) {
-    await new Promise<void>((resolve) => server.once('listening', resolve))
-    address = server.address() as AddressInfo | null
-  }
-
-  if (!address) {
-    throw new Error('Failed to get server address after listening event')
-  }
-
-  const actualPort = address.port
   debugLog('OAuth callback server running', { port: actualPort })
 
   log(`Creating lockfile for server ${serverUrlHash} with process ${process.pid} on port ${actualPort}`)
@@ -282,6 +280,7 @@ export async function coordinateAuth(
   debugLog('Auth coordination complete, returning primary instance handlers')
   return {
     server,
+    actualPort,
     waitForAuthCode,
     skipBrowserAuth: false,
   }

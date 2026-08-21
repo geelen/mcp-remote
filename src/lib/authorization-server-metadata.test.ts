@@ -63,6 +63,7 @@ describe('authorization-server-metadata', () => {
         expect.objectContaining({
           headers: {
             Accept: 'application/json',
+            'Accept-Encoding': 'identity',
           },
         }),
       )
