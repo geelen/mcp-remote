@@ -34,8 +34,13 @@ export function getMetadataUrl(serverUrl: string): string {
   // relative to the issuer identifier
   const metadataPath = '/.well-known/oauth-authorization-server'
 
-  // Construct the full metadata URL
-  return `${url.origin}${metadataPath}`
+  // Ensure path does not end with '/'
+  url.pathname = url.pathname.replace(/\/+$/, '')
+  // Only append pathname if it's not just '/'
+  const pathSuffix = url.pathname === '/' ? '' : url.pathname
+
+  // Construct the full metadata URL using path insertion
+  return `${url.origin}${metadataPath}${pathSuffix}`
 }
 
 /**
