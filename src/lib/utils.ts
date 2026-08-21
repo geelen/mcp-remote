@@ -884,7 +884,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   // Parse host
-  let host = 'localhost' // Default
+  let host = process.platform === 'win32' ? '127.0.0.1' : 'localhost' // Default
   const hostIndex = args.indexOf('--host')
   if (hostIndex !== -1 && hostIndex < args.length - 1) {
     host = args[hostIndex + 1]
