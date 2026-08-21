@@ -76,7 +76,7 @@ describe('connectToRemoteServer', () => {
 
   it('completes auth on the transport that received the 401 challenge in proxy mode (regression: #270)', async () => {
     const authInitializer = vi.fn().mockResolvedValue({
-      waitForAuthCode: async () => 'auth-code-123',
+      waitForAuthCode: async () => ({ code: 'auth-code-123' }),
       skipBrowserAuth: false,
     })
 
@@ -102,7 +102,7 @@ describe('connectToRemoteServer', () => {
 
   it('completes auth on the main transport in with-client mode (parity with the working standalone client path)', async () => {
     const authInitializer = vi.fn().mockResolvedValue({
-      waitForAuthCode: async () => 'auth-code-456',
+      waitForAuthCode: async () => ({ code: 'auth-code-456' }),
       skipBrowserAuth: false,
     })
 
