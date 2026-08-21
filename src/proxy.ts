@@ -79,6 +79,7 @@ async function runProxy(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    events,
   })
 
   // Create the STDIO transport for local connections
@@ -127,6 +128,7 @@ async function runProxy(
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      authInitializer,
     })
 
     // Start the local STDIO server

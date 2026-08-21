@@ -39,6 +39,8 @@ export interface OAuthProviderOptions {
   protectedResourceMetadata?: ProtectedResourceMetadata
   /** Scope extracted from WWW-Authenticate header */
   wwwAuthenticateScope?: string
+  /** Event emitter for OAuth flow coordination */
+  events?: EventEmitter
 }
 
 /**
