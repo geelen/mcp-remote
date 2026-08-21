@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { EventEmitter } from 'events'
 import express from 'express'
 import net from 'net'
@@ -1031,9 +1032,78 @@ describe('Feature: MCP Proxy', () => {
     )
   })
 
-  it('Scenario: Failed forward of a request surfaces a JSON-RPC error to the client', async () => {
-    // Given a server transport whose send() rejects, e.g. because the
-    // server expired the session and answers HTTP 404 (issue #106)
+  it('Scenario: Re-establish the session when the server has expired it', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a server transport that 404s the first tools/call, as a server does
+    // once it has dropped the session, then answers the fresh handshake
+    const sent: any[] = []
+    let expireNextCall = true
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (typeof message.id === 'string' && message.id.startsWith('mcp-remote-reinit-')) {
+          setTimeout(() => (mockTransportToServer as any).onmessage?.({ jsonrpc: '2.0', id: message.id, result: {} }), 0)
+          return
+        }
+        if (expireNextCall && message.method === 'tools/call') {
+          expireNextCall = false
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Session terminated')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      sessionId: 'session-2',
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client initializes and then calls a tool
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'tools/call',
+      id: '2',
+      params: { name: 'ping', arguments: {} },
+    } as any)
+
+    await vi.waitFor(() => expect(sent.map((m) => m.method)).toContain('notifications/initialized'))
+
+    // Then a fresh initialize was sent, carrying the client's own parameters
+    const reinitialize = sent.find((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))
+    expect(reinitialize).toBeDefined()
+    expect(reinitialize.method).toBe('initialize')
+    expect(reinitialize.params.clientInfo.name).toContain('Test Client')
+
+    // And the call that triggered it was retried on the new session
+    expect(sent.filter((m) => m.method === 'tools/call' && m.id === '2')).toHaveLength(2)
+
+    // And the handshake response was consumed by the proxy, never shown to the client
+    expect(mockTransportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ id: reinitialize.id }))
+  })
+
+  it('Scenario: Answer the client when a request cannot be delivered', async () => {
+    // Given a server transport that fails for a reason a new session cannot fix
     const mockTransportToClient = {
       send: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -1044,7 +1114,7 @@ describe('Feature: MCP Proxy', () => {
     } as unknown as Transport
 
     const mockTransportToServer = {
-      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      send: vi.fn().mockRejectedValue(new Error('connection reset')),
       close: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue(undefined),
       onmessage: vi.fn(),
@@ -1058,31 +1128,24 @@ describe('Feature: MCP Proxy', () => {
       ignoredTools: [],
     })
 
-    // When the client sends a request (a message with an id)
-    const clientRequest = {
+    // When the client sends a request
+    mockTransportToClient.onmessage?.({
       jsonrpc: '2.0' as const,
       method: 'tools/call',
-      id: 42,
-      params: { name: 'SomeTool', arguments: {} },
-    }
-    if (mockTransportToClient.onmessage) {
-      mockTransportToClient.onmessage(clientRequest)
-    }
+      id: '7',
+      params: { name: 'ping', arguments: {} },
+    } as any)
 
-    // Then the client receives a JSON-RPC error response for that id
-    // instead of waiting forever for a reply that never arrives
-    await vi.waitFor(() => {
+    // Then it gets an error rather than waiting forever for a reply
+    await vi.waitFor(() =>
       expect(mockTransportToClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           jsonrpc: '2.0',
-          id: 42,
-          error: expect.objectContaining({
-            code: -32603,
-            message: expect.stringContaining('HTTP 404'),
-          }),
+          id: '7',
+          error: expect.objectContaining({ code: -32001 }),
         }),
-      )
-    })
+      ),
+    )
   })
 
   it('Scenario: Failed forward of a notification does not produce a response', async () => {

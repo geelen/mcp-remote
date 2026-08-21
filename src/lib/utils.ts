@@ -140,6 +140,9 @@ export function mcpProxy({
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let lastInitialize: Message | null = null
+  let reinitSeq = 0
+  const pendingReinit = new Map<string, (message: Message) => void>()
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -200,35 +203,23 @@ export function mcpProxy({
       log(JSON.stringify(message, null, 2))
 
       debugLog('Initialize message with modified client info', { clientInfo })
+
+      lastInitialize = message
     }
 
-    transportToServer.send(message).catch((error) => {
-      onServerError(error)
-
-      // If forwarding a request fails, the local client would wait forever
-      // for a response that never arrives (e.g. the server expired the
-      // session and answers 404, see #106). Surface the failure as a
-      // JSON-RPC error response instead.
-      //
-      // Only requests may be answered. Notifications carry no id, and this
-      // handler also sees the client's *responses* to server-initiated
-      // requests - those carry an id but no method, and answering one makes
-      // the local SDK raise "Received a response for an unknown message ID".
-      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
-        const errorResponse = {
-          jsonrpc: '2.0' as const,
-          id: message.id,
-          error: {
-            code: -32603,
-            message: `Failed to forward message to remote server: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        }
-        transportToClient.send(errorResponse).catch(onClientError)
-      }
-    })
+    sendToServer(message)
   }
 
   transportToServer.onmessage = (_message) => {
+    // Responses to our own re-initialize handshake are ours to consume, not the client's
+    const reinitId = (_message as any).id
+    if (typeof reinitId === 'string' && pendingReinit.has(reinitId)) {
+      const settle = pendingReinit.get(reinitId)!
+      pendingReinit.delete(reinitId)
+      settle(_message as any)
+      return
+    }
+
     // TODO: fix types
     const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
@@ -273,6 +264,95 @@ export function mcpProxy({
   function onServerError(error: Error) {
     log('Error from remote server:', error)
     debugLog('Error from remote server', { stack: error.stack })
+  }
+
+  /**
+   * A 404 to a request that carried a session id means the server dropped the
+   * session (idle expiry, restart, eviction). The spec says the client must then
+   * start a new session with a fresh InitializeRequest.
+   */
+  function isSessionExpired(error: Error) {
+    return error instanceof StreamableHTTPError && error.code === 404
+  }
+
+  async function reinitializeSession() {
+    if (!lastInitialize) {
+      throw new Error('no initialize request was seen, cannot re-establish the session')
+    }
+
+    // Must be cleared before we send, or the transport re-attaches the dead id
+    // and the server 404s the handshake too. The SDK exposes sessionId read-only.
+    ;(transportToServer as unknown as { _sessionId?: string })._sessionId = undefined
+
+    const id = `mcp-remote-reinit-${++reinitSeq}`
+    const response = await new Promise<Message>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingReinit.delete(id)
+        reject(new Error('timed out waiting for the re-initialize response'))
+      }, 30000)
+      pendingReinit.set(id, (message) => {
+        clearTimeout(timer)
+        resolve(message)
+      })
+      transportToServer.send({ ...lastInitialize, id }).catch((error) => {
+        clearTimeout(timer)
+        pendingReinit.delete(id)
+        reject(error)
+      })
+    })
+
+    if (response.error) {
+      throw new Error(`server rejected re-initialize: ${JSON.stringify(response.error)}`)
+    }
+
+    await transportToServer.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    log(`Re-established session ${transportToServer.sessionId ?? '(none)'} after server expiry`)
+  }
+
+  async function sendToServer(message: Message) {
+    try {
+      await transportToServer.send(message)
+      return
+    } catch (error) {
+      // Re-initializing in response to a failed initialize would loop
+      if (!isSessionExpired(error as Error) || message.method === 'initialize') {
+        onServerError(error as Error)
+        replyWithError(message, error as Error)
+        return
+      }
+
+      log('Remote session expired, re-initializing')
+      debugLog('Remote session expired', { id: message.id, method: message.method })
+
+      try {
+        await reinitializeSession()
+        await transportToServer.send(message)
+      } catch (retryError) {
+        onServerError(retryError as Error)
+        replyWithError(message, retryError as Error)
+      }
+    }
+  }
+
+  /**
+   * Without this a failed send leaves the client waiting forever on a request
+   * that will never be answered.
+   */
+  function replyWithError(message: Message, error: Error) {
+    // Only requests may be answered. Notifications carry no id, and this handler
+    // also sees the client's *responses* to server-initiated requests - those
+    // carry an id but no method, and answering one makes the local SDK raise
+    // "Received a response for an unknown message ID".
+    if (message.method === undefined || message.id === undefined || message.id === null) {
+      return
+    }
+    transportToClient
+      .send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: -32001, message: `mcp-remote: ${error.message ?? String(error)}` },
+      })
+      .catch(onClientError)
   }
 }
 
