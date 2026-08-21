@@ -981,7 +981,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
   // Parse callback path
-  let callbackPath = '';
+  let callbackPath = ''
   const callbackPathIndex = args.indexOf('--callback-path')
   if (callbackPathIndex !== -1 && callbackPathIndex < args.length - 1) {
     callbackPath = args[callbackPathIndex + 1]

@@ -55,7 +55,6 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(typeof result.serverUrl).toBe('string')
   })
 
-
   it('Scenario: Parse server URL with callback path', async () => {
     // Given command line arguments with server URL and port
     const args = ['https://example.com/sse', '--callback-path', '/custom-callback']
