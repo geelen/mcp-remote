@@ -161,6 +161,63 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('stored token scopes', () => {
+    it('requests reauthorization when the stored token is missing a requested scope', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+      mockReadJsonFile.mockResolvedValue({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.read',
+      })
+
+      await expect(provider.tokens()).resolves.toBeUndefined()
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+    })
+
+    it('reuses a stored token when it covers every requested scope', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+      const tokens = {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.write license.read offline_access',
+      }
+      mockReadJsonFile.mockResolvedValue(tokens)
+
+      await expect(provider.tokens()).resolves.toEqual(tokens)
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('records the requested scope when an OAuth server omits it from the token response', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'license.read license.write' } as any,
+      })
+
+      await provider.saveTokens({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+      })
+
+      expect(mockWriteJsonFile).toHaveBeenCalledWith('test-hash', 'tokens.json', {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+        scope: 'license.read license.write',
+      })
+    })
+  })
+
   // Regression tests for https://github.com/geelen/mcp-remote/issues/235:
   // concurrent mcp-remote processes for the same server used to share a single
   // code_verifier.txt file, so a second process starting mid-flow would silently
