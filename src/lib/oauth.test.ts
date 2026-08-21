@@ -26,16 +26,20 @@ describe('OAuth Authorization', () => {
     // Setup mocked mcp server
     const mcpServerUrl = mcpServer.url('/test/mcp')
     mcpServer.addRoute('POST', '/test/mcp', (req, res) => {
-      res.status(401)// Since we are testing only the login flow, we ignore the post-auth stuff.
-        .header('WWW-Authenticate', `Bearer realm="mcp", resource_metadata="${mcpServer.url('/test/mcp/.well-known/oauth-protected-resource')}"`)
+      res
+        .status(401) // Since we are testing only the login flow, we ignore the post-auth stuff.
+        .header(
+          'WWW-Authenticate',
+          `Bearer realm="mcp", resource_metadata="${mcpServer.url('/test/mcp/.well-known/oauth-protected-resource')}"`,
+        )
         .json({ error: 'Unauthorized' })
     })
     mcpServer.addRoute('GET', '/test/mcp/.well-known/oauth-protected-resource', (req, res) => {
       res.json({
         resource: mcpServer.url('/test/mcp'),
-        authorization_servers: [idpServer.url('/test/auth')]
+        authorization_servers: [idpServer.url('/test/auth')],
       })
-    });
+    })
 
     // Setup mocked idp server
     idpServer.addRoute('GET', '/test/auth/.well-known/openid-configuration', (req, res) => {
@@ -52,13 +56,13 @@ describe('OAuth Authorization', () => {
         scopes_supported: ['openid', 'profile', 'email'],
         claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'name', 'email'],
       })
-    });
+    })
     idpServer.addRoute('POST', '/test/auth/token', (req, res) => {
       res.json({
-        "access_token": "abc123def456ghi789",
-        "token_type": "Bearer"
+        access_token: 'abc123def456ghi789',
+        token_type: 'Bearer',
       })
-    });
+    })
 
     // Setup OAuth client
     const authProvider = new NodeOAuthClientProvider(<OAuthProviderOptions>{
@@ -72,8 +76,8 @@ describe('OAuth Authorization', () => {
         redirect_uris: ['http://localhost/callback'],
         token_endpoint_auth_method: 'none',
         grant_types: ['authorization_code', 'refresh_token'],
-        response_types: ['code']
-      }
+        response_types: ['code'],
+      },
     })
 
     // Mock auth code acquisition
@@ -91,17 +95,17 @@ describe('OAuth Authorization', () => {
         authProvider,
         {},
         mockAuthInitializer,
-        'http-first', 
-        new Set([REASON_AUTH_NEEDED])/*dont do the recursion thing, because we want to stop after the first auth attempt*/
+        'http-first',
+        new Set([REASON_AUTH_NEEDED]) /*dont do the recursion thing, because we want to stop after the first auth attempt*/,
       )
     } catch (e: Error | any) {
       // Since we only do one run and skip the recursion, we expect it to give up early.
-      expect(e).toBeInstanceOf(Error);
-      expect(e.message).contains("Giving up.");
+      expect(e).toBeInstanceOf(Error)
+      expect(e.message).contains('Giving up.')
     }
-    
+
     // Verify we successfully acquired the accesstoken
-    const tokens = await authProvider.tokens();
+    const tokens = await authProvider.tokens()
     expect(tokens?.access_token).toBe('abc123def456ghi789')
   })
 })
@@ -138,7 +142,7 @@ class MockServer {
           reject(new Error('Server failed to start'))
         }
       })
-      
+
       this.server.on('error', reject)
     })
   }
@@ -195,10 +199,10 @@ describe('Test Infrastructure: Mock Server', () => {
   it('handles POST requests', async () => {
     // Given a mock server with an echo endpoint
     mockServer.addRoute('POST', '/echo', (req, res) => {
-      res.json({ 
+      res.json({
         received: req.body,
         headers: req.headers,
-        method: req.method 
+        method: req.method,
       })
     })
 
@@ -207,7 +211,7 @@ describe('Test Infrastructure: Mock Server', () => {
     const response = await fetch(mockServer.url('/echo'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(testData)
+      body: JSON.stringify(testData),
     })
     const responseData = await response.json()
 
@@ -246,14 +250,14 @@ describe('Test Infrastructure: Mock Server', () => {
     // Given a mock server that checks for authentication
     mockServer.addRoute('GET', '/protected', (req, res) => {
       const authHeader = req.headers.authorization
-      
+
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
-      
+
       const token = authHeader.substring(7) // Remove 'Bearer ' prefix
-      
+
       if (token === 'valid-token') {
         res.json({ message: 'Access granted', user: 'test-user' })
       } else {
@@ -267,16 +271,16 @@ describe('Test Infrastructure: Mock Server', () => {
 
     // When making a request with invalid token
     const invalidTokenResponse = await fetch(mockServer.url('/protected'), {
-      headers: { Authorization: 'Bearer invalid-token' }
+      headers: { Authorization: 'Bearer invalid-token' },
     })
     expect(invalidTokenResponse.status).toBe(401)
 
     // When making a request with valid token
     const validTokenResponse = await fetch(mockServer.url('/protected'), {
-      headers: { Authorization: 'Bearer valid-token' }
+      headers: { Authorization: 'Bearer valid-token' },
     })
     expect(validTokenResponse.status).toBe(200)
-    
+
     const data = await validTokenResponse.json()
     expect(data).toEqual({ message: 'Access granted', user: 'test-user' })
   })

@@ -205,7 +205,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async tokens(): Promise<OAuthTokens | undefined> {
     debugLog('Reading OAuth tokens')
-    
+
     const tokens = await readJsonFile<OAuthTokens>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
 
     if (tokens) {
