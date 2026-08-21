@@ -1,31 +1,47 @@
-import path from 'path'
 import os from 'os'
+import path from 'path'
 import fs from 'fs/promises'
-import { log, MCP_REMOTE_VERSION } from './utils'
+import { DatabaseSync } from 'node:sqlite'
+import { log } from './utils'
 
 /**
  * MCP Remote Authentication Configuration
  *
- * This module handles the storage and retrieval of authentication-related data for MCP Remote.
+ * OAuth credentials follow the same local-storage pattern as the gcloud CLI:
  *
- * Configuration directory structure:
- * - The config directory is determined by MCP_REMOTE_CONFIG_DIR env var or defaults to ~/.mcp-auth
- * - Each file is prefixed with a hash of the server URL to separate configurations for different servers
+ * - credentials.db contains durable credentials such as refresh tokens, dynamic
+ *   client registrations, and PKCE verifiers.
+ * - access_tokens.db contains short-lived access tokens and their expiry.
+ * - lock files and debug logs remain ordinary 0600 files because they are
+ *   process-coordination data rather than reusable OAuth credentials.
  *
- * Files stored in the config directory:
- * - {server_hash}_client_info.json: Contains OAuth client registration information
- *   - Format: OAuthClientInformation object with client_id and other registration details
- * - {server_hash}_tokens.json: Contains OAuth access and refresh tokens
- *   - Format: OAuthTokens object with access_token, refresh_token, and expiration information
- * - {server_hash}_code_verifier_{pid}.txt: Contains the PKCE code verifier for the current OAuth flow
- *   - Format: Plain text string used for PKCE verification
- *   - Scoped per-process (by PID) rather than per-server: multiple mcp-remote processes can be
- *     started concurrently for the same server, and coordination between them is currently
- *     disabled on Windows (see coordination.ts), so a shared filename would let one process's
- *     verifier silently overwrite another's mid-flow (see issue #235)
+ * The directory defaults to ~/.config/mcp-remote and is 0700. Database files
+ * and file-backed records are 0600.
  *
- * All JSON files are stored with 2-space indentation for readability.
+ * PKCE verifiers are keyed per-process (code_verifier_{pid}.txt): multiple mcp-remote
+ * processes can run concurrently for the same server, and coordination between them is
+ * disabled on Windows (see coordination.ts), so a shared key would let one process's
+ * verifier silently overwrite another's mid-flow (see issue #235).
  */
+
+const CREDENTIALS_DATABASE = 'credentials.db'
+const ACCESS_TOKENS_DATABASE = 'access_tokens.db'
+
+type DatabaseRecord = {
+  value: string
+}
+
+type AccessTokenRecord = {
+  access_token: string
+}
+
+type OAuthTokenMetadata = {
+  id_token?: string
+  token_type: string
+  expires_in?: number
+  scope?: string
+  refresh_token?: string
+}
 
 /**
  * Lockfile data structure
@@ -37,34 +53,188 @@ export interface LockfileData {
 }
 
 /**
- * Creates a lockfile for the given server
- * @param serverUrlHash The hash of the server URL
- * @param pid The process ID
- * @param port The port the server is running on
+ * Gets the configuration directory path.
+ * MCP_REMOTE_CONFIG_DIR is an explicit directory override, not a base path.
  */
-export async function createLockfile(serverUrlHash: string, pid: number, port: number): Promise<void> {
-  const lockData: LockfileData = {
-    pid,
-    port,
-    timestamp: Date.now(),
-  }
-  await writeJsonFile(serverUrlHash, 'lock.json', lockData)
+export function getConfigDir(): string {
+  return process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.config', 'mcp-remote')
 }
 
 /**
- * Checks if a lockfile exists for the given server
- * @param serverUrlHash The hash of the server URL
- * @returns The lockfile data or null if it doesn't exist
+ * Ensures the configuration directory exists with owner-only access.
+ */
+export async function ensureConfigDir(): Promise<void> {
+  try {
+    const configDir = getConfigDir()
+    await fs.mkdir(configDir, { recursive: true, mode: 0o700 })
+    await fs.chmod(configDir, 0o700)
+  } catch (error) {
+    log('Error creating credential directory:', error)
+    throw error
+  }
+}
+
+export function getCredentialsDatabasePath(): string {
+  return path.join(getConfigDir(), CREDENTIALS_DATABASE)
+}
+
+export function getAccessTokensDatabasePath(): string {
+  return path.join(getConfigDir(), ACCESS_TOKENS_DATABASE)
+}
+
+/**
+ * Gets the path for the remaining file-backed configuration records.
+ */
+export function getConfigFilePath(serverUrlHash: string, filename: string): string {
+  return path.join(getConfigDir(), `${serverUrlHash}_${filename}`)
+}
+
+function isCredentialRecord(filename: string): boolean {
+  return filename === 'client_info.json' || filename === 'tokens.json' || /^code_verifier(_\d+)?\.txt$/.test(filename)
+}
+
+function credentialRecordId(serverUrlHash: string, filename: string): string {
+  return `${serverUrlHash}:${filename}`
+}
+
+async function withCredentialsDatabase<T>(action: (database: DatabaseSync) => T): Promise<T> {
+  await ensureConfigDir()
+  const databasePath = getCredentialsDatabasePath()
+  const database = new DatabaseSync(databasePath)
+
+  try {
+    database.exec('CREATE TABLE IF NOT EXISTS credentials (account_id TEXT PRIMARY KEY, value BLOB NOT NULL)')
+    await fs.chmod(databasePath, 0o600)
+    return action(database)
+  } finally {
+    database.close()
+  }
+}
+
+async function withAccessTokensDatabase<T>(action: (database: DatabaseSync) => T): Promise<T> {
+  await ensureConfigDir()
+  const databasePath = getAccessTokensDatabasePath()
+  const database = new DatabaseSync(databasePath)
+
+  try {
+    database.exec(
+      'CREATE TABLE IF NOT EXISTS access_tokens (account_id TEXT PRIMARY KEY, access_token TEXT NOT NULL, token_expiry INTEGER)',
+    )
+    await fs.chmod(databasePath, 0o600)
+    return action(database)
+  } finally {
+    database.close()
+  }
+}
+
+async function readCredentialRecord<T>(serverUrlHash: string, filename: string): Promise<T | undefined> {
+  const record = await withCredentialsDatabase(
+    (database) =>
+      database.prepare('SELECT value FROM credentials WHERE account_id = ?').get(credentialRecordId(serverUrlHash, filename)) as
+        | DatabaseRecord
+        | undefined,
+  )
+
+  if (!record) {
+    return undefined
+  }
+
+  try {
+    return JSON.parse(record.value) as T
+  } catch (error) {
+    log(`Error parsing ${filename}:`, error)
+    return undefined
+  }
+}
+
+async function writeCredentialRecord(serverUrlHash: string, filename: string, value: unknown): Promise<void> {
+  await withCredentialsDatabase((database) => {
+    database
+      .prepare('INSERT INTO credentials (account_id, value) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET value = excluded.value')
+      .run(credentialRecordId(serverUrlHash, filename), JSON.stringify(value))
+  })
+}
+
+async function deleteCredentialRecord(serverUrlHash: string, filename: string): Promise<void> {
+  await withCredentialsDatabase((database) => {
+    database.prepare('DELETE FROM credentials WHERE account_id = ?').run(credentialRecordId(serverUrlHash, filename))
+  })
+}
+
+async function readTokens(serverUrlHash: string): Promise<Record<string, unknown> | undefined> {
+  const [metadata, accessToken] = await Promise.all([
+    readCredentialRecord<OAuthTokenMetadata>(serverUrlHash, 'tokens.json'),
+    withAccessTokensDatabase(
+      (database) =>
+        database.prepare('SELECT access_token FROM access_tokens WHERE account_id = ?').get(serverUrlHash) as AccessTokenRecord | undefined,
+    ),
+  ])
+
+  if (!metadata || !accessToken) {
+    return undefined
+  }
+
+  return {
+    ...metadata,
+    access_token: accessToken.access_token,
+  }
+}
+
+async function writeTokens(serverUrlHash: string, tokens: Record<string, unknown>): Promise<void> {
+  const { access_token: accessToken, id_token, token_type: tokenType, expires_in: expiresIn, scope, refresh_token: refreshToken } = tokens
+
+  if (typeof accessToken !== 'string' || typeof tokenType !== 'string') {
+    throw new Error('OAuth tokens must include string access_token and token_type values')
+  }
+
+  const metadata: OAuthTokenMetadata = {
+    token_type: tokenType,
+    ...(typeof id_token === 'string' ? { id_token } : {}),
+    ...(typeof expiresIn === 'number' ? { expires_in: expiresIn } : {}),
+    ...(typeof scope === 'string' ? { scope } : {}),
+    ...(typeof refreshToken === 'string' ? { refresh_token: refreshToken } : {}),
+  }
+  const tokenExpiry = typeof expiresIn === 'number' ? Date.now() + expiresIn * 1000 : null
+
+  await writeCredentialRecord(serverUrlHash, 'tokens.json', metadata)
+  await withAccessTokensDatabase((database) => {
+    database
+      .prepare(
+        'INSERT INTO access_tokens (account_id, access_token, token_expiry) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET access_token = excluded.access_token, token_expiry = excluded.token_expiry',
+      )
+      .run(serverUrlHash, accessToken, tokenExpiry)
+  })
+}
+
+async function deleteTokens(serverUrlHash: string): Promise<void> {
+  await Promise.all([
+    deleteCredentialRecord(serverUrlHash, 'tokens.json'),
+    withAccessTokensDatabase((database) => {
+      database.prepare('DELETE FROM access_tokens WHERE account_id = ?').run(serverUrlHash)
+    }),
+  ])
+}
+
+/**
+ * Creates a lockfile for the given server.
+ */
+export async function createLockfile(serverUrlHash: string, pid: number, port: number): Promise<void> {
+  await writeJsonFile(serverUrlHash, 'lock.json', { pid, port, timestamp: Date.now() })
+}
+
+/**
+ * Checks if a lockfile exists for the given server.
  */
 export async function checkLockfile(serverUrlHash: string): Promise<LockfileData | null> {
   try {
     const lockfile = await readJsonFile<LockfileData>(serverUrlHash, 'lock.json', {
-      async parseAsync(data: any) {
+      async parseAsync(data: unknown) {
         if (typeof data !== 'object' || data === null) return null
-        if (typeof data.pid !== 'number' || typeof data.port !== 'number' || typeof data.timestamp !== 'number') {
+        const lock = data as Partial<LockfileData>
+        if (typeof lock.pid !== 'number' || typeof lock.port !== 'number' || typeof lock.timestamp !== 'number') {
           return null
         }
-        return data as LockfileData
+        return lock as LockfileData
       },
     })
     return lockfile || null
@@ -74,58 +244,28 @@ export async function checkLockfile(serverUrlHash: string): Promise<LockfileData
 }
 
 /**
- * Deletes the lockfile for the given server
- * @param serverUrlHash The hash of the server URL
+ * Deletes the lockfile for the given server.
  */
 export async function deleteLockfile(serverUrlHash: string): Promise<void> {
   await deleteConfigFile(serverUrlHash, 'lock.json')
 }
 
 /**
- * Gets the configuration directory path
- * @returns The path to the configuration directory
- */
-export function getConfigDir(): string {
-  const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
-  // Add a version subdirectory so we don't need to worry about backwards/forwards compatibility yet
-  return path.join(baseConfigDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
-}
-
-/**
- * Ensures the configuration directory exists
- */
-export async function ensureConfigDir(): Promise<void> {
-  try {
-    const configDir = getConfigDir()
-    await fs.mkdir(configDir, { recursive: true })
-  } catch (error) {
-    log('Error creating config directory:', error)
-    throw error
-  }
-}
-
-/**
- * Gets the file path for a config file
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file
- * @returns The absolute file path
- */
-export function getConfigFilePath(serverUrlHash: string, filename: string): string {
-  const configDir = getConfigDir()
-  return path.join(configDir, `${serverUrlHash}_${filename}`)
-}
-
-/**
- * Deletes a config file if it exists
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to delete
+ * Deletes a config record if it exists.
  */
 export async function deleteConfigFile(serverUrlHash: string, filename: string): Promise<void> {
   try {
-    const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.unlink(filePath)
+    if (filename === 'tokens.json') {
+      await deleteTokens(serverUrlHash)
+      return
+    }
+    if (isCredentialRecord(filename)) {
+      await deleteCredentialRecord(serverUrlHash, filename)
+      return
+    }
+
+    await fs.unlink(getConfigFilePath(serverUrlHash, filename))
   } catch (error) {
-    // Ignore if file doesn't exist
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       log(`Error deleting ${filename}:`, error)
     }
@@ -133,24 +273,23 @@ export async function deleteConfigFile(serverUrlHash: string, filename: string):
 }
 
 /**
- * Reads a JSON file and parses it with the provided schema
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to read
- * @param schema The schema to validate against
- * @returns The parsed file content or undefined if the file doesn't exist
+ * Reads a JSON record and parses it with the provided schema.
  */
 export async function readJsonFile<T>(serverUrlHash: string, filename: string, schema: any): Promise<T | undefined> {
   try {
-    await ensureConfigDir()
+    let data: unknown
+    if (filename === 'tokens.json') {
+      data = await readTokens(serverUrlHash)
+    } else if (isCredentialRecord(filename)) {
+      data = await readCredentialRecord(serverUrlHash, filename)
+    } else {
+      await ensureConfigDir()
+      data = JSON.parse(await fs.readFile(getConfigFilePath(serverUrlHash, filename), 'utf-8'))
+    }
 
-    const filePath = getConfigFilePath(serverUrlHash, filename)
-    const content = await fs.readFile(filePath, 'utf-8')
-    const result = await schema.parseAsync(JSON.parse(content))
-    // console.log({ filename: result })
-    return result
+    return data === undefined ? undefined : await schema.parseAsync(data)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      // console.log(`File ${filename} does not exist`)
       return undefined
     }
     log(`Error reading ${filename}:`, error)
@@ -159,16 +298,23 @@ export async function readJsonFile<T>(serverUrlHash: string, filename: string, s
 }
 
 /**
- * Writes a JSON object to a file
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to write
- * @param data The data to write
+ * Writes a JSON record.
  */
-export async function writeJsonFile(serverUrlHash: string, filename: string, data: any): Promise<void> {
+export async function writeJsonFile(serverUrlHash: string, filename: string, data: unknown): Promise<void> {
   try {
+    if (filename === 'tokens.json') {
+      await writeTokens(serverUrlHash, data as Record<string, unknown>)
+      return
+    }
+    if (isCredentialRecord(filename)) {
+      await writeCredentialRecord(serverUrlHash, filename, data)
+      return
+    }
+
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
     await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
+    await fs.chmod(filePath, 0o600)
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
@@ -176,33 +322,39 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
 }
 
 /**
- * Reads a text file
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to read
- * @param errorMessage Optional custom error message
- * @returns The file content as a string
+ * Reads a text credential record.
  */
 export async function readTextFile(serverUrlHash: string, filename: string, errorMessage?: string): Promise<string> {
   try {
+    if (filename === 'code_verifier.txt') {
+      const value = await readCredentialRecord<string>(serverUrlHash, filename)
+      if (value === undefined) {
+        throw new Error('Credential record does not exist')
+      }
+      return value
+    }
+
     await ensureConfigDir()
-    const filePath = getConfigFilePath(serverUrlHash, filename)
-    return await fs.readFile(filePath, 'utf-8')
-  } catch (error) {
+    return await fs.readFile(getConfigFilePath(serverUrlHash, filename), 'utf-8')
+  } catch {
     throw new Error(errorMessage || `Error reading ${filename}`)
   }
 }
 
 /**
- * Writes a text string to a file
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to write
- * @param text The text to write
+ * Writes a text credential record.
  */
 export async function writeTextFile(serverUrlHash: string, filename: string, text: string): Promise<void> {
   try {
+    if (filename === 'code_verifier.txt') {
+      await writeCredentialRecord(serverUrlHash, filename, text)
+      return
+    }
+
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
     await fs.writeFile(filePath, text, { encoding: 'utf-8', mode: 0o600 })
+    await fs.chmod(filePath, 0o600)
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error

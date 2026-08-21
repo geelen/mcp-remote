@@ -6,7 +6,7 @@ import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
-import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import { deleteConfigFile, getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
   parseWWWAuthenticateHeader,
@@ -19,7 +19,7 @@ import net, { AddressInfo } from 'net'
 import { Server } from 'http'
 import crypto from 'crypto'
 import fs from 'fs'
-import { readFile, rm } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import path from 'path'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
 import { EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
@@ -67,13 +67,15 @@ export function debugLog(message: string, ...args: any[]) {
 
     // Ensure config directory exists
     const configDir = getConfigDir()
-    fs.mkdirSync(configDir, { recursive: true })
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
+    fs.chmodSync(configDir, 0o700)
 
     // Append to log file
     const logPath = path.join(configDir, `${serverUrlHash}_debug.log`)
     const logMessage = `${formattedMessage} ${args.map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg))).join(' ')}\n`
 
-    fs.appendFileSync(logPath, logMessage, { encoding: 'utf8' })
+    fs.appendFileSync(logPath, logMessage, { encoding: 'utf8', mode: 0o600 })
+    fs.chmodSync(logPath, 0o600)
   } catch (error) {
     // Fallback to console if file logging fails
     console.error(`[DEBUG LOG ERROR] ${error}`)
@@ -989,7 +991,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
       log(
         `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
       )
-      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
+      await deleteConfigFile(serverUrlHash, 'client_info.json')
     }
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort

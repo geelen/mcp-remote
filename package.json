@@ -18,6 +18,9 @@
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "bin": {
     "mcp-remote": "dist/proxy.js",
     "mcp-remote-client": "dist/client.js"
