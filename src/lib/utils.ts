@@ -15,7 +15,8 @@ import {
 } from './protected-resource-metadata'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import express from 'express'
-import net from 'net'
+import net, { AddressInfo } from 'net'
+import { Server } from 'http'
 import crypto from 'crypto'
 import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
@@ -581,9 +582,17 @@ export async function connectToRemoteServer(
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, actualPort, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
+export async function setupOAuthCallbackServerWithLongPoll(
+  options: OAuthCallbackServerOptions,
+): Promise<{
+  server: Server
+  actualPort: number
+  authCode: string | null
+  waitForAuthCode: () => Promise<string>
+  authCompletedPromise: Promise<string>
+}> {
   let authCode: string | null = null
   const app = express()
 
@@ -660,8 +669,42 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, '127.0.0.1', () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
+  const { server, actualPort } = await new Promise<{ server: Server; actualPort: number }>((resolve, reject) => {
+    const httpServer = app.listen(options.port, '127.0.0.1')
+
+    httpServer.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        if (options.strictPort) {
+          reject(
+            Object.assign(
+              new Error(
+                `Callback port ${options.port} is already in use. The port is mandatory (it was specified explicitly or is pinned by --static-oauth-client-info). Close the process holding that port or restart your machine.`,
+              ),
+              { code: 'EADDRINUSE', requestedPort: options.port },
+            ),
+          )
+          return
+        }
+        log(`Warning: callback port ${options.port} is already in use, falling back to a random port`)
+        // Retry with an OS-assigned port
+        const fallback = app.listen(0, '127.0.0.1')
+        fallback.once('error', reject)
+        fallback.once('listening', () => {
+          const addr = fallback.address() as AddressInfo
+          log(`OAuth callback server running at http://127.0.0.1:${addr.port} (fallback from ${options.port})`)
+          resolve({ server: fallback, actualPort: addr.port })
+        })
+      } else {
+        reject(err)
+      }
+    })
+
+    httpServer.once('listening', () => {
+      const addr = httpServer.address() as AddressInfo
+      log(`OAuth callback server running at http://127.0.0.1:${addr.port}`)
+      resolve({ server: httpServer, actualPort: addr.port })
+    })
   })
 
   const waitForAuthCode = (): Promise<string> => {
@@ -677,16 +720,16 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     })
   }
 
-  return { server, authCode, waitForAuthCode, authCompletedPromise }
+  return { server, actualPort, authCode, waitForAuthCode, authCompletedPromise }
 }
 
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
-  const { server, authCode, waitForAuthCode } = setupOAuthCallbackServerWithLongPoll(options)
+export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
+  const { server, authCode, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll(options)
   return { server, authCode, waitForAuthCode }
 }
 
@@ -947,6 +990,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   return {
     serverUrl,
     callbackPort,
+    specifiedPort,
     headers,
     transportStrategy,
     host,

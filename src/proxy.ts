@@ -31,6 +31,7 @@ import { createLazyAuthCoordinator } from './lib/coordination'
 async function runProxy(
   serverUrl: string,
   callbackPort: number,
+  specifiedPort: number | undefined,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
   host: string,
@@ -44,8 +45,10 @@ async function runProxy(
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
+  const strictPort = !!specifiedPort || !!staticOAuthClientInfo
+
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, strictPort)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -90,6 +93,16 @@ async function runProxy(
 
     // Store server in outer scope for cleanup
     server = authState.server
+
+    // If the callback server bound to a different port (EADDRINUSE fallback), update the provider
+    if (authState.actualPort !== callbackPort) {
+      log(`Callback port changed from ${callbackPort} to ${authState.actualPort} (original port was unavailable)`)
+      authProvider.setCallbackPort(authState.actualPort)
+      if (!staticOAuthClientInfo) {
+        log('Invalidating cached client registration so it re-registers with the new redirect_uri')
+        await authProvider.invalidateCredentials('client')
+      }
+    }
 
     // If auth was completed by another instance, just log that we'll use the auth from disk
     if (authState.skipBrowserAuth) {
@@ -170,6 +183,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
     ({
       serverUrl,
       callbackPort,
+      specifiedPort,
       headers,
       transportStrategy,
       host,
@@ -184,6 +198,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: npx tsx proxy.ts <https://se
       return runProxy(
         serverUrl,
         callbackPort,
+        specifiedPort,
         headers,
         transportStrategy,
         host,
