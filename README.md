@@ -55,7 +55,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 }
 ```
 
-**Note:** Cursor and Claude Desktop (Windows) have a bug where spaces inside `args` aren't escaped when it invokes `npx`, which ends up mangling these values. You can work around it using:
+**Note:** Cursor, Codex-Cli and Claude Desktop (Windows) have a bug where spaces inside `args` aren't escaped when it invokes `npx`, which ends up mangling these values. You can work around it using:
 
 ```jsonc
 {
