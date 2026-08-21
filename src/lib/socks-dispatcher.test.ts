@@ -91,9 +91,7 @@ describe('Feature: SOCKS4 IPv6 Destination Rejection', () => {
     const { createSocksDispatcher } = await import('./socks-dispatcher')
     const dispatcher = createSocksDispatcher('socks4://127.0.0.1:1080')
 
-    await expect(
-      dispatcher.request({ origin: 'https://[::1]', path: '/', method: 'GET' }),
-    ).rejects.toThrow(/SOCKS4 does not support IPv6/)
+    await expect(dispatcher.request({ origin: 'https://[::1]', path: '/', method: 'GET' })).rejects.toThrow(/SOCKS4 does not support IPv6/)
     await dispatcher.close()
   })
 })
