@@ -3,6 +3,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { LoggingLevel } from '@modelcontextprotocol/sdk/types.js'
+import { ConnStatus } from './types'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
@@ -393,6 +396,29 @@ export async function discoverOAuthServerInfo(
 }
 
 /**
+ * Extended StdioServerTransport class
+ */
+export class StdioServerTransportExt extends StdioServerTransport {
+  /**
+   * Send a log message through the transport
+   * @param level The log level ('error' | 'debug' | 'info' | 'notice' | 'warning' | 'critical' | 'alert' | 'emergency')
+   * @param data The data object to send (should be JSON serializable)
+   * @param logger Optional logger name, defaults to 'mcp-remote'
+   */
+  sendMessage(level: LoggingLevel, data: any, logger: string = 'mcp-remote') {
+    return this.send({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+      params: {
+        level,
+        logger,
+        data,
+      },
+    })
+  }
+}
+
+/**
  * Type for the auth initialization function
  */
 export type AuthInitializer = () => Promise<{
@@ -418,9 +444,21 @@ export async function connectToRemoteServer(
   headers: Record<string, string>,
   authInitializer: AuthInitializer,
   transportStrategy: TransportStrategy = 'http-first',
+  localTransport: StdioServerTransportExt | null = null,
   recursionReasons: Set<string> = new Set(),
 ): Promise<Transport> {
-  log(`[${pid}] Connecting to remote server: ${serverUrl}`)
+  const _log = (level: LoggingLevel, message: any, status: ConnStatus) => {
+    // If localTransport is provided (proxy mode), send the message to it
+    if (localTransport) {
+      localTransport.sendMessage(level, {
+        status,
+        message,
+      })
+    }
+    log(message)
+  }
+
+  _log('info', `[${pid}] Connecting to remote server: ${serverUrl}`, 'connecting')
   const url = new URL(serverUrl)
 
   // Create transport with eventSourceInit to pass Authorization header if present
@@ -442,7 +480,7 @@ export async function connectToRemoteServer(
     },
   }
 
-  log(`Using transport strategy: ${transportStrategy}`)
+  _log('info', `Using transport strategy: ${transportStrategy}`, 'connecting')
   // Determine if we should attempt to fallback on error
   // Choose transport based on user strategy and recursion history
   const shouldAttemptFallback = transportStrategy === 'http-first' || transportStrategy === 'sse-first'
@@ -492,7 +530,7 @@ export async function connectToRemoteServer(
         await testClient.connect(testTransport)
       }
     }
-    log(`Connected to remote server using ${transport.constructor.name}`)
+    _log('info', `Connected to remote server using ${transport.constructor.name}`, 'connected')
 
     return transport
   } catch (error: any) {
@@ -511,16 +549,16 @@ export async function connectToRemoteServer(
         error.message.includes('Not Found'))
 
     if (shouldFallbackOnError) {
-      log(`Received error (status ${httpStatusCode ?? 'unknown'}): ${error.message}`)
+      _log('error', `Received error (status ${httpStatusCode ?? 'unknown'}): ${error.message}`, 'error')
 
       // If we've already tried falling back once, throw an error
       if (recursionReasons.has(REASON_TRANSPORT_FALLBACK)) {
         const errorMessage = `Already attempted transport fallback. Giving up.`
-        log(errorMessage)
+        _log('error', errorMessage, 'error_final')
         throw new Error(errorMessage)
       }
 
-      log(`Recursively reconnecting for reason: ${REASON_TRANSPORT_FALLBACK}`)
+      _log('info', `Recursively reconnecting for reason: ${REASON_TRANSPORT_FALLBACK}`, 'reconnecting')
 
       // Add to recursion reasons set
       recursionReasons.add(REASON_TRANSPORT_FALLBACK)
@@ -533,10 +571,11 @@ export async function connectToRemoteServer(
         headers,
         authInitializer,
         sseTransport ? 'http-only' : 'sse-only',
+        localTransport,
         recursionReasons,
       )
     } else if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
-      log('Authentication required. Initializing auth...')
+      _log('info', 'Authentication required. Initializing auth...', 'authenticating')
       debugLog('Authentication error detected', {
         errorCode: error instanceof OAuthError ? error.errorCode : undefined,
         errorMessage: error.message,
@@ -548,9 +587,9 @@ export async function connectToRemoteServer(
       const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
       if (skipBrowserAuth) {
-        log('Authentication required but skipping browser auth - using shared auth')
+        _log('info', 'Authentication required but skipping browser auth - using shared auth', 'authenticating')
       } else {
-        log('Authentication required. Waiting for authorization...')
+        _log('info', 'Authentication required. Waiting for authorization...', 'authenticating')
       }
 
       // Wait for the authorization code from the callback
@@ -559,7 +598,7 @@ export async function connectToRemoteServer(
       debugLog('Received auth code from callback server')
 
       try {
-        log('Completing authorization...')
+        _log('info', 'Completing authorization...', 'authenticating')
         // Complete auth on the transport that received the 401 challenge (in proxy mode this is the
         // one-off test transport, not `transport`), so the stored resource_metadata URL is used to
         // discover the correct token_endpoint. Falls back to `transport` for the with-client path.
@@ -568,7 +607,7 @@ export async function connectToRemoteServer(
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
           const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
-          log(errorMessage)
+          _log('error', errorMessage, 'error_final')
           debugLog('Already attempted auth reconnection, giving up', {
             recursionReasons: Array.from(recursionReasons),
           })
@@ -577,13 +616,22 @@ export async function connectToRemoteServer(
 
         // Track this reason for recursion
         recursionReasons.add(REASON_AUTH_NEEDED)
-        log(`Recursively reconnecting for reason: ${REASON_AUTH_NEEDED}`)
+        _log('info', `Recursively reconnecting for reason: ${REASON_AUTH_NEEDED}`, 'reconnecting')
         debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
-        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+        return connectToRemoteServer(
+          client,
+          serverUrl,
+          authProvider,
+          headers,
+          authInitializer,
+          transportStrategy,
+          localTransport,
+          recursionReasons,
+        )
       } catch (authError: any) {
-        log('Authorization error:', authError)
+        _log('error', `Authorization error: ${authError}`, 'error_final')
         debugLog('Authorization error during finishAuth', {
           errorMessage: authError.message,
           stack: authError.stack,
@@ -591,7 +639,7 @@ export async function connectToRemoteServer(
         throw authError
       }
     } else {
-      log('Connection error:', error)
+      _log('error', `Connection error: ${error}`, 'error_final')
       debugLog('Connection error', {
         errorMessage: error.message,
         stack: error.stack,

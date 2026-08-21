@@ -57,6 +57,11 @@ export interface OAuthCallbackServerOptions {
   strictPort?: boolean
 }
 
+/*
+ * Connection status types used for logging (via local transport, in proxy mode)
+ */
+export type ConnStatus = 'connected' | 'connecting' | 'reconnecting' | 'authenticating' | 'error' | 'error_final'
+
 // optional tatic OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
