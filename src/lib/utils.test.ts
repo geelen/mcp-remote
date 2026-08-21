@@ -980,6 +980,100 @@ describe('Feature: MCP Proxy', () => {
       }),
     )
   })
+
+  it('Scenario: Failed forward of a request surfaces a JSON-RPC error to the client', async () => {
+    // Given a server transport whose send() rejects, e.g. because the
+    // server expired the session and answers HTTP 404 (issue #106)
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client sends a request (a message with an id)
+    const clientRequest = {
+      jsonrpc: '2.0' as const,
+      method: 'tools/call',
+      id: 42,
+      params: { name: 'SomeTool', arguments: {} },
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientRequest)
+    }
+
+    // Then the client receives a JSON-RPC error response for that id
+    // instead of waiting forever for a reply that never arrives
+    await vi.waitFor(() => {
+      expect(mockTransportToClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          jsonrpc: '2.0',
+          id: 42,
+          error: expect.objectContaining({
+            code: -32603,
+            message: expect.stringContaining('HTTP 404'),
+          }),
+        }),
+      )
+    })
+  })
+
+  it('Scenario: Failed forward of a notification does not produce a response', async () => {
+    // Given a server transport whose send() rejects
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client sends a notification (no id)
+    const clientNotification = {
+      jsonrpc: '2.0' as const,
+      method: 'notifications/initialized',
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientNotification)
+    }
+
+    // Then no response is sent back — JSON-RPC forbids replies to notifications
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockTransportToClient.send).not.toHaveBeenCalled()
+  })
 })
 
 describe('setupOAuthCallbackServerWithLongPoll', () => {
