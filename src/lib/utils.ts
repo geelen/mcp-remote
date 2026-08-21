@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import { AuthCodeResult, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
@@ -396,7 +396,7 @@ export async function discoverOAuthServerInfo(
  * Type for the auth initialization function
  */
 export type AuthInitializer = () => Promise<{
-  waitForAuthCode: () => Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
   skipBrowserAuth: boolean
 }>
 
@@ -548,15 +548,32 @@ export async function connectToRemoteServer(
       const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
       if (skipBrowserAuth) {
-        log('Authentication required but skipping browser auth - using shared auth')
+        // No code is coming to this instance; the tokens are already on disk
+        log('Authentication was completed by another instance; reconnecting with the stored tokens')
+
+        if (recursionReasons.has(REASON_AUTH_NEEDED)) {
+          const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
+          log(errorMessage)
+          throw new Error(errorMessage)
+        }
+
+        recursionReasons.add(REASON_AUTH_NEEDED)
+        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
       } else {
         log('Authentication required. Waiting for authorization...')
+        if ('openPendingAuthorization' in authProvider && typeof authProvider.openPendingAuthorization === 'function') {
+          await authProvider.openPendingAuthorization()
+        }
       }
 
       // Wait for the authorization code from the callback
       debugLog('Waiting for auth code from callback server')
-      const code = await waitForAuthCode()
+      const { code, state } = await waitForAuthCode()
       debugLog('Received auth code from callback server')
+
+      if (state && 'useAuthorizationState' in authProvider && typeof authProvider.useAuthorizationState === 'function') {
+        authProvider.useAuthorizationState(state)
+      }
 
       try {
         log('Completing authorization...')
@@ -611,15 +628,16 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   server: Server
   actualPort: number
   authCode: string | null
-  waitForAuthCode: () => Promise<string>
-  authCompletedPromise: Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
+  authCompletedPromise: Promise<AuthCodeResult>
 }> {
   let authCode: string | null = null
+  let authState: string | null = null
   const app = express()
 
   // Create a promise to track when auth is completed
-  let authCompletedResolve: (code: string) => void
-  const authCompletedPromise = new Promise<string>((resolve) => {
+  let authCompletedResolve: (result: AuthCodeResult) => void
+  const authCompletedPromise = new Promise<AuthCodeResult>((resolve) => {
     authCompletedResolve = resolve
   })
 
@@ -666,14 +684,16 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   // OAuth callback endpoint
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
+    const state = req.query.state as string | undefined
     if (!code) {
       res.status(400).send('Error: No authorization code received')
       return
     }
 
     authCode = code
+    authState = state ?? null
     log('Auth code received, resolving promise')
-    authCompletedResolve(code)
+    authCompletedResolve({ code, state })
 
     res.send(`
       Authorization successful!
@@ -687,7 +707,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     `)
 
     // Notify main flow that auth code is available
-    options.events.emit('auth-code-received', code)
+    options.events.emit('auth-code-received', code, state)
   })
 
   // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
@@ -728,15 +748,15 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     })
   })
 
-  const waitForAuthCode = (): Promise<string> => {
+  const waitForAuthCode = (): Promise<AuthCodeResult> => {
     return new Promise((resolve) => {
       if (authCode) {
-        resolve(authCode)
+        resolve({ code: authCode, state: authState ?? undefined })
         return
       }
 
-      options.events.once('auth-code-received', (code) => {
-        resolve(code)
+      options.events.once('auth-code-received', (code: string, state?: string) => {
+        resolve({ code, state })
       })
     })
   }

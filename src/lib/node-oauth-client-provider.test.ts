@@ -3,6 +3,7 @@ import { NodeOAuthClientProvider } from './node-oauth-client-provider'
 import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
+import { openBrowser } from './open-browser'
 
 vi.mock('./mcp-auth-config')
 vi.mock('./authorization-server-metadata', () => ({
@@ -16,6 +17,9 @@ vi.mock('./utils', () => ({
   MCP_REMOTE_VERSION: '1.0.0',
 }))
 vi.mock('open', () => ({ default: vi.fn() }))
+vi.mock('./open-browser', () => ({ openBrowser: vi.fn().mockResolvedValue(true) }))
+
+const openBrowserMock = vi.mocked(openBrowser)
 
 describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   let provider: NodeOAuthClientProvider
@@ -176,38 +180,70 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       mockReadTextFile.mockResolvedValue('test-verifier')
     })
 
-    it('should save the code verifier to a filename scoped to the current process ID', async () => {
+    it('should save the code verifier to a filename scoped to the authorization state', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.saveCodeVerifier('test-verifier')
 
-      expect(mockWriteTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, 'test-verifier')
+      expect(mockWriteTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, 'test-verifier')
       // Two processes for the same server must never target the same filename
       expect(mockWriteTextFile).not.toHaveBeenCalledWith('test-hash', 'code_verifier.txt', 'test-verifier')
     })
 
-    it('should read the code verifier back from the same process-scoped filename', async () => {
+    it('should not open a second tab while another instance has one pending', async () => {
+      vi.mocked(mcpAuthConfig.readJsonFile).mockResolvedValue({ state: 'other-instance-state', timestamp: Date.now() } as any)
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))
+
+      await provider.openPendingAuthorization()
+
+      expect(openBrowserMock).not.toHaveBeenCalled()
+    })
+
+    it('should open a tab when the pending one is too old to still be useful', async () => {
+      const fourMinutesAgo = Date.now() - 4 * 60 * 1000
+      vi.mocked(mcpAuthConfig.readJsonFile).mockResolvedValue({ state: 'other-instance-state', timestamp: fourMinutesAgo } as any)
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))
+
+      await provider.openPendingAuthorization()
+
+      expect(openBrowserMock).toHaveBeenCalled()
+    })
+
+    it('should read the verifier of the flow the code came from, not its own', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      // A tab opened by an instance the host has since killed
+      provider.useAuthorizationState('state-from-another-instance')
+
+      await provider.codeVerifier()
+
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', 'code_verifier_state-from-another-instance.txt', expect.any(String))
+      expect(mockReadTextFile).not.toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
+    })
+
+    it('should read the code verifier back from the same flow-scoped filename', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.codeVerifier()
 
-      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, expect.any(String))
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
     })
 
-    it('should delete the process-scoped verifier file when invalidating the verifier scope', async () => {
+    it('should delete the flow-scoped verifier file when invalidating the verifier scope', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.invalidateCredentials('verifier')
 
-      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
     })
 
-    it('should delete the process-scoped verifier file when invalidating all credentials', async () => {
+    it('should delete the flow-scoped verifier file when invalidating all credentials', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.invalidateCredentials('all')
 
-      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
     })
   })
 
