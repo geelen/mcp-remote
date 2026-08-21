@@ -2,7 +2,7 @@ import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sd
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { Transport, type FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
@@ -447,6 +447,44 @@ export async function connectToRemoteServer(
   // Choose transport based on user strategy and recursion history
   const shouldAttemptFallback = transportStrategy === 'http-first' || transportStrategy === 'sse-first'
 
+  // Custom fetch that converts 302 redirects to 401 responses, so the SDK's
+  // built-in OAuth flow can handle SSO gateways that redirect to an identity
+  // provider instead of returning 401.
+  // We use redirect:'manual' to catch redirects before they're followed, then
+  // re-fetch with redirect:'follow' for non-redirect responses.
+  const fetchWith302To401: FetchLike = async (input, init) => {
+    const manualInit = { ...init, redirect: 'manual' as const }
+    const response = await fetch(input as any, manualInit as any)
+    if (response.status >= 300 && response.status < 400) {
+      debugLog('Intercepted redirect response, converting to 401 for OAuth flow', {
+        status: response.status,
+        location: response.headers.get('location'),
+      })
+      // Return a synthetic 401 response that the SDK's auth handler understands
+      return {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: new Headers({ 'WWW-Authenticate': 'Bearer' }),
+        text: async () => 'Unauthorized',
+        json: async () => ({ error: 'unauthorized' }),
+        body: null,
+        bodyUsed: false,
+        redirected: false,
+        type: 'basic' as ResponseType,
+        url: typeof input === 'string' ? input : input.toString(),
+        clone: () => {
+          throw new Error('not cloneable')
+        },
+        arrayBuffer: async () => new ArrayBuffer(0),
+        blob: async () => new Blob(),
+        formData: async () => new FormData(),
+        bytes: async () => new Uint8Array(),
+      } as unknown as Response
+    }
+    return response as unknown as Response
+  }
+
   // Create transport instance based on the strategy
   const sseTransport = transportStrategy === 'sse-only' || transportStrategy === 'sse-first'
   const transport = sseTransport
@@ -458,6 +496,7 @@ export async function connectToRemoteServer(
     : new StreamableHTTPClientTransport(url, {
         authProvider,
         requestInit: { headers },
+        fetch: fetchWith302To401,
       })
 
   // When connecting without a Client (proxy mode), the auth challenge (401) is not received by
@@ -485,7 +524,11 @@ export async function connectToRemoteServer(
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
-        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        const testTransport = new StreamableHTTPClientTransport(url, {
+          authProvider,
+          requestInit: { headers },
+          fetch: fetchWith302To401,
+        })
         // This transport is the one that will receive (and store the metadata from) any 401 challenge.
         authChallengeTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
