@@ -7,13 +7,63 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
-import { StaticOAuthClientInformationFull } from './types'
+import { readJsonFile, writeJsonFile, readTextFile, deleteConfigFile } from './mcp-auth-config'
+import {
+  OAuthAuthorizationPendingError,
+  OAuthCallbackStateError,
+  OAuthTokenVerificationPendingError,
+  StaticOAuthClientInformationFull,
+} from './types'
 import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import type { ProtectedResourceMetadata } from './protected-resource-metadata'
+import { StaleClientRegistrationError } from './stale-client-registration-error'
+
+type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
+type AuthorizationState = 'ready' | 'authorizing' | 'verifying'
+
+type AuthorizationTransaction = {
+  version: 1
+  state: string
+  codeVerifier: string
+  createdAt: number
+}
+
+const AuthorizationTransactionSchema = {
+  async parseAsync(value: unknown): Promise<AuthorizationTransaction | null> {
+    if (!value || typeof value !== 'object') {
+      return null
+    }
+
+    const candidate = value as Record<string, unknown>
+    if (
+      candidate.version !== 1 ||
+      typeof candidate.state !== 'string' ||
+      typeof candidate.codeVerifier !== 'string' ||
+      typeof candidate.createdAt !== 'number'
+    ) {
+      return null
+    }
+
+    return candidate as AuthorizationTransaction
+  },
+}
+
+function isStaleClientRegistrationResponse(response: unknown): boolean {
+  if (!response || typeof response !== 'object') {
+    return false
+  }
+
+  const { registration_endpoint: registrationEndpoint, error_description: errorDescription } = response as Record<string, unknown>
+  return (
+    typeof registrationEndpoint === 'string' &&
+    typeof errorDescription === 'string' &&
+    /\bclient(?:\s+id)?\b\s+(?:['"][^'"]+['"]\s+)?is\s+not[\s-]+registered\b/i.test(errorDescription)
+  )
+}
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -31,9 +81,15 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizeResource: string | undefined
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
+  private clientRegistrationSource: ClientRegistrationSource
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  private authorizationState: AuthorizationState
+  private callbackState: string | undefined
+  private authorizationPrepared = false
+  private sharedAuthorization = false
+  private authorizationExchangeState = new AsyncLocalStorage<string>()
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -51,9 +107,28 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.authorizeResource = options.authorizeResource
     this._state = randomUUID()
     this._clientInfo = undefined
+    this.clientRegistrationSource = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+    this.authorizationState = 'ready'
+    this.callbackState = undefined
+  }
+
+  /**
+   * Marks a successfully processed MCP response as proof that the most
+   * recently exchanged token is accepted by the remote resource server.
+   */
+  async markRemoteAuthorizationVerified(): Promise<void> {
+    if (this.authorizationState !== 'verifying') {
+      return
+    }
+
+    await Promise.all([
+      deleteConfigFile(this.serverUrlHash, 'authorization.json'),
+      deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+    ])
+    this.resetAuthorizationState()
   }
 
   get redirectUrl(): string {
@@ -159,6 +234,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
       this._clientInfo = this.staticOAuthClientInfo
+      this.clientRegistrationSource = 'static'
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -169,6 +245,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     if (clientInfo) {
       this._clientInfo = clientInfo
+      if (this.clientRegistrationSource !== 'fresh-dynamic') {
+        this.clientRegistrationSource = 'cached-dynamic'
+      }
     }
 
     debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
@@ -182,6 +261,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
     debugLog('Saving client info', { client_id: clientInformation.client_id })
     this._clientInfo = clientInformation
+    this.clientRegistrationSource = 'fresh-dynamic'
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -227,6 +307,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param tokens The tokens to save
    */
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    const exchangeState = this.authorizationExchangeState.getStore()
+    if (exchangeState && exchangeState !== this.callbackState) {
+      debugLog('Ignoring tokens from a retired OAuth authorization exchange')
+      return
+    }
     const timeLeft = tokens.expires_in || 0
 
     // Alert if expires_in is invalid
@@ -246,6 +331,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     })
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokens)
+    this.authorizationState = 'verifying'
   }
 
   /**
@@ -253,6 +339,23 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    if (this.authorizationState === 'verifying') {
+      throw new OAuthTokenVerificationPendingError()
+    }
+
+    if (this.authorizationState === 'authorizing') {
+      const transaction = await this.readAuthorizationTransaction()
+      if (!transaction || transaction.state !== authorizationUrl.searchParams.get('state')) {
+        throw new OAuthAuthorizationPendingError()
+      }
+    } else {
+      await this.prepareAuthorization()
+      if (this.sharedAuthorization) {
+        return
+      }
+      this.authorizationState = 'authorizing'
+    }
+
     // Optionally fetch metadata for debugging/informational purposes (non-blocking)
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
@@ -271,6 +374,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
     try {
+      await this.preflightDynamicClientRegistration(authorizationUrl)
+    } catch (error) {
+      this.authorizationState = 'ready'
+      throw error
+    }
+
+    try {
       await open(sanitizeUrl(authorizationUrl.toString()))
       log('Browser opened automatically.')
     } catch (error) {
@@ -279,13 +389,117 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
   }
 
+  private async preflightDynamicClientRegistration(authorizationUrl: URL): Promise<void> {
+    if (this.clientRegistrationSource !== 'cached-dynamic' && this.clientRegistrationSource !== 'fresh-dynamic') {
+      return
+    }
+
+    let response: Response
+    try {
+      response = await fetch(authorizationUrl.toString(), {
+        redirect: 'manual',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      })
+    } catch (error) {
+      debugLog('Authorization preflight failed; continuing to browser authorization', error)
+      return
+    }
+
+    if (response.status !== 400 && response.status !== 401) {
+      return
+    }
+
+    let errorResponse: unknown
+    try {
+      errorResponse = await response.json()
+    } catch (error) {
+      debugLog('Authorization preflight returned invalid JSON; continuing to browser authorization', error)
+      return
+    }
+
+    if (!isStaleClientRegistrationResponse(errorResponse)) {
+      return
+    }
+
+    await this.invalidateCredentials('all')
+    throw new StaleClientRegistrationError()
+  }
+
   /**
    * Saves the PKCE code verifier
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
-    debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, 'code_verifier.txt', codeVerifier)
+    if (this.authorizationState === 'authorizing') {
+      throw new OAuthAuthorizationPendingError()
+    }
+
+    if (this.authorizationState === 'verifying') {
+      throw new OAuthTokenVerificationPendingError()
+    }
+
+    await this.prepareAuthorization()
+    if (this.sharedAuthorization) {
+      return
+    }
+
+    const transaction: AuthorizationTransaction = {
+      version: 1,
+      state: this._state,
+      codeVerifier,
+      createdAt: Date.now(),
+    }
+
+    debugLog('Saving state-bound PKCE authorization transaction')
+    this.authorizationState = 'authorizing'
+    this.callbackState = undefined
+    try {
+      await writeJsonFile(this.serverUrlHash, 'authorization.json', transaction)
+    } catch (error) {
+      this.resetAuthorizationState()
+      throw error
+    }
+  }
+
+  /**
+   * Binds a browser callback to the verifier produced for that exact state.
+   * A stale callback must never exchange a code with a newer verifier.
+   */
+  async acceptAuthorizationCallback(state: string): Promise<void> {
+    const transaction = await this.readAuthorizationTransaction()
+    if (!transaction || transaction.state !== state) {
+      throw new OAuthCallbackStateError()
+    }
+
+    if (this.isTransactionExpired(transaction)) {
+      await this.invalidateCredentials('verifier')
+      throw new OAuthCallbackStateError()
+    }
+
+    this.callbackState = state
+  }
+
+  /**
+   * Retires an authorization that cannot be completed, while preserving a
+   * current transaction when an old browser callback arrives out of order.
+   */
+  async handleAuthorizationFailure(error: unknown): Promise<void> {
+    if (error instanceof OAuthCallbackStateError || (error instanceof Error && error.name === 'OAuthCallbackStateError')) {
+      return
+    }
+
+    if (this.sharedAuthorization) {
+      this.resetAuthorizationState()
+      return
+    }
+
+    await this.invalidateCredentials('tokens')
+  }
+
+  /** Runs one code exchange in a state-bound async context. */
+  async runAuthorizationExchange<T>(state: string, exchange: () => Promise<T>): Promise<T> {
+    return await this.authorizationExchangeState.run(state, exchange)
   }
 
   /**
@@ -293,7 +507,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The code verifier
    */
   async codeVerifier(): Promise<string> {
-    debugLog('Reading code verifier')
+    const transaction = await this.readAuthorizationTransaction()
+    if (transaction) {
+      if (this.callbackState !== transaction.state) {
+        throw new OAuthCallbackStateError()
+      }
+      debugLog('Reading verifier for state-bound PKCE authorization transaction')
+      return transaction.codeVerifier
+    }
+
+    debugLog('Reading legacy code verifier')
     const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
@@ -311,30 +534,75 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'authorization.json'),
           deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
         ])
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
+        this.resetAuthorizationState()
         debugLog('All credentials invalidated')
         break
 
       case 'client':
         await deleteConfigFile(this.serverUrlHash, 'client_info.json')
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
         debugLog('Client information invalidated')
         break
 
       case 'tokens':
-        await deleteConfigFile(this.serverUrlHash, 'tokens.json')
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, 'tokens.json'),
+          deleteConfigFile(this.serverUrlHash, 'authorization.json'),
+          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+        ])
+        this.resetAuthorizationState()
         debugLog('OAuth tokens invalidated')
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, 'code_verifier.txt')
+        await Promise.all([
+          deleteConfigFile(this.serverUrlHash, 'authorization.json'),
+          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+        ])
+        this.resetAuthorizationState()
         debugLog('Code verifier invalidated')
         break
 
       default:
         throw new Error(`Unknown credential scope: ${scope}`)
     }
+  }
+
+  private async prepareAuthorization(): Promise<void> {
+    if (this.authorizationPrepared) {
+      return
+    }
+
+    try {
+      const preparation = await this.options.prepareAuthorization?.()
+      this.sharedAuthorization = preparation?.skipBrowserAuth === true
+      this.authorizationPrepared = true
+    } catch (error) {
+      this.resetAuthorizationState()
+      throw error
+    }
+  }
+
+  private async readAuthorizationTransaction(): Promise<AuthorizationTransaction | undefined> {
+    return await readJsonFile<AuthorizationTransaction>(this.serverUrlHash, 'authorization.json', AuthorizationTransactionSchema)
+  }
+
+  private isTransactionExpired(transaction: AuthorizationTransaction): boolean {
+    const authTimeoutMs = this.options.authTimeoutMs ?? 30_000
+    return transaction.createdAt + authTimeoutMs < Date.now()
+  }
+
+  private resetAuthorizationState(): void {
+    this.authorizationState = 'ready'
+    this.callbackState = undefined
+    this.authorizationPrepared = false
+    this.sharedAuthorization = false
+    this._state = randomUUID()
   }
 }
