@@ -124,10 +124,15 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     // Priority 3: Scopes from Protected Resource Metadata (RFC 9728)
-    if (this.protectedResourceMetadata?.scopes_supported?.length) {
-      const scope = this.protectedResourceMetadata.scopes_supported.join(' ')
+    const resourceScopes = this.protectedResourceMetadata?.scopes_supported
+    if (resourceScopes !== undefined) {
+      if (resourceScopes.length === 0) {
+        debugLog('Protected resource advertises no scopes (scopes_supported: []), omitting scope')
+        return ''
+      }
+      const scope = resourceScopes.join(' ')
       debugLog('Using scopes from Protected Resource Metadata', {
-        scopes_supported: this.protectedResourceMetadata.scopes_supported,
+        scopes_supported: resourceScopes,
         scope,
       })
       return scope
