@@ -20,10 +20,12 @@ import {
   setupSignalHandlers,
   TransportStrategy,
   discoverOAuthServerInfo,
+  setupPing,
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator } from './lib/coordination'
+import { PingConfig } from './lib/types'
 
 /**
  * Main function to run the proxy
@@ -41,6 +43,7 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  pingConfig: PingConfig,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -122,6 +125,9 @@ async function runProxy(
     // Connect to remote server with lazy authentication
     const remoteTransport = await connectToRemoteServer(null, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
+    // Set up ping mechanism for remote transport
+    const stopPing = setupPing(remoteTransport, pingConfig)
+
     // Set up bidirectional proxy between local and remote transports
     mcpProxy({
       transportToClient: localTransport,
@@ -137,6 +143,7 @@ async function runProxy(
 
     // Setup cleanup handler
     const cleanup = async () => {
+      stopPing()
       await remoteTransport.close()
       await localTransport.close()
       // Only close the server if it was initialized
@@ -194,6 +201,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      pingConfig,
     }) => {
       return runProxy(
         serverUrl,
@@ -208,6 +216,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        pingConfig,
       )
     },
   )

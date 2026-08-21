@@ -57,6 +57,14 @@ export interface OAuthCallbackServerOptions {
   strictPort?: boolean
 }
 
+/*
+ * Configuration for the ping mechanism
+ */
+export interface PingConfig {
+  enabled: boolean
+  interval: number
+}
+
 // optional tatic OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
