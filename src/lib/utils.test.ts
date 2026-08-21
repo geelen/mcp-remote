@@ -1074,6 +1074,48 @@ describe('Feature: MCP Proxy', () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(mockTransportToClient.send).not.toHaveBeenCalled()
   })
+
+  it('Scenario: Failed forward of a client response does not produce a response', async () => {
+    // Given a server transport whose send() rejects
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client answers a server-initiated request (an id, but no method)
+    const clientResponse = {
+      jsonrpc: '2.0' as const,
+      id: 7,
+      result: {},
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientResponse)
+    }
+
+    // Then no error response is sent back. Answering a response would make the
+    // local SDK raise "Received a response for an unknown message ID"
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockTransportToClient.send).not.toHaveBeenCalled()
+  })
 })
 
 describe('setupOAuthCallbackServerWithLongPoll', () => {

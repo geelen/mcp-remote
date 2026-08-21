@@ -208,9 +208,13 @@ export function mcpProxy({
       // If forwarding a request fails, the local client would wait forever
       // for a response that never arrives (e.g. the server expired the
       // session and answers 404, see #106). Surface the failure as a
-      // JSON-RPC error response instead. Notifications carry no id and
-      // must not be answered.
-      if (message.id !== undefined && message.id !== null) {
+      // JSON-RPC error response instead.
+      //
+      // Only requests may be answered. Notifications carry no id, and this
+      // handler also sees the client's *responses* to server-initiated
+      // requests - those carry an id but no method, and answering one makes
+      // the local SDK raise "Received a response for an unknown message ID".
+      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
         const errorResponse = {
           jsonrpc: '2.0' as const,
           id: message.id,
