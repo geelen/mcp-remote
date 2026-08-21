@@ -470,6 +470,8 @@ export async function connectToRemoteServer(
   // that actually handled the challenge so we can complete auth on it.
   let authChallengeTransport: SSEClientTransport | StreamableHTTPClientTransport | undefined
 
+  const listenerReadyAuthState = await authInitializer()
+
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
 
@@ -544,8 +546,8 @@ export async function connectToRemoteServer(
       })
 
       // Initialize authentication on-demand
-      debugLog('Calling authInitializer to start auth flow')
-      const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
+      debugLog('Using pre-bound OAuth callback listener for auth flow')
+      const { waitForAuthCode, skipBrowserAuth } = listenerReadyAuthState
 
       if (skipBrowserAuth) {
         log('Authentication required but skipping browser auth - using shared auth')
