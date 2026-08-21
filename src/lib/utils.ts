@@ -15,7 +15,8 @@ import {
 } from './protected-resource-metadata'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import express from 'express'
-import net from 'net'
+import net, { AddressInfo } from 'net'
+import { Server } from 'http'
 import crypto from 'crypto'
 import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
@@ -204,10 +205,37 @@ export function mcpProxy({
       debugLog('Initialize message with modified client info', { clientInfo })
     }
 
-    transportToServer.send(message).catch((error) => onSendError(error, message))
+    transportToServer.send(message).catch(async (error) => {
+      // Try re-authenticating and resending first; onSendError returns true only
+      // when the message was successfully delivered after re-auth.
+      if (await onSendError(error, message)) return
+
+      onServerError(error)
+
+      // If forwarding a request fails, the local client would wait forever
+      // for a response that never arrives (e.g. the server expired the
+      // session and answers 404, see #106). Surface the failure as a
+      // JSON-RPC error response instead.
+      //
+      // Only requests may be answered. Notifications carry no id, and this
+      // handler also sees the client's *responses* to server-initiated
+      // requests - those carry an id but no method, and answering one makes
+      // the local SDK raise "Received a response for an unknown message ID".
+      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
+        const errorResponse = {
+          jsonrpc: '2.0' as const,
+          id: message.id,
+          error: {
+            code: -32603,
+            message: `Failed to forward message to remote server: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        }
+        transportToClient.send(errorResponse).catch(onClientError)
+      }
+    })
   }
 
-  transportToServer.onmessage = (_message) => {
+  transportToServer.onmessage = (_message: Message) => {
     // TODO: fix types
     const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
@@ -254,18 +282,23 @@ export function mcpProxy({
     debugLog('Error from remote server', { stack: error.stack })
   }
 
-  async function onSendError(error: Error, failedMessage?: Message) {
+  async function onSendError(error: Error, failedMessage?: Message): Promise<boolean> {
     if (error instanceof UnauthorizedError && authInitializer) {
       // If a re-auth flow is already in progress, wait for it instead of starting another
       if (reAuthPromise) {
         debugLog('onSendError: Re-auth already in progress, waiting for it to complete')
-        await reAuthPromise
-        if (failedMessage) {
-          log('onSendError: Retrying failed message after shared re-authentication')
-          await transportToServer.send(failedMessage)
-          log('onSendError: Message successfully sent after shared re-authentication')
+        try {
+          await reAuthPromise
+          if (failedMessage) {
+            log('onSendError: Retrying failed message after shared re-authentication')
+            await transportToServer.send(failedMessage)
+            log('onSendError: Message successfully sent after shared re-authentication')
+          }
+          return true
+        } catch (sharedError) {
+          log('onSendError: Shared re-authentication failed:', sharedError)
+          return false
         }
-        return
       }
 
       reAuthPromise = (async () => {
@@ -302,12 +335,17 @@ export function mcpProxy({
           await transportToServer.send(failedMessage)
           log('onSendError: Message successfully sent after re-authentication')
         }
+        return true
       } catch (error) {
         log('onSendError: Error completing authorization:', error)
+        return false
       } finally {
         reAuthPromise = null
       }
     }
+
+    // Not an auth failure we can recover from - let the caller surface it.
+    return false
   }
 }
 
@@ -495,6 +533,16 @@ export async function connectToRemoteServer(
         requestInit: { headers },
       })
 
+  // When connecting without a Client (proxy mode), the auth challenge (401) is not received by
+  // `transport` itself but by the one-off `testTransport` created below. The SDK stores the
+  // `resource_metadata` URL from the WWW-Authenticate header on the transport that received the
+  // 401, and `finishAuth` reads it back to discover the authorization server. If we call
+  // `finishAuth` on `transport` (which never saw the 401) that URL is missing, so the token
+  // exchange falls back to POSTing at the resource origin instead of the discovered
+  // `token_endpoint` (see https://github.com/geelen/mcp-remote/issues/270). Track the transport
+  // that actually handled the challenge so we can complete auth on it.
+  let authChallengeTransport: SSEClientTransport | StreamableHTTPClientTransport | undefined
+
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
 
@@ -511,6 +559,8 @@ export async function connectToRemoteServer(
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        // This transport is the one that will receive (and store the metadata from) any 401 challenge.
+        authChallengeTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
@@ -583,7 +633,10 @@ export async function connectToRemoteServer(
 
       try {
         log('Completing authorization...')
-        await transport.finishAuth(code)
+        // Complete auth on the transport that received the 401 challenge (in proxy mode this is the
+        // one-off test transport, not `transport`), so the stored resource_metadata URL is used to
+        // discover the correct token_endpoint. Falls back to `transport` for the with-client path.
+        await (authChallengeTransport ?? transport).finishAuth(code)
         debugLog('Authorization completed successfully')
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
@@ -625,9 +678,15 @@ export async function connectToRemoteServer(
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, actualPort, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
+export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions): Promise<{
+  server: Server
+  actualPort: number
+  authCode: string | null
+  waitForAuthCode: () => Promise<string>
+  authCompletedPromise: Promise<string>
+}> {
   let authCode: string | null = null
   const app = express()
 
@@ -711,35 +770,69 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, '127.0.0.1', () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
+  const { server, actualPort } = await new Promise<{ server: Server; actualPort: number }>((resolve, reject) => {
+    const httpServer = app.listen(options.port, '127.0.0.1')
+
+    httpServer.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        if (options.strictPort) {
+          reject(
+            Object.assign(
+              new Error(
+                `Callback port ${options.port} is already in use. The port is mandatory (it was specified explicitly or is pinned by --static-oauth-client-info). Close the process holding that port or restart your machine.`,
+              ),
+              { code: 'EADDRINUSE', requestedPort: options.port },
+            ),
+          )
+          return
+        }
+        log(`Warning: callback port ${options.port} is already in use, falling back to a random port`)
+        // Retry with an OS-assigned port
+        const fallback = app.listen(0, '127.0.0.1')
+        fallback.once('error', reject)
+        fallback.once('listening', () => {
+          const addr = fallback.address() as AddressInfo
+          log(`OAuth callback server running at http://127.0.0.1:${addr.port} (fallback from ${options.port})`)
+          resolve({ server: fallback, actualPort: addr.port })
+        })
+      } else {
+        reject(err)
+      }
+    })
+
+    httpServer.once('listening', () => {
+      const addr = httpServer.address() as AddressInfo
+      log(`OAuth callback server running at http://127.0.0.1:${addr.port}`)
+      resolve({ server: httpServer, actualPort: addr.port })
+    })
   })
 
   const waitForAuthCode = (): Promise<string> => {
     return new Promise((resolve) => {
       if (authCode) {
         resolve(authCode)
-        authCode = null 
+        authCode = null
         return
       }
 
       options.events.once('auth-code-received', (code) => {
         resolve(code)
-        authCode = null 
+        authCode = null
       })
     })
   }
 
-  return { server, authCode, waitForAuthCode, authCompletedPromise }
+  return { server, actualPort, authCode, waitForAuthCode, authCompletedPromise }
 }
 
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
-  const { server, authCode, waitForAuthCode } = setupOAuthCallbackServerWithLongPoll(options)
+export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
+  const { server, authCode, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll(options)
   return { server, authCode, waitForAuthCode }
 }
 
@@ -803,6 +896,18 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
 export async function parseCommandLineArgs(args: string[], usage: string) {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(`${usage}\n`)
+    process.exit(0)
+  }
+
+  // Deliberately no `-v` alias: it conventionally means "verbose", and this CLI
+  // already has --debug, so leave -v free to become its shorthand later.
+  if (args.includes('--version')) {
+    process.stdout.write(`${MCP_REMOTE_VERSION}\n`)
+    process.exit(0)
+  }
+
   // Process headers
   const headers: Record<string, string> = {}
   let i = 0
@@ -979,7 +1084,9 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   if (Object.keys(headers).length > 0) {
-    log(`Using custom headers: ${JSON.stringify(headers)}`)
+    // Names only - values routinely carry bearer tokens and API keys, and this
+    // goes to stderr, which MCP clients capture into their own logs.
+    log(`Using custom headers: ${Object.keys(headers).join(', ')}`)
   }
   // Replace environment variables in headers
   // example `Authorization: Bearer ${TOKEN}` will read process.env.TOKEN
@@ -1000,6 +1107,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   return {
     serverUrl,
     callbackPort,
+    specifiedPort,
     headers,
     transportStrategy,
     host,

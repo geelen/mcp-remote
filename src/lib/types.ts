@@ -55,6 +55,8 @@ export interface OAuthCallbackServerOptions {
   events: EventEmitter
   /** Timeout in milliseconds for the auth callback server's long poll */
   authTimeoutMs?: number
+  /** If true, fail with an error when the port is unavailable instead of falling back to a random port */
+  strictPort?: boolean
 }
 
 // optional tatic OAuth client information
