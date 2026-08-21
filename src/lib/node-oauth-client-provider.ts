@@ -281,11 +281,20 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
   /**
    * Saves the PKCE code verifier
+   *
+   * The filename is scoped to the current process ID. Multiple mcp-remote
+   * processes can be started concurrently for the same server (e.g. an MCP
+   * host reconnecting or launching duplicate instances) - since coordination
+   * between those processes is currently disabled on Windows (see
+   * coordination.ts), each process must keep its own verifier so a second
+   * process can't overwrite the first one's file mid-flow and break the
+   * PKCE exchange for whichever process the browser callback actually
+   * reaches. See https://github.com/geelen/mcp-remote/issues/235.
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, 'code_verifier.txt', codeVerifier)
+    await writeTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, codeVerifier)
   }
 
   /**
@@ -294,7 +303,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async codeVerifier(): Promise<string> {
     debugLog('Reading code verifier')
-    const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
+    const verifier = await readTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
   }
@@ -311,7 +320,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
-          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+          deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`),
         ])
         this._clientInfo = undefined
         debugLog('All credentials invalidated')
@@ -329,7 +338,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, 'code_verifier.txt')
+        await deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`)
         debugLog('Code verifier invalidated')
         break
 
