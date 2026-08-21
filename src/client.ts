@@ -40,6 +40,8 @@ async function runClient(
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   authTimeoutMs: number,
   serverUrlHash: string,
+  callbackUrl: string | undefined,
+  listenHost: string | undefined,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -47,7 +49,7 @@ async function runClient(
   const strictPort = !!specifiedPort || !!staticOAuthClientInfo
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, strictPort)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, listenHost, strictPort)
 
   // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
   // This probes the MCP server for WWW-Authenticate header and fetches PRM
@@ -77,6 +79,7 @@ async function runClient(
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
     wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
+    callbackUrl,
   })
 
   // Create the client
@@ -204,6 +207,8 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
       staticOAuthClientInfo,
       authTimeoutMs,
       serverUrlHash,
+      callbackUrl,
+      listenHost,
     }) => {
       return runClient(
         serverUrl,
@@ -216,6 +221,8 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
         staticOAuthClientInfo,
         authTimeoutMs,
         serverUrlHash,
+        callbackUrl,
+        listenHost,
       )
     },
   )

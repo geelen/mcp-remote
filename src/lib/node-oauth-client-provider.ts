@@ -61,6 +61,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
+    if (this.options.callbackUrl) return this.options.callbackUrl
     return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
   }
 

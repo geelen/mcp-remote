@@ -15,6 +15,8 @@ export interface OAuthProviderOptions {
   host: string
   /** Path for the OAuth callback endpoint */
   callbackPath?: string
+  /** Custom callback URL for reverse proxy configurations */
+  callbackUrl?: string
   /** Directory to store OAuth credentials */
   configDir?: string
   /** Client name to use for OAuth registration */
@@ -47,6 +49,8 @@ export interface OAuthProviderOptions {
 export interface OAuthCallbackServerOptions {
   /** Port for the callback server */
   port: number
+  /** Host to listen on for the callback server */
+  listenHost?: string
   /** Path for the callback endpoint */
   path: string
   /** Event emitter to signal when auth code is received */
