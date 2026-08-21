@@ -218,6 +218,56 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  // Regression tests for https://github.com/geelen/mcp-remote/issues/235:
+  // concurrent mcp-remote processes for the same server used to share a single
+  // code_verifier.txt file, so a second process starting mid-flow would silently
+  // overwrite the first process's verifier and break its PKCE token exchange.
+  describe('PKCE code verifier isolation across processes', () => {
+    let mockReadTextFile: any
+    let mockWriteTextFile: any
+
+    beforeEach(() => {
+      mockReadTextFile = vi.mocked(mcpAuthConfig.readTextFile)
+      mockWriteTextFile = vi.mocked(mcpAuthConfig.writeTextFile)
+      mockWriteTextFile.mockResolvedValue(undefined)
+      mockReadTextFile.mockResolvedValue('test-verifier')
+    })
+
+    it('should save the code verifier to a filename scoped to the current process ID', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.saveCodeVerifier('test-verifier')
+
+      expect(mockWriteTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, 'test-verifier')
+      // Two processes for the same server must never target the same filename
+      expect(mockWriteTextFile).not.toHaveBeenCalledWith('test-hash', 'code_verifier.txt', 'test-verifier')
+    })
+
+    it('should read the code verifier back from the same process-scoped filename', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.codeVerifier()
+
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, expect.any(String))
+    })
+
+    it('should delete the process-scoped verifier file when invalidating the verifier scope', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.invalidateCredentials('verifier')
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+    })
+
+    it('should delete the process-scoped verifier file when invalidating all credentials', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.invalidateCredentials('all')
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+    })
+  })
+
   describe('scopes_supported parsing', () => {
     it('should use custom scopes without filtering', () => {
       const metadata: AuthorizationServerMetadata = {
@@ -344,6 +394,60 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       const clientMetadata = provider.clientMetadata
       // Should use scopes_supported when nothing else is provided
       expect(clientMetadata.scope).toBe('openid email')
+    })
+
+    it('should omit scope when authorization server advertises scopes_supported: []', () => {
+      const metadata: AuthorizationServerMetadata = {
+        issuer: 'https://example.com',
+        scopes_supported: [],
+      }
+
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: metadata,
+      })
+
+      expect(provider.clientMetadata.scope).toBeUndefined()
+    })
+
+    it('should omit scope when protected resource advertises scopes_supported: []', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        protectedResourceMetadata: {
+          resource: 'https://example.com',
+          scopes_supported: [],
+        } as any,
+      })
+
+      expect(provider.clientMetadata.scope).toBeUndefined()
+    })
+
+    it('should still fall back to defaults when protected resource omits scopes_supported', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        protectedResourceMetadata: {
+          resource: 'https://example.com',
+        } as any,
+      })
+
+      expect(provider.clientMetadata.scope).toBe('openid email profile')
+    })
+
+    it('should omit scope query param when scopes_supported is []', async () => {
+      const metadata: AuthorizationServerMetadata = {
+        issuer: 'https://example.com',
+        scopes_supported: [],
+      }
+
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: metadata,
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      await provider.redirectToAuthorization(authUrl)
+
+      expect(authUrl.searchParams.has('scope')).toBe(false)
     })
 
     it('should treat empty scope string as no scope and use default', () => {

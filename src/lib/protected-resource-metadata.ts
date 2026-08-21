@@ -133,6 +133,7 @@ async function fetchProtectedResourceMetadataFromUrl(metadataUrl: string): Promi
     const response = await fetch(metadataUrl, {
       headers: {
         Accept: 'application/json',
+        'Accept-Encoding': 'identity',
       },
       signal: AbortSignal.timeout(5000),
     })
