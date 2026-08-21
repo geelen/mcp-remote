@@ -953,11 +953,34 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
-  // Parse resource to authorize
-  let authorizeResource = '' // Default
+  // Parse the RFC 8707 resource indicator, and whether to omit it entirely
+  let authorizeResource: string | undefined
+  let skipResourceParameter = args.includes('--disable-resource-parameter')
+
   const resourceIndex = args.indexOf('--resource')
   if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
-    authorizeResource = args[resourceIndex + 1]
+    const value = args[resourceIndex + 1].trim()
+    if (value.length === 0) {
+      // `--resource ""` is how people have been trying to switch this off
+      skipResourceParameter = true
+    } else {
+      authorizeResource = value
+    }
+  }
+
+  if (skipResourceParameter) {
+    if (authorizeResource) {
+      log(`Warning: --disable-resource-parameter overrides --resource ${authorizeResource}; the resource parameter will be omitted.`)
+      // Cleared so it cannot silently split the credential cache - see getServerUrlHash
+      authorizeResource = undefined
+    }
+    log('Resource parameter disabled - it will be omitted from authorization and token requests')
+  } else if (authorizeResource) {
+    try {
+      new URL(authorizeResource)
+    } catch {
+      throw new Error(`Invalid --resource value: "${authorizeResource}". RFC 8707 requires an absolute URI, e.g. https://example.com/mcp`)
+    }
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
@@ -1071,6 +1094,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    skipResourceParameter,
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,

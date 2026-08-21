@@ -1414,3 +1414,46 @@ describe('Feature: Stale Client Registration Invalidation', () => {
     expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
   })
 })
+
+describe('Feature: Resource Indicator Flags', () => {
+  it('Scenario: Parse --resource', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--resource', 'https://tenant.example.com/'], 'test usage')
+    expect(result.authorizeResource).toBe('https://tenant.example.com/')
+    expect(result.skipResourceParameter).toBe(false)
+  })
+
+  it('Scenario: Reject a --resource value that is not an absolute URI', async () => {
+    // RFC 8707 requires an absolute URI; failing here beats an opaque error from the server
+    await expect(parseCommandLineArgs(['https://example.com/mcp', '--resource', 'not-a-uri'], 'test usage')).rejects.toThrow(/absolute URI/)
+  })
+
+  it('Scenario: Disable the resource parameter', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--disable-resource-parameter'], 'test usage')
+    expect(result.skipResourceParameter).toBe(true)
+    expect(result.authorizeResource).toBeUndefined()
+  })
+
+  it('Scenario: Treat an empty --resource as disabling it', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--resource', ''], 'test usage')
+    expect(result.skipResourceParameter).toBe(true)
+    expect(result.authorizeResource).toBeUndefined()
+  })
+
+  it('Scenario: Disabling wins over an explicit resource, without splitting the cache', async () => {
+    const withBoth = await parseCommandLineArgs(
+      ['https://example.com/mcp', '--resource', 'https://tenant.example.com/', '--disable-resource-parameter'],
+      'test usage',
+    )
+    const withDisableOnly = await parseCommandLineArgs(['https://example.com/mcp', '--disable-resource-parameter'], 'test usage')
+
+    expect(withBoth.skipResourceParameter).toBe(true)
+    expect(withBoth.authorizeResource).toBeUndefined()
+    // Both send identical requests, so they must share one credential cache
+    expect(withBoth.serverUrlHash).toBe(withDisableOnly.serverUrlHash)
+  })
+
+  it('Scenario: Existing caches are unaffected when no resource flags are used', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp'], 'test usage')
+    expect(result.serverUrlHash).toBe(getServerUrlHash('https://example.com/mcp', undefined, {}))
+  })
+})

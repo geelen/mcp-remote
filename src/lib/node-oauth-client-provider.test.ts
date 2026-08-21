@@ -410,3 +410,54 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 })
+
+// The SDK feeds a single `resource` value into the authorization, token and refresh
+// requests via selectResourceURL(). These tests pin that value, because RFC 8707 §2.2
+// requires the token request to carry the same resource that was authorized.
+describe('NodeOAuthClientProvider - RFC 8707 resource indicator', () => {
+  const defaultOptions: OAuthProviderOptions = {
+    serverUrl: 'https://mcp.example.com/mcp',
+    callbackPort: 8080,
+    host: 'localhost',
+    serverUrlHash: 'test-hash',
+  }
+  const prm: any = { resource: 'https://mcp.example.com' }
+  const defaultResource = new URL('https://mcp.example.com/mcp')
+
+  it('defers to the SDK default when no resource options are given', () => {
+    const provider = new NodeOAuthClientProvider(defaultOptions)
+    // Left undefined so selectResourceURL applies its Protected Resource Metadata logic
+    expect(provider.validateResourceURL).toBeUndefined()
+  })
+
+  it('sends the user-supplied --resource to token requests too, not just authorize', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, authorizeResource: 'https://tenant1.example.com/' })
+    const resolved = await provider.validateResourceURL!(defaultResource, prm.resource)
+    // Previously this resolved to the PRM resource, so the authorize request said tenant1
+    // while the token request said mcp.example.com and the server could reject the exchange.
+    expect(String(resolved)).toBe('https://tenant1.example.com/')
+  })
+
+  it('omits the resource entirely when disabled', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, skipResourceParameter: true })
+    expect(await provider.validateResourceURL!(defaultResource, prm.resource)).toBeUndefined()
+  })
+
+  it('lets the disable flag win over an explicit resource', async () => {
+    const provider = new NodeOAuthClientProvider({
+      ...defaultOptions,
+      authorizeResource: 'https://tenant1.example.com/',
+      skipResourceParameter: true,
+    })
+    expect(await provider.validateResourceURL!(defaultResource, prm.resource)).toBeUndefined()
+  })
+
+  it('no longer rewrites the resource on the authorization URL after the fact', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, authorizeResource: 'https://tenant1.example.com/' })
+    const authUrl = new URL('https://auth.example.com/authorize')
+    await provider.redirectToAuthorization(authUrl)
+    // The SDK sets `resource` from validateResourceURL before we ever see the URL, so the
+    // provider must not touch it - that post-hoc rewrite was the source of the mismatch.
+    expect(authUrl.searchParams.has('resource')).toBe(false)
+  })
+})

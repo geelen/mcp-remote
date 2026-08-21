@@ -103,6 +103,27 @@ To run multiple instances of the same remote server with different configuration
 
 Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
 
+The `--resource` value is sent as the RFC 8707 resource indicator on the authorization, token and
+refresh requests alike, so they always agree.
+
+Some authorization servers reject the resource parameter outright — Microsoft Entra ID v2 answers
+`AADSTS9010010`, for example. Pass `--disable-resource-parameter` to omit it entirely:
+
+```json
+{
+  "mcpServers": {
+    "entra-example": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/mcp",
+        "--disable-resource-parameter"
+      ]
+    }
+  }
+}
+```
+
 ### Flags
 
 * If `npx` is producing errors, consider adding `-y` as the first argument to auto-accept the installation of the `mcp-remote` package.

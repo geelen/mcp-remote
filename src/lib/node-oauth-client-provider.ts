@@ -29,6 +29,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
+  private skipResourceParameter: boolean
+  /**
+   * Overrides how the SDK picks the RFC 8707 `resource` indicator. Only defined when we have
+   * an opinion; otherwise the SDK derives it from Protected Resource Metadata as usual.
+   */
+  validateResourceURL?: (defaultResource: URL, discoveredResource?: string) => Promise<URL | undefined>
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
@@ -48,12 +54,29 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
-    this.authorizeResource = options.authorizeResource
+    const trimmedAuthorizeResource = options.authorizeResource?.trim()
+    this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
+    this.skipResourceParameter = options.skipResourceParameter ?? false
     this._state = randomUUID()
     this._clientInfo = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+
+    // The SDK feeds one `resource` value into the authorization, token and refresh requests
+    // (selectResourceURL -> startAuthorization / fetchToken / refreshAuthorization). Deciding
+    // it here keeps those three in agreement, which RFC 8707 §2.2 requires - previously the
+    // authorize URL was rewritten after the fact, so it could disagree with the token request.
+    if (this.skipResourceParameter) {
+      this.validateResourceURL = async () => {
+        debugLog('Resource parameter disabled; omitting it from authorization and token requests')
+        return undefined
+      }
+    } else if (this.authorizeResource) {
+      const resourceUrl = new URL(this.authorizeResource)
+      this.validateResourceURL = async () => resourceUrl
+    }
+    // Otherwise left undefined so the SDK applies its default resource selection.
   }
 
   setCallbackPort(port: number): void {
@@ -271,10 +294,6 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
     })
-
-    if (this.authorizeResource) {
-      authorizationUrl.searchParams.set('resource', this.authorizeResource)
-    }
 
     const effectiveScope = this.getEffectiveScope()
     if (effectiveScope) {
