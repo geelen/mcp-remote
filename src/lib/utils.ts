@@ -350,7 +350,6 @@ export async function discoverOAuthServerInfo(
         wwwAuthenticateScope = params.scope
       }
     }
-
   } catch (error) {
     debugLog('Error probing MCP server', {
       error: error instanceof Error ? error.message : String(error),
@@ -474,7 +473,9 @@ export async function connectToRemoteServer(
         redirected: false,
         type: 'basic' as ResponseType,
         url: typeof input === 'string' ? input : input.toString(),
-        clone: () => { throw new Error('not cloneable') },
+        clone: () => {
+          throw new Error('not cloneable')
+        },
         arrayBuffer: async () => new ArrayBuffer(0),
         blob: async () => new Blob(),
         formData: async () => new FormData(),
