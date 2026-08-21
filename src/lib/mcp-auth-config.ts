@@ -17,8 +17,12 @@ import { log, MCP_REMOTE_VERSION } from './utils'
  *   - Format: OAuthClientInformation object with client_id and other registration details
  * - {server_hash}_tokens.json: Contains OAuth access and refresh tokens
  *   - Format: OAuthTokens object with access_token, refresh_token, and expiration information
- * - {server_hash}_code_verifier.txt: Contains the PKCE code verifier for the current OAuth flow
+ * - {server_hash}_code_verifier_{pid}.txt: Contains the PKCE code verifier for the current OAuth flow
  *   - Format: Plain text string used for PKCE verification
+ *   - Scoped per-process (by PID) rather than per-server: multiple mcp-remote processes can be
+ *     started concurrently for the same server, and coordination between them is currently
+ *     disabled on Windows (see coordination.ts), so a shared filename would let one process's
+ *     verifier silently overwrite another's mid-flow (see issue #235)
  *
  * All JSON files are stored with 2-space indentation for readability.
  */
@@ -164,7 +168,7 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8')
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
@@ -198,7 +202,7 @@ export async function writeTextFile(serverUrlHash: string, filename: string, tex
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, text, 'utf-8')
+    await fs.writeFile(filePath, text, { encoding: 'utf-8', mode: 0o600 })
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error

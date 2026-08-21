@@ -1,15 +1,33 @@
 import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { OAuthCallbackServerOptions, PingConfig } from './types'
-import { getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import { OAuthCallbackServerOptions, PingConfig, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
+import {
+  discoverProtectedResourceMetadata,
+  parseWWWAuthenticateHeader,
+  getAuthorizationServerUrl,
+  type ProtectedResourceMetadata,
+} from './protected-resource-metadata'
+import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import express from 'express'
-import net from 'net'
+import net, { AddressInfo } from 'net'
+import { Server } from 'http'
 import crypto from 'crypto'
-import fs from 'fs/promises'
+import fs from 'fs'
+import { readFile, rm } from 'fs/promises'
+import path from 'path'
+import { version as MCP_REMOTE_VERSION } from '../../package.json'
+import { EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
+
+// Global type declaration for typescript
+declare global {
+  var currentServerUrlHash: string | undefined
+}
 
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
@@ -18,40 +36,211 @@ export const PING_INTERVAL_DEFAULT = 30 // seconds
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
-
-// Package version from package.json
-export const MCP_REMOTE_VERSION = require('../../package.json').version
+export { MCP_REMOTE_VERSION }
 
 const pid = process.pid
+// Global debug flag
+export let DEBUG = false
+export let SILENT = false
+
+// Helper function for timestamp formatting
+function getTimestamp(): string {
+  const now = new Date()
+  return now.toISOString()
+}
+
+// Debug logging function
+export function debugLog(message: string, ...args: any[]) {
+  if (!DEBUG) return
+
+  const serverUrlHash = global.currentServerUrlHash
+  if (!serverUrlHash) {
+    console.error('[DEBUG LOG ERROR] global.currentServerUrlHash is not set. Cannot write debug log.')
+    return
+  }
+
+  try {
+    // Format with timestamp and PID
+    const formattedMessage = `[${getTimestamp()}][${pid}] ${message}`
+
+    // Log to console
+    console.error(formattedMessage, ...args)
+
+    // Ensure config directory exists
+    const configDir = getConfigDir()
+    fs.mkdirSync(configDir, { recursive: true })
+
+    // Append to log file
+    const logPath = path.join(configDir, `${serverUrlHash}_debug.log`)
+    const logMessage = `${formattedMessage} ${args.map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg))).join(' ')}\n`
+
+    fs.appendFileSync(logPath, logMessage, { encoding: 'utf8' })
+  } catch (error) {
+    // Fallback to console if file logging fails
+    console.error(`[DEBUG LOG ERROR] ${error}`)
+  }
+}
+
 export function log(str: string, ...rest: unknown[]) {
-  // Using stderr so that it doesn't interfere with stdout
-  console.error(`[${pid}] ${str}`, ...rest)
+  if (!SILENT) {
+    // Using stderr so that it doesn't interfere with stdout
+    console.error(`[${pid}] ${str}`, ...rest)
+  }
+
+  // If debug mode is on, also log to debug file
+  debugLog(str, ...rest)
+}
+
+type Message = any
+const MESSAGE_BLOCKED = Symbol('MessageBlocked')
+const isMessageBlocked = (value: any): value is typeof MESSAGE_BLOCKED => value === MESSAGE_BLOCKED
+
+export function createMessageTransformer({
+  transformRequestFunction,
+  transformResponseFunction,
+}: {
+  transformRequestFunction?: null | ((request: Message) => Message | typeof MESSAGE_BLOCKED)
+  transformResponseFunction?: null | ((request: Message, response: Message) => Message)
+} = {}) {
+  const pendingRequests = new Map<string, Message>()
+
+  const interceptRequest = (message: Message) => {
+    const messageId = message.id
+    if (!messageId) return message
+    pendingRequests.set(messageId, message)
+    return transformRequestFunction?.(message) ?? message
+  }
+
+  const interceptResponse = (message: Message) => {
+    const messageId = message.id
+    if (!messageId) return message
+    const originalRequest = pendingRequests.get(messageId)
+    if (!originalRequest) return message
+    pendingRequests.delete(messageId)
+    return transformResponseFunction?.(originalRequest, message) ?? message
+  }
+
+  return {
+    interceptRequest,
+    interceptResponse,
+  }
 }
 
 /**
  * Creates a bidirectional proxy between two transports
  * @param params The transport connections to proxy between
  */
-export function mcpProxy({ transportToClient, transportToServer }: { transportToClient: Transport; transportToServer: Transport }) {
+export function mcpProxy({
+  transportToClient,
+  transportToServer,
+  ignoredTools = [],
+}: {
+  transportToClient: Transport
+  transportToServer: Transport
+  ignoredTools?: string[]
+}) {
   let transportToClientClosed = false
   let transportToServerClosed = false
 
+  const messageTransformer = createMessageTransformer({
+    transformRequestFunction: (request: Message) => {
+      // Block tools/call for ignored tools
+      if (request.method === 'tools/call' && request.params?.name) {
+        const toolName = request.params.name
+        if (!shouldIncludeTool(ignoredTools, toolName)) {
+          // Send error response back to client immediately
+          const errorResponse = {
+            jsonrpc: '2.0' as const,
+            id: request.id,
+            error: {
+              code: -32603,
+              message: `Tool "${toolName}" is not available`,
+            },
+          }
+          transportToClient.send(errorResponse).catch(onClientError)
+          // Return symbol to indicate this request should not be forwarded
+          return MESSAGE_BLOCKED
+        }
+      }
+      return request
+    },
+    transformResponseFunction: (req: Message, res: Message) => {
+      if (req.method === 'tools/list') {
+        return {
+          ...res,
+          result: {
+            ...res.result,
+            tools: res.result.tools.filter((tool: any) => shouldIncludeTool(ignoredTools, tool.name)),
+          },
+        }
+      }
+      return res
+    },
+  })
+
   transportToClient.onmessage = (_message) => {
     // TODO: fix types
-    const message = _message as any
+    const message = messageTransformer.interceptRequest(_message as any)
+
+    // If interceptor returns MESSAGE_BLOCKED, don't forward the message
+    if (isMessageBlocked(message)) {
+      return
+    }
+
     log('[Local→Remote]', message.method || message.id)
+
+    debugLog('Local → Remote message', {
+      method: message.method,
+      id: message.id,
+      params: message.params ? JSON.stringify(message.params).substring(0, 500) : undefined,
+    })
+
     if (message.method === 'initialize') {
       const { clientInfo } = message.params
       if (clientInfo) clientInfo.name = `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})`
       log(JSON.stringify(message, null, 2))
+
+      debugLog('Initialize message with modified client info', { clientInfo })
     }
-    transportToServer.send(message).catch(onServerError)
+
+    transportToServer.send(message).catch((error) => {
+      onServerError(error)
+
+      // If forwarding a request fails, the local client would wait forever
+      // for a response that never arrives (e.g. the server expired the
+      // session and answers 404, see #106). Surface the failure as a
+      // JSON-RPC error response instead.
+      //
+      // Only requests may be answered. Notifications carry no id, and this
+      // handler also sees the client's *responses* to server-initiated
+      // requests - those carry an id but no method, and answering one makes
+      // the local SDK raise "Received a response for an unknown message ID".
+      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
+        const errorResponse = {
+          jsonrpc: '2.0' as const,
+          id: message.id,
+          error: {
+            code: -32603,
+            message: `Failed to forward message to remote server: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        }
+        transportToClient.send(errorResponse).catch(onClientError)
+      }
+    })
   }
 
   transportToServer.onmessage = (_message) => {
     // TODO: fix types
-    const message = _message as any
+    const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
+
+    debugLog('Remote → Local message', {
+      method: message.method,
+      id: message.id,
+      result: message.result ? 'result-present' : undefined,
+      error: message.error,
+    })
+
     transportToClient.send(message).catch(onClientError)
   }
 
@@ -61,6 +250,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
     }
 
     transportToClientClosed = true
+    debugLog('Local transport closed, closing remote transport')
     transportToServer.close().catch(onServerError)
   }
 
@@ -69,6 +259,7 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
       return
     }
     transportToServerClosed = true
+    debugLog('Remote transport closed, closing local transport')
     transportToClient.close().catch(onClientError)
   }
 
@@ -77,10 +268,128 @@ export function mcpProxy({ transportToClient, transportToServer }: { transportTo
 
   function onClientError(error: Error) {
     log('Error from local client:', error)
+    debugLog('Error from local client', { stack: error.stack })
   }
 
   function onServerError(error: Error) {
     log('Error from remote server:', error)
+    debugLog('Error from remote server', { stack: error.stack })
+  }
+}
+
+/**
+ * Result of OAuth server discovery
+ */
+export interface OAuthServerDiscoveryResult {
+  /** The URL of the authorization server to use for OAuth */
+  authorizationServerUrl: string
+  /** Authorization server metadata (if successfully fetched) */
+  authorizationServerMetadata?: AuthorizationServerMetadata
+  /** Protected resource metadata (if discovered) */
+  protectedResourceMetadata?: ProtectedResourceMetadata
+  /** Scope extracted from WWW-Authenticate header */
+  wwwAuthenticateScope?: string
+}
+
+/**
+ * Probes the MCP server to discover the authorization server via Protected Resource Metadata.
+ *
+ * This implements the MCP Authorization Server Discovery flow:
+ * 1. Make a request to the MCP server
+ * 2. If we get a 401, extract the WWW-Authenticate header
+ * 3. Use the resource_metadata URL from the header (if present) or well-known URIs
+ * 4. Fetch Protected Resource Metadata to get the authorization server URL
+ * 5. Fetch Authorization Server Metadata from the discovered server
+ *
+ * @param serverUrl The MCP server URL
+ * @param headers Optional headers to include in the probe request
+ * @returns Discovery result with authorization server URL and metadata
+ */
+export async function discoverOAuthServerInfo(
+  serverUrl: string,
+  headers: Record<string, string> = {},
+): Promise<OAuthServerDiscoveryResult> {
+  debugLog('Starting OAuth server discovery', { serverUrl })
+
+  let wwwAuthenticateHeader: string | undefined
+  let wwwAuthenticateScope: string | undefined
+
+  // Step 1: Probe the MCP server to get WWW-Authenticate header
+  try {
+    debugLog('Probing MCP server for WWW-Authenticate header')
+    const response = await fetch(serverUrl, {
+      method: 'GET',
+      headers: {
+        ...headers,
+        Accept: 'application/json, text/event-stream',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+
+    // If we get a successful response, the server doesn't require auth
+    // Fall back to using serverUrl as authorization server
+    if (response.ok) {
+      debugLog('Server responded OK without auth, using server URL as authorization server')
+      const authServerMetadata = await fetchAuthorizationServerMetadata(serverUrl)
+      return {
+        authorizationServerUrl: serverUrl,
+        authorizationServerMetadata: authServerMetadata,
+      }
+    }
+
+    // Check for 401 Unauthorized
+    if (response.status === 401) {
+      wwwAuthenticateHeader = response.headers.get('WWW-Authenticate') || undefined
+      debugLog('Received 401 with WWW-Authenticate header', {
+        hasHeader: !!wwwAuthenticateHeader,
+        header: wwwAuthenticateHeader,
+      })
+
+      // Parse scope from WWW-Authenticate header if present
+      if (wwwAuthenticateHeader) {
+        const params = parseWWWAuthenticateHeader(wwwAuthenticateHeader)
+        wwwAuthenticateScope = params.scope
+      }
+    }
+  } catch (error) {
+    debugLog('Error probing MCP server', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    // Continue with discovery even if probe fails
+  }
+
+  // Step 2: Discover Protected Resource Metadata
+  const protectedResourceMetadata = await discoverProtectedResourceMetadata(serverUrl, wwwAuthenticateHeader)
+
+  // Step 3: Determine authorization server URL
+  let authorizationServerUrl: string
+
+  if (protectedResourceMetadata) {
+    const discoveredUrl = getAuthorizationServerUrl(protectedResourceMetadata)
+    if (discoveredUrl) {
+      authorizationServerUrl = discoveredUrl
+      debugLog('Using authorization server from Protected Resource Metadata', {
+        authorizationServerUrl,
+      })
+    } else {
+      // PRM found but no authorization_servers - fall back to server URL
+      authorizationServerUrl = serverUrl
+      debugLog('PRM found but no authorization_servers, falling back to server URL')
+    }
+  } else {
+    // No PRM found - fall back to server URL (current behavior)
+    authorizationServerUrl = serverUrl
+    debugLog('No Protected Resource Metadata found, falling back to server URL as authorization server')
+  }
+
+  // Step 4: Fetch Authorization Server Metadata
+  const authorizationServerMetadata = await fetchAuthorizationServerMetadata(authorizationServerUrl)
+
+  return {
+    authorizationServerUrl,
+    authorizationServerMetadata,
+    protectedResourceMetadata,
+    wwwAuthenticateScope,
   }
 }
 
@@ -161,7 +470,9 @@ export async function connectToRemoteServer(
         fetch(url, {
           ...init,
           headers: {
-            ...(init?.headers as Record<string, string> | undefined),
+            ...(init?.headers instanceof Headers
+              ? Object.fromEntries(init?.headers.entries())
+              : (init?.headers as Record<string, string>) || {}),
             ...headers,
             ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
             Accept: 'text/event-stream',
@@ -189,17 +500,34 @@ export async function connectToRemoteServer(
         requestInit: { headers },
       })
 
+  // When connecting without a Client (proxy mode), the auth challenge (401) is not received by
+  // `transport` itself but by the one-off `testTransport` created below. The SDK stores the
+  // `resource_metadata` URL from the WWW-Authenticate header on the transport that received the
+  // 401, and `finishAuth` reads it back to discover the authorization server. If we call
+  // `finishAuth` on `transport` (which never saw the 401) that URL is missing, so the token
+  // exchange falls back to POSTing at the resource origin instead of the discovered
+  // `token_endpoint` (see https://github.com/geelen/mcp-remote/issues/270). Track the transport
+  // that actually handled the challenge so we can complete auth on it.
+  let authChallengeTransport: SSEClientTransport | StreamableHTTPClientTransport | undefined
+
   try {
+    debugLog('Attempting to connect to remote server', { sseTransport })
+
     if (client) {
+      debugLog('Connecting client to transport')
       await client.connect(transport)
     } else {
+      debugLog('Starting transport directly')
       await transport.start()
       if (!sseTransport) {
         // Extremely hacky, but we didn't actually send a request when calling transport.start() above, so we don't
         // know if we're even talking to an HTTP server. But if we forced that now we'd get an error later saying that
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
+        debugLog('Creating test transport for HTTP-only connection test')
         const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        // This transport is the one that will receive (and store the metadata from) any 401 challenge.
+        authChallengeTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
@@ -207,17 +535,23 @@ export async function connectToRemoteServer(
     log(`Connected to remote server using ${transport.constructor.name}`)
 
     return transport
-  } catch (error) {
+  } catch (error: any) {
     // Check if it's a protocol error and we should attempt fallback
-    if (
-      error instanceof Error &&
+    // StreamableHTTPError has a `code` property with the HTTP status code
+    const isStreamableHTTPError = error instanceof StreamableHTTPError
+    const httpStatusCode = isStreamableHTTPError ? error.code : null
+    const shouldFallbackOnError =
       shouldAttemptFallback &&
-      (error.message.includes('405') ||
+      error instanceof Error &&
+      (httpStatusCode === 404 ||
+        httpStatusCode === 405 ||
+        error.message.includes('405') ||
         error.message.includes('Method Not Allowed') ||
         error.message.includes('404') ||
         error.message.includes('Not Found'))
-    ) {
-      log(`Received error: ${error.message}`)
+
+    if (shouldFallbackOnError) {
+      log(`Received error (status ${httpStatusCode ?? 'unknown'}): ${error.message}`)
 
       // If we've already tried falling back once, throw an error
       if (recursionReasons.has(REASON_TRANSPORT_FALLBACK)) {
@@ -243,8 +577,14 @@ export async function connectToRemoteServer(
       )
     } else if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
       log('Authentication required. Initializing auth...')
+      debugLog('Authentication error detected', {
+        errorCode: error instanceof OAuthError ? error.errorCode : undefined,
+        errorMessage: error.message,
+        stack: error.stack,
+      })
 
       // Initialize authentication on-demand
+      debugLog('Calling authInitializer to start auth flow')
       const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
       if (skipBrowserAuth) {
@@ -254,30 +594,49 @@ export async function connectToRemoteServer(
       }
 
       // Wait for the authorization code from the callback
+      debugLog('Waiting for auth code from callback server')
       const code = await waitForAuthCode()
+      debugLog('Received auth code from callback server')
 
       try {
         log('Completing authorization...')
-        await transport.finishAuth(code)
+        // Complete auth on the transport that received the 401 challenge (in proxy mode this is the
+        // one-off test transport, not `transport`), so the stored resource_metadata URL is used to
+        // discover the correct token_endpoint. Falls back to `transport` for the with-client path.
+        await (authChallengeTransport ?? transport).finishAuth(code)
+        debugLog('Authorization completed successfully')
 
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {
           const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
           log(errorMessage)
+          debugLog('Already attempted auth reconnection, giving up', {
+            recursionReasons: Array.from(recursionReasons),
+          })
           throw new Error(errorMessage)
         }
 
         // Track this reason for recursion
         recursionReasons.add(REASON_AUTH_NEEDED)
         log(`Recursively reconnecting for reason: ${REASON_AUTH_NEEDED}`)
+        debugLog('Recursively reconnecting after auth', { recursionReasons: Array.from(recursionReasons) })
 
         // Recursively call connectToRemoteServer with the updated recursion tracking
         return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
-      } catch (authError) {
+      } catch (authError: any) {
         log('Authorization error:', authError)
+        debugLog('Authorization error during finishAuth', {
+          errorMessage: authError.message,
+          stack: authError.stack,
+        })
         throw authError
       }
     } else {
       log('Connection error:', error)
+      debugLog('Connection error', {
+        errorMessage: error.message,
+        stack: error.stack,
+        transportType: transport.constructor.name,
+      })
       throw error
     }
   }
@@ -286,9 +645,15 @@ export async function connectToRemoteServer(
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, actualPort, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions) {
+export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions): Promise<{
+  server: Server
+  actualPort: number
+  authCode: string | null
+  waitForAuthCode: () => Promise<string>
+  authCompletedPromise: Promise<string>
+}> {
   let authCode: string | null = null
   const app = express()
 
@@ -318,7 +683,7 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     const longPollTimeout = setTimeout(() => {
       log('Long poll timeout reached, responding with 202')
       res.status(202).send('Authentication in progress')
-    }, 30000)
+    }, options.authTimeoutMs || 30000)
 
     // If auth completes while we're waiting, send the response immediately
     authCompletedPromise
@@ -354,8 +719,8 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
       Authorization successful!
       You may close this window and return to the CLI.
       <script>
-        // If this is a non-interactive session (no manual approval step was required) then 
-        // this should automatically close the window. If not, this will have no effect and 
+        // If this is a non-interactive session (no manual approval step was required) then
+        // this should automatically close the window. If not, this will have no effect and
         // the user will see the message above.
         window.close();
       </script>
@@ -365,8 +730,42 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     options.events.emit('auth-code-received', code)
   })
 
-  const server = app.listen(options.port, () => {
-    log(`OAuth callback server running at http://127.0.0.1:${options.port}`)
+  // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
+  const { server, actualPort } = await new Promise<{ server: Server; actualPort: number }>((resolve, reject) => {
+    const httpServer = app.listen(options.port, '127.0.0.1')
+
+    httpServer.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        if (options.strictPort) {
+          reject(
+            Object.assign(
+              new Error(
+                `Callback port ${options.port} is already in use. The port is mandatory (it was specified explicitly or is pinned by --static-oauth-client-info). Close the process holding that port or restart your machine.`,
+              ),
+              { code: 'EADDRINUSE', requestedPort: options.port },
+            ),
+          )
+          return
+        }
+        log(`Warning: callback port ${options.port} is already in use, falling back to a random port`)
+        // Retry with an OS-assigned port
+        const fallback = app.listen(0, '127.0.0.1')
+        fallback.once('error', reject)
+        fallback.once('listening', () => {
+          const addr = fallback.address() as AddressInfo
+          log(`OAuth callback server running at http://127.0.0.1:${addr.port} (fallback from ${options.port})`)
+          resolve({ server: fallback, actualPort: addr.port })
+        })
+      } else {
+        reject(err)
+      }
+    })
+
+    httpServer.once('listening', () => {
+      const addr = httpServer.address() as AddressInfo
+      log(`OAuth callback server running at http://127.0.0.1:${addr.port}`)
+      resolve({ server: httpServer, actualPort: addr.port })
+    })
   })
 
   const waitForAuthCode = (): Promise<string> => {
@@ -382,16 +781,16 @@ export function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServe
     })
   }
 
-  return { server, authCode, waitForAuthCode, authCompletedPromise }
+  return { server, actualPort, authCode, waitForAuthCode, authCompletedPromise }
 }
 
 /**
  * Sets up an Express server to handle OAuth callbacks
  * @param options The server options
- * @returns An object with the server, authCode, and waitForAuthCode function
+ * @returns A promise resolving to an object with the server, authCode, and waitForAuthCode function
  */
-export function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
-  const { server, authCode, waitForAuthCode } = setupOAuthCallbackServerWithLongPoll(options)
+export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
+  const { server, authCode, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll(options)
   return { server, authCode, waitForAuthCode }
 }
 
@@ -401,7 +800,9 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     return undefined
   }
 
-  const localhostRedirectUri = clientInfo.redirect_uris.map((uri) => new URL(uri)).find(({ hostname }) => hostname === 'localhost')
+  const localhostRedirectUri = clientInfo.redirect_uris
+    .map((uri) => new URL(uri))
+    .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
     throw new Error('Cannot find localhost callback URI from existing client information')
   }
@@ -453,13 +854,25 @@ export async function findAvailablePort(preferredPort?: number): Promise<number>
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
 export async function parseCommandLineArgs(args: string[], usage: string) {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(`${usage}\n`)
+    process.exit(0)
+  }
+
+  // Deliberately no `-v` alias: it conventionally means "verbose", and this CLI
+  // already has --debug, so leave -v free to become its shorthand later.
+  if (args.includes('--version')) {
+    process.stdout.write(`${MCP_REMOTE_VERSION}\n`)
+    process.exit(0)
+  }
+
   // Process headers
   const headers: Record<string, string> = {}
   let i = 0
   while (i < args.length) {
     if (args[i] === '--header' && i < args.length - 1) {
       const value = args[i + 1]
-      const match = value.match(/^([A-Za-z0-9_-]+):(.*)$/)
+      const match = value.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
       if (match) {
         headers[match[1]] = match[2]
       } else {
@@ -491,6 +904,27 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   const specifiedPort = args[1] ? parseInt(args[1]) : undefined
   const allowHttp = args.includes('--allow-http')
 
+  // Check for debug flag
+  const debug = args.includes('--debug')
+  if (debug) {
+    DEBUG = true
+    log('Debug mode enabled - detailed logs will be written to ~/.mcp-auth/')
+  }
+
+  // Check for silent flag
+  const silent = args.includes('--silent')
+  if (silent) {
+    SILENT = true
+    log('Silent mode enabled - stderr output will be suppressed, except when --debug is also enabled')
+  }
+
+  const enableProxy = args.includes('--enable-proxy')
+  if (enableProxy) {
+    // Use env proxy
+    setGlobalDispatcher(new EnvHttpProxyAgent())
+    log('HTTP proxy support enabled - using system HTTP_PROXY/HTTPS_PROXY environment variables')
+  }
+
   // Parse transport strategy
   let transportStrategy: TransportStrategy = 'http-first' // Default
   const transportIndex = args.indexOf('--transport')
@@ -501,6 +935,80 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
       log(`Using transport strategy: ${transportStrategy}`)
     } else {
       log(`Warning: Ignoring invalid transport strategy: ${strategy}. Valid values are: sse-only, http-only, sse-first, http-first`)
+    }
+  }
+
+  // Parse host
+  let host = 'localhost' // Default
+  const hostIndex = args.indexOf('--host')
+  if (hostIndex !== -1 && hostIndex < args.length - 1) {
+    host = args[hostIndex + 1]
+    log(`Using callback hostname: ${host}`)
+  }
+
+  let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
+  const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
+  if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
+    const staticOAuthClientMetadataArg = args[staticOAuthClientMetadataIndex + 1]
+    if (staticOAuthClientMetadataArg.startsWith('@')) {
+      const filePath = staticOAuthClientMetadataArg.slice(1)
+      staticOAuthClientMetadata = JSON.parse(await readFile(filePath, 'utf8'))
+      log(`Using static OAuth client metadata from file: ${filePath}`)
+    } else {
+      staticOAuthClientMetadata = JSON.parse(staticOAuthClientMetadataArg)
+      log(`Using static OAuth client metadata from string`)
+    }
+  }
+
+  // parse static OAuth client information, if provided
+  // defaults to OAuth dynamic client registration
+  let staticOAuthClientInfo: StaticOAuthClientInformationFull = null
+  const staticOAuthClientInfoIndex = args.indexOf('--static-oauth-client-info')
+  if (staticOAuthClientInfoIndex !== -1 && staticOAuthClientInfoIndex < args.length - 1) {
+    const staticOAuthClientInfoArg = args[staticOAuthClientInfoIndex + 1]
+    if (staticOAuthClientInfoArg.startsWith('@')) {
+      const filePath = staticOAuthClientInfoArg.slice(1)
+      staticOAuthClientInfo = JSON.parse(await readFile(filePath, 'utf8'))
+      log(`Using static OAuth client information from file: ${filePath}`)
+    } else {
+      staticOAuthClientInfo = JSON.parse(staticOAuthClientInfoArg)
+      log(`Using static OAuth client information from string`)
+    }
+  }
+
+  // Parse resource to authorize
+  let authorizeResource = '' // Default
+  const resourceIndex = args.indexOf('--resource')
+  if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
+    authorizeResource = args[resourceIndex + 1]
+    log(`Using authorize resource: ${authorizeResource}`)
+  }
+
+  // Parse ignored tools
+  const ignoredTools: string[] = []
+  let j = 0
+  while (j < args.length) {
+    if (args[j] === '--ignore-tool' && j < args.length - 1) {
+      const toolName = args[j + 1]
+      ignoredTools.push(toolName)
+      log(`Ignoring tool: ${toolName}`)
+      args.splice(j, 2)
+      // Do not increment j, as the array has shifted
+      continue
+    }
+    j++
+  }
+
+  // Parse auth timeout
+  let authTimeoutMs = 30000 // Default 30 seconds
+  const authTimeoutIndex = args.indexOf('--auth-timeout')
+  if (authTimeoutIndex !== -1 && authTimeoutIndex < args.length - 1) {
+    const timeoutSeconds = parseInt(args[authTimeoutIndex + 1], 10)
+    if (!isNaN(timeoutSeconds) && timeoutSeconds > 0) {
+      authTimeoutMs = timeoutSeconds * 1000
+      log(`Using auth callback timeout: ${timeoutSeconds} seconds`)
+    } else {
+      log(`Warning: Ignoring invalid auth timeout value: ${args[authTimeoutIndex + 1]}. Must be a positive number.`)
     }
   }
 
@@ -517,7 +1025,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(usage)
     process.exit(1)
   }
-  const serverUrlHash = getServerUrlHash(serverUrl)
+  // Calculate hash with all parsed parameters for cache isolation
+  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers)
+
+  // Set server hash globally for debug logging
+  global.currentServerUrlHash = serverUrlHash
+
+  debugLog(`Starting mcp-remote with server URL: ${serverUrl}`)
+
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
   // Use the specified port, or the existing client port or fallback to find an available one
@@ -529,7 +1044,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
       log(
         `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
       )
-      await fs.rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
+      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
     }
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
@@ -542,7 +1057,9 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   if (Object.keys(headers).length > 0) {
-    log(`Using custom headers: ${JSON.stringify(headers)}`)
+    // Names only - values routinely carry bearer tokens and API keys, and this
+    // goes to stderr, which MCP clients capture into their own logs.
+    log(`Using custom headers: ${Object.keys(headers).join(', ')}`)
   }
   // Replace environment variables in headers
   // example `Authorization: Bearer ${TOKEN}` will read process.env.TOKEN
@@ -563,8 +1080,17 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   return {
     serverUrl,
     callbackPort,
+    specifiedPort,
     headers,
     transportStrategy,
+    host,
+    debug,
+    staticOAuthClientMetadata,
+    staticOAuthClientInfo,
+    authorizeResource,
+    ignoredTools,
+    authTimeoutMs,
+    serverUrlHash,
     pingConfig: {
       enabled: keepAlive,
       interval: pingInterval,
@@ -593,10 +1119,59 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
 }
 
 /**
- * Generates a hash for the server URL to use in filenames
- * @param serverUrl The server URL to hash
- * @returns The hashed server URL
+ * Generates a hash for the server URL configuration
+ * Includes resource and headers to isolate OAuth sessions per unique
+ * server configuration (fixes #25: multi-instance support)
+ * @param serverUrl The server URL
+ * @param authorizeResource Optional resource parameter for OAuth
+ * @param headers Optional custom headers
+ * @returns MD5 hash of the configuration
  */
-export function getServerUrlHash(serverUrl: string): string {
-  return crypto.createHash('md5').update(serverUrl).digest('hex')
+export function getServerUrlHash(serverUrl: string, authorizeResource?: string, headers?: Record<string, string>): string {
+  // Include resource and headers in hash to isolate OAuth sessions
+  // per unique server configuration (fixes #25)
+  const parts = [serverUrl]
+  if (authorizeResource) parts.push(authorizeResource)
+  if (headers && Object.keys(headers).length > 0) {
+    const sortedKeys = Object.keys(headers).sort()
+    parts.push(JSON.stringify(headers, sortedKeys))
+  }
+  return crypto.createHash('md5').update(parts.join('|')).digest('hex')
+}
+
+/**
+ * Converts a glob pattern to a regular expression
+ * @param pattern The glob pattern (e.g., "create*", "*account")
+ * @returns The corresponding regular expression
+ */
+function patternToRegex(pattern: string): RegExp {
+  // Split by asterisks, escape each part, then join with .*
+  const parts = pattern.split('*')
+  const escapedParts = parts.map((part) => part.replace(/\W/g, '\\$&'))
+  const regexPattern = escapedParts.join('.*')
+  // Match the entire string from start to end, case-insensitive
+  return new RegExp(`^${regexPattern}$`, 'i')
+}
+
+/**
+ * Determines if a tool name should be ignored based on ignore patterns
+ * @param ignorePatterns Array of patterns to ignore (supports wildcards with *)
+ * @param toolName The name of the tool to check
+ * @returns false if the tool should be ignored (matches a pattern), true if it should be included
+ */
+export function shouldIncludeTool(ignorePatterns: string[], toolName: string): boolean {
+  // If no patterns are provided, include all tools
+  if (!ignorePatterns || ignorePatterns.length === 0) {
+    return true
+  }
+
+  // Check if the tool name matches any ignore pattern
+  for (const pattern of ignorePatterns) {
+    const regex = patternToRegex(pattern)
+    if (regex.test(toolName)) {
+      return false // Tool matches an ignore pattern, so exclude it
+    }
+  }
+
+  return true // Tool doesn't match any ignore pattern, so include it
 }
