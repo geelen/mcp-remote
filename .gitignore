@@ -2,3 +2,5 @@ node_modules
 .mcp-cli
 dist
 *.tgz
+CLAUDE.local.md
+.envrc
