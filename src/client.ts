@@ -17,11 +17,13 @@ import {
   parseCommandLineArgs,
   setupSignalHandlers,
   log,
+  debugLog,
   MCP_REMOTE_VERSION,
-  getServerUrlHash,
   connectToRemoteServer,
   TransportStrategy,
+  discoverOAuthServerInfo,
 } from './lib/utils'
+import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator } from './lib/coordination'
 
 /**
@@ -30,23 +32,51 @@ import { createLazyAuthCoordinator } from './lib/coordination'
 async function runClient(
   serverUrl: string,
   callbackPort: number,
+  specifiedPort: number | undefined,
   headers: Record<string, string>,
   transportStrategy: TransportStrategy = 'http-first',
+  host: string,
+  staticOAuthClientMetadata: StaticOAuthClientMetadata,
+  staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  authTimeoutMs: number,
+  serverUrlHash: string,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
-  // Get the server URL hash for lockfile operations
-  const serverUrlHash = getServerUrlHash(serverUrl)
+  const strictPort = !!specifiedPort || !!staticOAuthClientInfo
 
   // Create a lazy auth coordinator
-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events)
+  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPort, events, authTimeoutMs, strictPort)
 
-  // Create the OAuth client provider
+  // Discover OAuth server info via Protected Resource Metadata (RFC 9728)
+  // This probes the MCP server for WWW-Authenticate header and fetches PRM
+  log('Discovering OAuth server configuration...')
+  const discoveryResult = await discoverOAuthServerInfo(serverUrl, headers)
+
+  if (discoveryResult.protectedResourceMetadata) {
+    log(`Discovered authorization server: ${discoveryResult.authorizationServerUrl}`)
+    if (discoveryResult.protectedResourceMetadata.scopes_supported) {
+      debugLog('Protected Resource Metadata scopes', {
+        scopes_supported: discoveryResult.protectedResourceMetadata.scopes_supported,
+      })
+    }
+  } else {
+    debugLog('No Protected Resource Metadata found, using server URL as authorization server')
+  }
+
+  // Create the OAuth client provider with discovered server info
   const authProvider = new NodeOAuthClientProvider({
-    serverUrl,
+    serverUrl: discoveryResult.authorizationServerUrl,
     callbackPort,
+    host,
     clientName: 'MCP CLI Client',
+    staticOAuthClientMetadata,
+    staticOAuthClientInfo,
+    serverUrlHash,
+    authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
+    protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
+    wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope,
   })
 
   // Create the client
@@ -69,6 +99,16 @@ async function runClient(
 
     // Store server in outer scope for cleanup
     server = authState.server
+
+    // If the callback server bound to a different port (EADDRINUSE fallback), update the provider
+    if (authState.actualPort !== callbackPort) {
+      log(`Callback port changed from ${callbackPort} to ${authState.actualPort} (original port was unavailable)`)
+      authProvider.setCallbackPort(authState.actualPort)
+      if (!staticOAuthClientInfo) {
+        log('Invalidating cached client registration so it re-registers with the new redirect_uri')
+        await authProvider.invalidateCredentials('client')
+      }
+    }
 
     // If auth was completed by another instance, just log that we'll use the auth from disk
     if (authState.skipBrowserAuth) {
@@ -151,10 +191,34 @@ async function runClient(
 }
 
 // Parse command-line arguments and run the client
-parseCommandLineArgs(process.argv.slice(2), 3333, 'Usage: npx tsx client.ts <https://server-url> [callback-port]')
-  .then(({ serverUrl, callbackPort, headers, transportStrategy }) => {
-    return runClient(serverUrl, callbackPort, headers, transportStrategy)
-  })
+parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://server-url> [callback-port] [--debug]')
+  .then(
+    ({
+      serverUrl,
+      callbackPort,
+      specifiedPort,
+      headers,
+      transportStrategy,
+      host,
+      staticOAuthClientMetadata,
+      staticOAuthClientInfo,
+      authTimeoutMs,
+      serverUrlHash,
+    }) => {
+      return runClient(
+        serverUrl,
+        callbackPort,
+        specifiedPort,
+        headers,
+        transportStrategy,
+        host,
+        staticOAuthClientMetadata,
+        staticOAuthClientInfo,
+        authTimeoutMs,
+        serverUrlHash,
+      )
+    },
+  )
   .catch((error) => {
     console.error('Fatal error:', error)
     process.exit(1)

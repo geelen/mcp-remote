@@ -46,11 +46,11 @@ To bypass authentication, or to emit custom headers on all requests to your remo
         "https://remote.mcp.server/sse",
         "--header",
         "Authorization: Bearer ${AUTH_TOKEN}"
-      ]
+      ],
+      "env": {
+        "AUTH_TOKEN": "..."
+      }
     },
-    "env": {
-      "AUTH_TOKEN": "..."
-    }
   }
 }
 ```
@@ -65,12 +65,43 @@ To bypass authentication, or to emit custom headers on all requests to your remo
     "https://remote.mcp.server/sse",
     "--header",
     "Authorization:${AUTH_HEADER}" // note no spaces around ':'
-  ]
+  ],
+  "env": {
+    "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
+  }
 },
-"env": {
-  "AUTH_HEADER": "Bearer <auth-token>" // spaces OK in env vars
+```
+
+### Multiple Instances
+
+To run multiple instances of the same remote server with different configurations (e.g., different Atlassian tenants), use the `--resource` flag to isolate OAuth sessions:
+
+```json
+{
+  "mcpServers": {
+    "atlassian_tenant1": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.atlassian.com/v1/sse",
+        "--resource",
+        "https://tenant1.atlassian.net/"
+      ]
+    },
+    "atlassian_tenant2": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.atlassian.com/v1/sse",
+        "--resource",
+        "https://tenant2.atlassian.net/"
+      ]
+    }
+  }
 }
 ```
+
+Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
 
 ### Flags
 
@@ -79,7 +110,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 ```json
       "command": "npx",
       "args": [
-        "-y"
+        "-y",
         "mcp-remote",
         "https://remote.mcp.server/sse"
       ]
@@ -104,6 +135,17 @@ To bypass authentication, or to emit custom headers on all requests to your remo
       ]
 ```
 
+* To change which host `mcp-remote` registers as the OAuth callback URL (by default `localhost`), add the `--host` flag.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--host",
+        "127.0.0.1"
+      ]
+```
+
 * To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
 
 ```json
@@ -111,6 +153,69 @@ To bypass authentication, or to emit custom headers on all requests to your remo
         "mcp-remote",
         "http://internal-service.vpc/sse",
         "--allow-http"
+      ]
+```
+
+* To enable detailed debugging logs, add the `--debug` flag. This will write verbose logs to `~/.mcp-auth/{server_hash}_debug.log` with timestamps and detailed information about the auth process, connections, and token refreshing.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--debug"
+      ]
+```
+
+* To suppress default logs, add the `--silent` flag. This will prevent logs from being emitted, except in the case where `--debug` is also passed.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--silent"
+      ]
+```
+
+* To enable an outbound HTTP(S) proxy for mcp-remote, add the `--enable-proxy` flag. When enabled, mcp-remote will use the proxy settings from common environment variables (for example `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`).
+
+```json
+    "args": [
+      "mcp-remote",
+      "https://remote.mcp.server/sse",
+      "--enable-proxy"
+    ],
+    "env": {
+      "HTTPS_PROXY": "http://127.0.0.1:3128",
+      "NO_PROXY": "localhost,127.0.0.1"
+    }
+```
+
+* To ignore specific tools from the remote server, add the `--ignore-tool` flag. This will filter out tools matching the specified patterns from both `tools/list` responses and block `tools/call` requests. Supports wildcard patterns with `*`.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--ignore-tool",
+        "delete*",
+        "--ignore-tool",
+        "remove*"
+      ]
+```
+
+You can specify multiple `--ignore-tool` flags to ignore different patterns. Examples:
+- `delete*` - ignores all tools starting with "delete" (e.g., `deleteTask`, `deleteUser`)
+- `*account` - ignores all tools ending with "account" (e.g., `getAccount`, `updateAccount`)
+- `exactTool` - ignores only the tool named exactly "exactTool"
+
+* To change the timeout for the OAuth callback (by default `30` seconds), add the `--auth-timeout` flag with a value in seconds. This is useful if the authentication process on the server side takes a long time.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--auth-timeout",
+        "60"
       ]
 ```
 
@@ -130,6 +235,37 @@ npx mcp-remote https://example.remote/server --transport sse-only
 - `sse-first`: Tries SSE transport first, falls back to HTTP if SSE fails with a 405 error
 - `http-only`: Only uses HTTP transport, fails if the server doesn't support it
 - `sse-only`: Only uses SSE transport, fails if the server doesn't support it
+
+### Static OAuth Client Metadata
+
+MCP Remote supports providing static OAuth client metadata instead of using the mcp-remote defaults.
+This is useful when connecting to OAuth servers that expect specific client/software IDs or scopes.
+
+Provide the client metadata as a JSON string or as a `@` prefixed filepath with the `--static-oauth-client-metadata` flag:
+
+```bash
+npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "scope": "space separated scopes" }'
+# uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
+npx mcp-remote https://example.remote/server --static-oauth-client-metadata '@/Users/username/Library/Application Support/Claude/oauth_client_metadata.json'
+```
+
+### Static OAuth Client Information
+
+Per the [spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization#2-4-dynamic-client-registration),
+servers are encouraged but not required to support [OAuth dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591).
+
+For these servers, MCP Remote supports providing static OAuth client information instead.
+This is useful when connecting to OAuth servers that require pre-registered clients.
+
+Provide the client metadata as a JSON string or as a `@` prefixed filepath with the `--static-oauth-client-info` flag:
+
+```bash
+export MCP_REMOTE_CLIENT_ID=xxx
+export MCP_REMOTE_CLIENT_SECRET=yyy
+npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"client_id\": \"$MCP_REMOTE_CLIENT_ID\", \"client_secret\": \"$MCP_REMOTE_CLIENT_SECRET\" }"
+# uses node readfile, so you probably want to use absolute paths if you're not sure what the cwd is
+npx mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
+```
 
 ### Claude Desktop
 
@@ -187,7 +323,7 @@ Then restarting your MCP client.
 
 ### Check your Node version
 
-Make sure that the version of Node you have installed is [18 or 
+Make sure that the version of Node you have installed is [18 or
 higher](https://modelcontextprotocol.io/quickstart/server). Claude
 Desktop will use your system version of Node, even if you have a newer
 version installed elsewhere.
@@ -227,6 +363,22 @@ this might look like:
 * Powershell: <br/>`Get-Content "C:\Users\YourUsername\AppData\Local\Claude\Logs\mcp.log" -Wait -Tail 20`
 
 ## Debugging
+
+### Debug Logs
+
+For troubleshooting complex issues, especially with token refreshing or authentication problems, use the `--debug` flag:
+
+```json
+"args": [
+  "mcp-remote",
+  "https://remote.mcp.server/sse",
+  "--debug"
+]
+```
+
+This creates detailed logs in `~/.mcp-auth/{server_hash}_debug.log` with timestamps and complete information about every step of the connection and authentication process. When you find issues with token refreshing, laptop sleep/resume issues, or auth problems, provide these logs when seeking support.
+
+### Authentication Errors
 
 If you encounter the following error, returned by the `/callback` URL:
 
