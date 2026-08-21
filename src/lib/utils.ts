@@ -584,9 +584,7 @@ export async function connectToRemoteServer(
  * @param options The server options
  * @returns A promise resolving to an object with the server, actualPort, authCode, and waitForAuthCode function
  */
-export async function setupOAuthCallbackServerWithLongPoll(
-  options: OAuthCallbackServerOptions,
-): Promise<{
+export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbackServerOptions): Promise<{
   server: Server
   actualPort: number
   authCode: string | null

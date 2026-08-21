@@ -209,7 +209,11 @@ export async function coordinateAuth(
 
         return {
           server: dummyServer,
-          actualPort: dummyPort,
+          // Report the caller's original callback port, not the dummy server's OS-assigned one.
+          // This instance never serves callbacks, so its port did not "change" - returning
+          // dummyPort here makes callers think the port moved and needlessly re-register the
+          // OAuth client (deleting client_info.json) on every successful secondary startup.
+          actualPort: callbackPort,
           waitForAuthCode: dummyWaitForAuthCode,
           skipBrowserAuth: true,
         }
