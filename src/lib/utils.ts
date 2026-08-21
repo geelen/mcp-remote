@@ -844,7 +844,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     } else if (args[i] === '--headerFile' && i < args.length - 1) {
       const filePath = args[i + 1]
       try {
-        const fileContent = await fs.readFile(filePath, 'utf8')
+        const fileContent = await readFile(filePath, 'utf8')
         const lines = fileContent.split('\n')
         for (const line of lines) {
           const trimmedLine = line.trim()
