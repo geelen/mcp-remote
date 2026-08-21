@@ -26,10 +26,21 @@
   "scripts": {
     "build": "tsup",
     "build:watch": "tsup --watch",
-    "check": "prettier --check . && tsc",
-    "lint-fix": "prettier --check . --write",
-    "test:unit": "vitest run",
-    "test:unit:watch": "vitest"
+    "format": "prettier --write .",
+    "lint": "prettier --check . && tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "release": {
+    "branches": [
+      "main"
+    ],
+    "plugins": [
+      "@semantic-release/commit-analyzer",
+      "@semantic-release/release-notes-generator",
+      "@semantic-release/npm",
+      "@semantic-release/github"
+    ]
   },
   "dependencies": {
     "express": "^4.21.2",
@@ -43,6 +54,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
     "prettier": "^3.5.3",
+    "semantic-release": "^25.0.2",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
