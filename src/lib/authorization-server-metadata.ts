@@ -52,6 +52,7 @@ export async function fetchAuthorizationServerMetadata(serverUrl: string): Promi
     const response = await fetch(metadataUrl, {
       headers: {
         Accept: 'application/json',
+        'Accept-Encoding': 'identity',
       },
       // Short timeout to avoid blocking
       signal: AbortSignal.timeout(5000),
