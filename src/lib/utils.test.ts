@@ -3,10 +3,45 @@ import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackSe
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { EventEmitter } from 'events'
 import express from 'express'
+import net from 'net'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
 describe('Feature: Command Line Arguments Parsing', () => {
+  it('Scenario: Show help without parsing server URL', async () => {
+    // Given command line arguments with only the help flag
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as any)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit:${code}`)
+    })
+
+    // When parsing the command line arguments
+    await expect(parseCommandLineArgs(['--help'], 'test usage')).rejects.toThrow('process.exit:0')
+
+    // Then usage should be written before URL validation
+    expect(stdoutSpy).toHaveBeenCalledWith('test usage\n')
+
+    stdoutSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
+  it('Scenario: Show version without parsing server URL', async () => {
+    // Given command line arguments with only the version flag
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as any)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit:${code}`)
+    })
+
+    // When parsing the command line arguments
+    await expect(parseCommandLineArgs(['--version'], 'test usage')).rejects.toThrow('process.exit:0')
+
+    // Then the version should be written before URL validation
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringMatching(/^\d+\.\d+\.\d+\n$/))
+
+    stdoutSpy.mockRestore()
+    exitSpy.mockRestore()
+  })
+
   it('Scenario: Parse basic server URL', async () => {
     // Given command line arguments with only a server URL
     const args = ['https://example.com/sse']
@@ -979,6 +1014,142 @@ describe('Feature: MCP Proxy', () => {
       }),
     )
   })
+
+  it('Scenario: Failed forward of a request surfaces a JSON-RPC error to the client', async () => {
+    // Given a server transport whose send() rejects, e.g. because the
+    // server expired the session and answers HTTP 404 (issue #106)
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client sends a request (a message with an id)
+    const clientRequest = {
+      jsonrpc: '2.0' as const,
+      method: 'tools/call',
+      id: 42,
+      params: { name: 'SomeTool', arguments: {} },
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientRequest)
+    }
+
+    // Then the client receives a JSON-RPC error response for that id
+    // instead of waiting forever for a reply that never arrives
+    await vi.waitFor(() => {
+      expect(mockTransportToClient.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          jsonrpc: '2.0',
+          id: 42,
+          error: expect.objectContaining({
+            code: -32603,
+            message: expect.stringContaining('HTTP 404'),
+          }),
+        }),
+      )
+    })
+  })
+
+  it('Scenario: Failed forward of a notification does not produce a response', async () => {
+    // Given a server transport whose send() rejects
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client sends a notification (no id)
+    const clientNotification = {
+      jsonrpc: '2.0' as const,
+      method: 'notifications/initialized',
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientNotification)
+    }
+
+    // Then no response is sent back — JSON-RPC forbids replies to notifications
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockTransportToClient.send).not.toHaveBeenCalled()
+  })
+
+  it('Scenario: Failed forward of a client response does not produce a response', async () => {
+    // Given a server transport whose send() rejects
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const mockTransportToServer = {
+      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client answers a server-initiated request (an id, but no method)
+    const clientResponse = {
+      jsonrpc: '2.0' as const,
+      id: 7,
+      result: {},
+    }
+    if (mockTransportToClient.onmessage) {
+      mockTransportToClient.onmessage(clientResponse)
+    }
+
+    // Then no error response is sent back. Answering a response would make the
+    // local SDK raise "Received a response for an unknown message ID"
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockTransportToClient.send).not.toHaveBeenCalled()
+  })
 })
 
 describe('setupOAuthCallbackServerWithLongPoll', () => {
@@ -998,7 +1169,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
 
   it('should use custom timeout when authTimeoutMs is provided', async () => {
     const customTimeout = 5000
-    const result = setupOAuthCallbackServerWithLongPoll({
+    const result = await setupOAuthCallbackServerWithLongPoll({
       port: 0, // Use any available port
       path: '/oauth/callback',
       events,
@@ -1013,7 +1184,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
   })
 
   it('should use default timeout when authTimeoutMs is not provided', async () => {
-    const result = setupOAuthCallbackServerWithLongPoll({
+    const result = await setupOAuthCallbackServerWithLongPoll({
       port: 0, // Use any available port
       path: '/oauth/callback',
       events,
@@ -1024,6 +1195,64 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     // Test that the server was created with defaults
     expect(server).toBeDefined()
     expect(typeof result.waitForAuthCode).toBe('function')
+  })
+
+  it('should return actualPort matching the bound port on success', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+    })
+
+    server = result.server
+    const boundPort = (server.address() as net.AddressInfo).port
+    expect(result.actualPort).toBe(boundPort)
+    expect(result.actualPort).toBeGreaterThan(0)
+  })
+
+  it('should fall back to a random port when the requested port is already in use', async () => {
+    // Hold a port so the callback server cannot bind to it
+    const blocker = net.createServer()
+    const blockedPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
+    })
+
+    try {
+      const result = await setupOAuthCallbackServerWithLongPoll({
+        port: blockedPort,
+        path: '/oauth/callback',
+        events,
+      })
+
+      server = result.server
+      expect(result.actualPort).toBeGreaterThan(0)
+      expect(result.actualPort).not.toBe(blockedPort)
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
+  })
+
+  it('should reject with EADDRINUSE error when strictPort is true and port is already in use', async () => {
+    const blocker = net.createServer()
+    const blockedPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
+    })
+
+    try {
+      await expect(
+        setupOAuthCallbackServerWithLongPoll({
+          port: blockedPort,
+          path: '/oauth/callback',
+          events,
+          strictPort: true,
+        }),
+      ).rejects.toMatchObject({
+        code: 'EADDRINUSE',
+        requestedPort: blockedPort,
+      })
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
   })
 })
 
