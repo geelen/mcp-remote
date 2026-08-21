@@ -190,6 +190,23 @@ Each unique combination of server URL, resource, and custom headers will maintai
     }
 ```
 
+* To route traffic through a SOCKS proxy, add the `--socks-proxy` flag with the proxy URL. This is useful for SSH tunnels, corporate SOCKS proxies, or environments using `proxychains`. Supported schemes:
+  - `socks5://` — SOCKS5, local DNS resolution
+  - `socks5h://` — SOCKS5, proxy-side DNS resolution
+  - `socks4://` — SOCKS4, local DNS resolution
+  - `socks4a://` — SOCKS4a, proxy-side DNS resolution
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--socks-proxy",
+        "socks5://127.0.0.1:8080"
+      ]
+```
+
+Note: `--socks-proxy` and `--enable-proxy` cannot be used together.
+
 * To ignore specific tools from the remote server, add the `--ignore-tool` flag. This will filter out tools matching the specified patterns from both `tools/list` responses and block `tools/call` requests. Supports wildcard patterns with `*`.
 
 ```json

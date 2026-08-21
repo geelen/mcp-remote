@@ -191,7 +191,7 @@ async function runClient(
 }
 
 // Parse command-line arguments and run the client
-parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://server-url> [callback-port] [--debug]')
+parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://server-url> [callback-port] [--debug] [--socks-proxy <url>]')
   .then(
     ({
       serverUrl,

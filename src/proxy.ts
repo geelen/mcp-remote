@@ -178,7 +178,7 @@ to the CA certificate file. If using claude_desktop_config.json, this might look
 }
 
 // Parse command-line arguments and run the proxy
-parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-url> [callback-port] [--debug]')
+parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-url> [callback-port] [--debug] [--socks-proxy <url>]')
   .then(
     ({
       serverUrl,
