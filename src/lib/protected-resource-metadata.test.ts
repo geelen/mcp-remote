@@ -152,7 +152,7 @@ describe('protected-resource-metadata', () => {
       expect(global.fetch).toHaveBeenCalledWith(
         'https://mcp.example.com/.well-known/oauth-protected-resource/mcp',
         expect.objectContaining({
-          headers: { Accept: 'application/json' },
+          headers: { Accept: 'application/json', 'Accept-Encoding': 'identity' },
         }),
       )
     })

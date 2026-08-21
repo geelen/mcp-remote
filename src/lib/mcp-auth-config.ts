@@ -17,6 +17,11 @@ import { log } from './utils'
  *
  * The directory defaults to ~/.config/mcp-remote and is 0700. Database files
  * and file-backed records are 0600.
+ *
+ * PKCE verifiers are keyed per-process (code_verifier_{pid}.txt): multiple mcp-remote
+ * processes can run concurrently for the same server, and coordination between them is
+ * disabled on Windows (see coordination.ts), so a shared key would let one process's
+ * verifier silently overwrite another's mid-flow (see issue #235).
  */
 
 const CREDENTIALS_DATABASE = 'credentials.db'
@@ -85,7 +90,7 @@ export function getConfigFilePath(serverUrlHash: string, filename: string): stri
 }
 
 function isCredentialRecord(filename: string): boolean {
-  return filename === 'client_info.json' || filename === 'tokens.json' || filename === 'code_verifier.txt'
+  return filename === 'client_info.json' || filename === 'tokens.json' || /^code_verifier(_\d+)?\.txt$/.test(filename)
 }
 
 function credentialRecordId(serverUrlHash: string, filename: string): string {
