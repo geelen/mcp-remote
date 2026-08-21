@@ -14,6 +14,20 @@ With the latest MCP [Authorization specification](https://modelcontextprotocol.i
 
 That's where `mcp-remote` comes in. As soon as your chosen MCP client supports remote, authorized servers, you can remove it. Until that time, drop in this one liner and dress for the MCP clients you want!
 
+## Cold-start behaviour (initialize during OAuth)
+
+The MCP `initialize` request has a client-side timeout (60 s in Claude Desktop). A real OAuth flow — open the browser, log in, click consent, redirect back — typically takes 30 – 180 s, so the first time a user attaches a remote MCP server they would time out before tokens are exchanged.
+
+`mcp-remote` works around this in a spec-clean way:
+
+- On first attach (no cached tokens, or expired tokens), the proxy answers `initialize` **immediately** with `capabilities: { tools: { listChanged: true }, resources: { listChanged: true }, prompts: { listChanged: true } }` and empty tool / resource / prompt lists.
+- OAuth discovery, the browser dance, token exchange, and the remote MCP connection then proceed in the background.
+- Calls to `tools/list`, `resources/list`, `prompts/list`, and `resources/templates/list` during this window return empty results (not errors), so the client UI shows the server as connected with zero tools rather than as broken.
+- `tools/call` during this window returns a structured `-32002` error explaining that OAuth is still in progress.
+- Once OAuth finishes and the remote MCP server is connected, the proxy re-issues `initialize` upstream using the original `clientInfo` (tagged with `via mcp-remote <version>`), forwards `notifications/initialized` if the client sent it, reads the upstream's advertised `capabilities`, and emits `notifications/<domain>/list_changed` **only for the domains the upstream actually supports** (so a tools-only server doesn't trigger a `resources/list` round-trip that would just return `-32601`). From then on it behaves as a transparent bidirectional proxy, with a capability filter that short-circuits client requests for unsupported domains to empty results instead of forwarding them upstream.
+
+For users with valid cached tokens (`~/.mcp-auth/<hash>_tokens.json` with `expires_in > 30 s`) the original synchronous flow is used — no behavioural change.
+
 ## Usage
 
 All the most popular MCP clients (Claude Desktop, Cursor & Windsurf) use the following config format:
