@@ -56,6 +56,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
   }
 
+  setCallbackPort(port: number): void {
+    this.options.callbackPort = port
+  }
+
   get redirectUrl(): string {
     return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
   }
@@ -72,7 +76,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       software_id: this.softwareId,
       software_version: this.softwareVersion,
       ...this.staticOAuthClientMetadata,
-      scope: effectiveScope,
+      ...(effectiveScope ? { scope: effectiveScope } : {}),
     }
   }
 
@@ -120,10 +124,15 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     // Priority 3: Scopes from Protected Resource Metadata (RFC 9728)
-    if (this.protectedResourceMetadata?.scopes_supported?.length) {
-      const scope = this.protectedResourceMetadata.scopes_supported.join(' ')
+    const resourceScopes = this.protectedResourceMetadata?.scopes_supported
+    if (resourceScopes !== undefined) {
+      if (resourceScopes.length === 0) {
+        debugLog('Protected resource advertises no scopes (scopes_supported: []), omitting scope')
+        return ''
+      }
+      const scope = resourceScopes.join(' ')
       debugLog('Using scopes from Protected Resource Metadata', {
-        scopes_supported: this.protectedResourceMetadata.scopes_supported,
+        scopes_supported: resourceScopes,
         scope,
       })
       return scope
@@ -135,17 +144,22 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return this._clientInfo.scope
     }
 
-    // Priority 5: Use authorization server's supported scopes if available
-    if (this.authorizationServerMetadata?.scopes_supported?.length) {
-      const scope = this.authorizationServerMetadata.scopes_supported.join(' ')
+    // Priority 5: Use authorization server's supported scopes if advertised
+    const authScopes = this.authorizationServerMetadata?.scopes_supported
+    if (authScopes !== undefined) {
+      if (authScopes.length === 0) {
+        debugLog('Authorization server advertises no scopes (scopes_supported: []), omitting scope')
+        return ''
+      }
+      const scope = authScopes.join(' ')
       debugLog('Using scopes from Authorization Server Metadata', {
-        scopes_supported: this.authorizationServerMetadata.scopes_supported,
+        scopes_supported: authScopes,
         scope,
       })
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default
+    // Priority 6: Fallback to hardcoded default when metadata is unknown or omits scopes_supported
     debugLog('Using fallback default scope')
     return 'openid email profile'
   }
@@ -272,8 +286,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         .filter((scope) => scope && scope !== 'offline_access')
         .join(' ')
     }
-    authorizationUrl.searchParams.set('scope', effectiveScope)
-    debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    if (effectiveScope) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    } else {
+      debugLog('Omitting scope parameter from authorization URL (no effective scope)')
+    }
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
@@ -290,11 +308,20 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
   /**
    * Saves the PKCE code verifier
+   *
+   * The filename is scoped to the current process ID. Multiple mcp-remote
+   * processes can be started concurrently for the same server (e.g. an MCP
+   * host reconnecting or launching duplicate instances) - since coordination
+   * between those processes is currently disabled on Windows (see
+   * coordination.ts), each process must keep its own verifier so a second
+   * process can't overwrite the first one's file mid-flow and break the
+   * PKCE exchange for whichever process the browser callback actually
+   * reaches. See https://github.com/geelen/mcp-remote/issues/235.
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, 'code_verifier.txt', codeVerifier)
+    await writeTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, codeVerifier)
   }
 
   /**
@@ -303,7 +330,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async codeVerifier(): Promise<string> {
     debugLog('Reading code verifier')
-    const verifier = await readTextFile(this.serverUrlHash, 'code_verifier.txt', 'No code verifier saved for session')
+    const verifier = await readTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
   }
@@ -320,7 +347,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
-          deleteConfigFile(this.serverUrlHash, 'code_verifier.txt'),
+          deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`),
         ])
         this._clientInfo = undefined
         debugLog('All credentials invalidated')
@@ -338,7 +365,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, 'code_verifier.txt')
+        await deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`)
         debugLog('Code verifier invalidated')
         break
 
