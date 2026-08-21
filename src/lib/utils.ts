@@ -2,7 +2,7 @@ import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sd
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { Transport, type FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
@@ -452,9 +452,9 @@ export async function connectToRemoteServer(
   // provider instead of returning 401.
   // We use redirect:'manual' to catch redirects before they're followed, then
   // re-fetch with redirect:'follow' for non-redirect responses.
-  const fetchWith302To401: typeof fetch = async (input, init) => {
+  const fetchWith302To401: FetchLike = async (input, init) => {
     const manualInit = { ...init, redirect: 'manual' as const }
-    const response = await fetch(input, manualInit)
+    const response = await fetch(input as any, manualInit as any)
     if (response.status >= 300 && response.status < 400) {
       debugLog('Intercepted redirect response, converting to 401 for OAuth flow', {
         status: response.status,
@@ -480,9 +480,9 @@ export async function connectToRemoteServer(
         blob: async () => new Blob(),
         formData: async () => new FormData(),
         bytes: async () => new Uint8Array(),
-      } as unknown as Awaited<ReturnType<typeof fetch>>
+      } as unknown as Response
     }
-    return response
+    return response as unknown as Response
   }
 
   // Create transport instance based on the strategy
