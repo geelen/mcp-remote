@@ -867,6 +867,11 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   if (enableProxy) {
     // Use env proxy
     setGlobalDispatcher(new EnvHttpProxyAgent())
+    // On Node.js 22+, globalThis.fetch uses the Node.js built-in undici instance which
+    // is separate from the npm-installed undici. setGlobalDispatcher() above only affects
+    // the npm undici dispatcher, so globalThis.fetch bypasses the proxy entirely.
+    // Replace it with undici's fetch so all fetch calls go through the proxy.
+    globalThis.fetch = fetch as typeof globalThis.fetch
     log('HTTP proxy support enabled - using system HTTP_PROXY/HTTPS_PROXY environment variables')
   }
 
