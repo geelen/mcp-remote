@@ -69,6 +69,10 @@ async function runProxy(
   // Keep track of the OAuth callback server instance for cleanup
   let server: any = null
 
+  // Hoisted so authInitializer can update the callback port after an EADDRINUSE
+  // fallback. Assigned in discoverAndConnect before any auth can run.
+  let authProvider: NodeOAuthClientProvider | null = null
+
   // Define an auth initializer function (shared by both warm and cold paths)
   const authInitializer = async () => {
     const authState = await authCoordinator.initializeAuth()
@@ -79,10 +83,10 @@ async function runProxy(
     // If the callback server bound to a different port (EADDRINUSE fallback), update the provider
     if (authState.actualPort !== callbackPort) {
       log(`Callback port changed from ${callbackPort} to ${authState.actualPort} (original port was unavailable)`)
-      authProvider.setCallbackPort(authState.actualPort)
+      authProvider?.setCallbackPort(authState.actualPort)
       if (!staticOAuthClientInfo) {
         log('Invalidating cached client registration so it re-registers with the new redirect_uri')
-        await authProvider.invalidateCredentials('client')
+        await authProvider?.invalidateCredentials('client')
       }
     }
 
@@ -117,7 +121,7 @@ async function runProxy(
       debugLog('No Protected Resource Metadata found, using server URL as authorization server')
     }
 
-    const authProvider = new NodeOAuthClientProvider({
+    authProvider = new NodeOAuthClientProvider({
       serverUrl: discoveryResult.authorizationServerUrl,
       callbackPort,
       host,
