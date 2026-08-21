@@ -28,6 +28,7 @@
     "build:watch": "tsup --watch",
     "format": "prettier --write .",
     "lint": "prettier --check . && tsc",
+    "prepack": "tsup",
     "test": "vitest run",
     "test:watch": "vitest"
   },

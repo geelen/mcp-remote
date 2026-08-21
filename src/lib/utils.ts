@@ -819,7 +819,9 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     process.exit(0)
   }
 
-  if (args.includes('--version') || args.includes('-v')) {
+  // Deliberately no `-v` alias: it conventionally means "verbose", and this CLI
+  // already has --debug, so leave -v free to become its shorthand later.
+  if (args.includes('--version')) {
     process.stdout.write(`${MCP_REMOTE_VERSION}\n`)
     process.exit(0)
   }
