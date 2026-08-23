@@ -31,6 +31,8 @@ export interface OAuthProviderOptions {
   staticOAuthClientInfo?: StaticOAuthClientInformationFull
   /** Resource parameter to send to the authorization server */
   authorizeResource?: string
+  /** Omit the RFC 8707 resource parameter entirely (some servers reject it, e.g. Entra ID v2) */
+  skipResourceParameter?: boolean
   /** Pre-calculated server URL hash for cache isolation */
   serverUrlHash: string
   /** Authorization server metadata (optional, fetched if not provided) */
