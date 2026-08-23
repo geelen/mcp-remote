@@ -760,6 +760,18 @@ export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptio
   return { server, authCode, waitForAuthCode }
 }
 
+/** The callback path the OAuth redirect URI is built on. */
+export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
+
+/**
+ * Builds the OAuth redirect URI for a given host/port. Kept in one place because the value
+ * registered with the authorization server and the value checked against a cached
+ * registration must match exactly - see invalidateMismatchedClientRegistration.
+ */
+export function buildRedirectUrl(host: string, port: number, callbackPath: string = DEFAULT_CALLBACK_PATH): string {
+  return `http://${host}:${port}${callbackPath}`
+}
+
 async function findExistingClientPort(serverUrlHash: string): Promise<number | undefined> {
   const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
   if (!clientInfo) {
@@ -770,10 +782,30 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     .map((uri) => new URL(uri))
     .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
-    throw new Error('Cannot find localhost callback URI from existing client information')
+    // A registration that points somewhere we cannot listen (e.g. it was made behind a reverse
+    // proxy, or by an earlier `--host` run) yields no reusable port. Fall back to picking one;
+    // invalidateMismatchedClientRegistration then discards the unusable registration.
+    return undefined
   }
 
   return parseInt(localhostRedirectUri.port)
+}
+
+/**
+ * Deletes a cached client registration whose redirect_uris do not include the redirect URI
+ * this session will send, forcing a fresh dynamic registration on the next request.
+ */
+async function invalidateMismatchedClientRegistration(serverUrlHash: string, redirectUrl: string): Promise<void> {
+  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+  if (!clientInfo || clientInfo.redirect_uris.includes(redirectUrl)) {
+    return
+  }
+
+  log(
+    `Cached client registration is for ${clientInfo.redirect_uris.join(', ')} but this session will use ${redirectUrl}. ` +
+      `Deleting it so the client re-registers.`,
+  )
+  await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
 }
 
 function calculateDefaultPort(serverUrlHash: string): number {
@@ -927,11 +959,34 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
-  // Parse resource to authorize
-  let authorizeResource = '' // Default
+  // Parse the RFC 8707 resource indicator, and whether to omit it entirely
+  let authorizeResource: string | undefined
+  let skipResourceParameter = args.includes('--disable-resource-parameter')
+
   const resourceIndex = args.indexOf('--resource')
   if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
-    authorizeResource = args[resourceIndex + 1]
+    const value = args[resourceIndex + 1].trim()
+    if (value.length === 0) {
+      // `--resource ""` is how people have been trying to switch this off
+      skipResourceParameter = true
+    } else {
+      authorizeResource = value
+    }
+  }
+
+  if (skipResourceParameter) {
+    if (authorizeResource) {
+      log(`Warning: --disable-resource-parameter overrides --resource ${authorizeResource}; the resource parameter will be omitted.`)
+      // Cleared so it cannot silently split the credential cache - see getServerUrlHash
+      authorizeResource = undefined
+    }
+    log('Resource parameter disabled - it will be omitted from authorization and token requests')
+  } else if (authorizeResource) {
+    try {
+      new URL(authorizeResource)
+    } catch {
+      throw new Error(`Invalid --resource value: "${authorizeResource}". RFC 8707 requires an absolute URI, e.g. https://example.com/mcp`)
+    }
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
@@ -991,12 +1046,6 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   let callbackPort: number
 
   if (specifiedPort) {
-    if (existingClientPort && specifiedPort !== existingClientPort) {
-      log(
-        `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
-      )
-      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
-    }
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
   } else if (existingClientPort) {
@@ -1007,8 +1056,22 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     callbackPort = availablePort
   }
 
+  // A cached dynamic client registration is only usable if it was registered with the exact
+  // redirect_uri this run will send. If it wasn't, the authorization server rejects the
+  // authorize request (RFC 6749 §3.1.2.4) and, because it refuses to redirect back, the user
+  // sees an opaque error at the AS rather than anything actionable here. Worse, the callback
+  // port is re-picked on each run, so it never self-heals. Dropping the registration lets the
+  // next request re-register cleanly.
+  //
+  // Static client info is pinned by the user, so it is never discarded.
+  if (!staticOAuthClientInfo) {
+    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort))
+  }
+
   if (Object.keys(headers).length > 0) {
-    log(`Using custom headers: ${JSON.stringify(headers)}`)
+    // Names only - values routinely carry bearer tokens and API keys, and this
+    // goes to stderr, which MCP clients capture into their own logs.
+    log(`Using custom headers: ${Object.keys(headers).join(', ')}`)
   }
   // Replace environment variables in headers
   // example `Authorization: Bearer ${TOKEN}` will read process.env.TOKEN
@@ -1037,6 +1100,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    skipResourceParameter,
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,

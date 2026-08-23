@@ -38,6 +38,8 @@ async function runClient(
   host: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  authorizeResource: string | undefined,
+  skipResourceParameter: boolean,
   authTimeoutMs: number,
   serverUrlHash: string,
 ) {
@@ -73,6 +75,8 @@ async function runClient(
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
+    authorizeResource,
+    skipResourceParameter,
     serverUrlHash,
     authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
     protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
@@ -202,6 +206,8 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
       host,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
+      authorizeResource,
+      skipResourceParameter,
       authTimeoutMs,
       serverUrlHash,
     }) => {
@@ -214,6 +220,8 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
         host,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
+        authorizeResource,
+        skipResourceParameter,
         authTimeoutMs,
         serverUrlHash,
       )
