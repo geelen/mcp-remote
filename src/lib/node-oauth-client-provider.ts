@@ -1,6 +1,6 @@
 import open from 'open'
 import { z } from 'zod'
-import { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
   OAuthClientInformationFull,
   OAuthClientInformationFullSchema,
@@ -14,7 +14,7 @@ import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
-import type { ProtectedResourceMetadata } from './protected-resource-metadata'
+import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './protected-resource-metadata'
 
 /**
  * The OAuth token response only carries the relative `expires_in`, which is
@@ -54,6 +54,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  /** In-flight proactive refresh, so concurrent requests share one refresh_token use */
+  private refreshInFlight: Promise<OAuthTokensWithExpiresAt | undefined> | null = null
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -271,19 +273,92 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         isExpired,
       })
 
-      // If the token is expired (or about to expire) and we have a refresh
-      // token, blank out the access token so the SDK's auth flow performs a
-      // refresh instead of reusing the stale token. Reusing it would 401 and
-      // trigger a full browser re-auth, which clients like Claude Desktop kill
-      // before the user can complete it (see issue #273).
+      // Renew before the token is sent rather than after the server rejects it.
+      // Waiting for a 401 assumes the server answers expiry with exactly 401 -
+      // one that replies 400 or 403 instead never reaches the SDK's refresh path
+      // and the connection just fails (see issue #273).
       if (isExpired && tokens.refresh_token) {
-        return { ...tokens, access_token: '' }
+        const refreshed = await this.refreshTokens(tokens.refresh_token)
+        if (refreshed) {
+          return refreshed
+        }
+        // Refresh failed: hand back what we have and let the SDK's own 401
+        // handling take it from here, exactly as it did before.
+        log('Proactive token refresh failed, falling back to the stored token')
       }
     } else {
       debugLog('Token result: Not found')
     }
 
     return tokens
+  }
+
+  /**
+   * Exchanges a refresh token for a new access token, reusing the same authorization
+   * server, client credentials and RFC 8707 resource indicator the SDK would have
+   * picked, so the refresh request agrees with the authorization that produced it.
+   *
+   * Concurrent callers share one attempt: `tokens()` runs on every outgoing request,
+   * and with refresh token rotation a second, parallel use of the same token can
+   * invalidate the whole chain rather than merely wasting a round trip.
+   *
+   * @param refreshToken The refresh token to redeem
+   * @returns The refreshed tokens, or undefined if the refresh could not be completed
+   */
+  private async refreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    if (!this.refreshInFlight) {
+      this.refreshInFlight = this.doRefreshTokens(refreshToken).finally(() => {
+        this.refreshInFlight = null
+      })
+    }
+    return this.refreshInFlight
+  }
+
+  private async doRefreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    try {
+      const clientInformation = await this.clientInformation()
+      if (!clientInformation) {
+        debugLog('No client information available, cannot refresh proactively')
+        return undefined
+      }
+
+      const metadata = await this.getAuthorizationServerMetadata()
+      const authorizationServerUrl =
+        (this.protectedResourceMetadata ? getAuthorizationServerUrl(this.protectedResourceMetadata) : undefined) ??
+        new URL('/', this.options.serverUrl).toString()
+      const resource = await selectResourceURL(new URL(this.options.serverUrl), this, this.protectedResourceMetadata)
+
+      debugLog('Refreshing access token before it expires', { authorizationServerUrl, resource: resource?.toString() })
+
+      // The SDK types metadata as the full OIDC discovery document, while ours is
+      // the RFC 8414 subset. Only these two fields reach the token request
+      // (executeTokenRequest), so narrow to them rather than cast the whole object.
+      const tokenRequestMetadata = metadata
+        ? ({
+            token_endpoint: metadata.token_endpoint,
+            token_endpoint_auth_methods_supported: metadata.token_endpoint_auth_methods_supported,
+          } as Parameters<typeof refreshAuthorization>[1]['metadata'])
+        : undefined
+
+      const refreshed = await refreshAuthorization(authorizationServerUrl, {
+        metadata: tokenRequestMetadata,
+        clientInformation,
+        refreshToken,
+        resource,
+      })
+
+      // Goes through saveTokens so the new expiry is persisted the same way
+      await this.saveTokens(refreshed)
+      log('Refreshed the access token before it expired')
+
+      return OAuthTokensWithExpiresAtSchema.parse({
+        ...refreshed,
+        expires_at: refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : undefined,
+      })
+    } catch (error) {
+      debugLog('Proactive token refresh failed', error)
+      return undefined
+    }
   }
 
   /**
