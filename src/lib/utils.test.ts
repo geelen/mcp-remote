@@ -1112,6 +1112,121 @@ describe('Feature: MCP Proxy', () => {
     expect(mockTransportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ id: reinitialize.id }))
   })
 
+  it('Scenario: Concurrent requests hitting a dead session share one new session', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a server that 404s every tools/call until the session is re-established
+    const sent: any[] = []
+    let sessionAlive = false
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (typeof message.id === 'string' && message.id.startsWith('mcp-remote-reinit-')) {
+          // Answer on a later tick, so a second caller can arrive while this is in flight
+          setTimeout(() => {
+            sessionAlive = true
+            ;(mockTransportToServer as any).onmessage?.({ jsonrpc: '2.0', id: message.id, result: {} })
+          }, 5)
+          return
+        }
+        if (!sessionAlive && message.method === 'tools/call') {
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Session terminated')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      sessionId: 'expired-session',
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+
+    // When two requests are in flight when the session dies
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'a' } } as any)
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '3', params: { name: 'b' } } as any)
+
+    await vi.waitFor(() => expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(4))
+
+    // Then they share a single handshake instead of opening a session each. Racing
+    // handshakes would also blank the session id under a retry already in flight,
+    // and a server that requires one answers that with 400.
+    const handshakes = sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))
+    expect(handshakes).toHaveLength(1)
+    expect(sent.filter((m) => m.method === 'notifications/initialized')).toHaveLength(1)
+
+    // And both requests were retried on it
+    expect(sent.filter((m) => m.method === 'tools/call' && m.params.name === 'a')).toHaveLength(2)
+    expect(sent.filter((m) => m.method === 'tools/call' && m.params.name === 'b')).toHaveLength(2)
+  })
+
+  it('Scenario: A 404 without a session id is not treated as an expired session', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a stateless server that never issued a session id, 404ing a bad endpoint
+    const sent: any[] = []
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (message.method === 'tools/call') {
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Not Found')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      sessionId: undefined,
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'ping' } } as any)
+
+    // Then the failure goes straight back to the client, with no pointless handshake
+    await vi.waitFor(() => expect(mockTransportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: '2' })))
+    expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(0)
+    expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(1)
+  })
   it('Scenario: Answer the client when a request cannot be delivered', async () => {
     // Given a server transport that fails for a reason a new session cannot fix
     const mockTransportToClient = {

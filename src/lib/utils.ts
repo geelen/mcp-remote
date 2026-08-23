@@ -270,12 +270,28 @@ export function mcpProxy({
    * A 404 to a request that carried a session id means the server dropped the
    * session (idle expiry, restart, eviction). The spec says the client must then
    * start a new session with a fresh InitializeRequest.
+   *
+   * The session id has to be there: a 404 without one is an ordinary "no such
+   * endpoint" from a stateless server or a mistyped URL, and re-initializing
+   * would just add a doomed handshake to every failing request.
    */
   function isSessionExpired(error: Error) {
-    return error instanceof StreamableHTTPError && error.code === 404
+    return error instanceof StreamableHTTPError && error.code === 404 && transportToServer.sessionId !== undefined
   }
 
-  async function reinitializeSession() {
+  let reinitInFlight: Promise<void> | null = null
+
+  /** Coalesces concurrent callers so several in-flight 404s produce one new session, not one each */
+  function reinitializeSession(): Promise<void> {
+    if (!reinitInFlight) {
+      reinitInFlight = doReinitializeSession().finally(() => {
+        reinitInFlight = null
+      })
+    }
+    return reinitInFlight
+  }
+
+  async function doReinitializeSession() {
     if (!lastInitialize) {
       throw new Error('no initialize request was seen, cannot re-establish the session')
     }
@@ -305,7 +321,13 @@ export function mcpProxy({
       throw new Error(`server rejected re-initialize: ${JSON.stringify(response.error)}`)
     }
 
+    // Not ceremony: the SDK only (re)opens the GET SSE stream when it sees this
+    // notification, so without it the server could no longer push to the client.
     await transportToServer.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+
+    // The client is never told any of this happened, so whatever the server kept
+    // per session - subscriptions, roots, progress tokens - is quietly gone. The
+    // spec mandates the new session anyway; there is no way to replay that state.
     log(`Re-established session ${transportToServer.sessionId ?? '(none)'} after server expiry`)
   }
 
