@@ -1,7 +1,7 @@
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
-import { log, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 
 /**
  * MCP Remote Authentication Configuration
@@ -159,7 +159,9 @@ export async function readJsonFile<T>(serverUrlHash: string, filename: string, s
 }
 
 /**
- * Writes a JSON object to a file
+ * Writes a JSON object to a file atomically using temp file + rename pattern.
+ * This prevents race conditions where multiple processes might read partially-written files.
+ * The rename operation is atomic on POSIX systems.
  * @param serverUrlHash The hash of the server URL
  * @param filename The name of the file to write
  * @param data The data to write
@@ -168,7 +170,30 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
   try {
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
+
+    // Write to a sibling temp file and rename over the target, so a concurrent
+    // reader sees either the old file or the new one but never a half-written
+    // one. mcp-remote routinely runs several instances against the same config
+    // directory, and a torn read of tokens.json surfaces as a parse failure that
+    // looks like corrupted credentials.
+    const serialized = JSON.stringify(data, null, 2)
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
+
+    try {
+      await fs.writeFile(tempPath, serialized, { encoding: 'utf-8', mode: 0o600 })
+      await fs.rename(tempPath, filePath)
+    } catch (renameError) {
+      await fs.unlink(tempPath).catch(() => {})
+
+      // Windows rejects a rename onto a file another process still holds open.
+      // A direct write can tear, but failing outright would lose the data.
+      if (process.platform === 'win32') {
+        debugLog('Atomic rename failed, falling back to a direct write', { filename, renameError })
+        await fs.writeFile(filePath, serialized, { encoding: 'utf-8', mode: 0o600 })
+        return
+      }
+      throw renameError
+    }
   } catch (error) {
     log(`Error writing ${filename}:`, error)
     throw error
