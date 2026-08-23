@@ -1,7 +1,7 @@
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
-import { log, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
 
 /**
  * MCP Remote Authentication Configuration
@@ -171,24 +171,28 @@ export async function writeJsonFile(serverUrlHash: string, filename: string, dat
     await ensureConfigDir()
     const filePath = getConfigFilePath(serverUrlHash, filename)
 
-    // Use atomic write pattern: write to temp file, then rename
-    // This prevents other processes from reading partially-written files
+    // Write to a sibling temp file and rename over the target, so a concurrent
+    // reader sees either the old file or the new one but never a half-written
+    // one. mcp-remote routinely runs several instances against the same config
+    // directory, and a torn read of tokens.json surfaces as a parse failure that
+    // looks like corrupted credentials.
+    const serialized = JSON.stringify(data, null, 2)
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
 
     try {
-      // Write to temporary file first
-      await fs.writeFile(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 })
-
-      // Atomic rename (on POSIX systems)
+      await fs.writeFile(tempPath, serialized, { encoding: 'utf-8', mode: 0o600 })
       await fs.rename(tempPath, filePath)
-    } catch (writeError) {
-      // Clean up temp file if it exists
-      try {
-        await fs.unlink(tempPath)
-      } catch {
-        // Ignore cleanup errors
+    } catch (renameError) {
+      await fs.unlink(tempPath).catch(() => {})
+
+      // Windows rejects a rename onto a file another process still holds open.
+      // A direct write can tear, but failing outright would lose the data.
+      if (process.platform === 'win32') {
+        debugLog('Atomic rename failed, falling back to a direct write', { filename, renameError })
+        await fs.writeFile(filePath, serialized, { encoding: 'utf-8', mode: 0o600 })
+        return
       }
-      throw writeError
+      throw renameError
     }
   } catch (error) {
     log(`Error writing ${filename}:`, error)
