@@ -55,7 +55,7 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 }
 ```
 
-**Note:** Cursor and Claude Desktop (Windows) have a bug where spaces inside `args` aren't escaped when it invokes `npx`, which ends up mangling these values. You can work around it using:
+**Note:** Cursor, Codex-Cli and Claude Desktop (Windows) have a bug where spaces inside `args` aren't escaped when it invokes `npx`, which ends up mangling these values. You can work around it using:
 
 ```jsonc
 {
@@ -102,6 +102,27 @@ To run multiple instances of the same remote server with different configuration
 ```
 
 Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
+
+The `--resource` value is sent as the RFC 8707 resource indicator on the authorization, token and
+refresh requests alike, so they always agree.
+
+Some authorization servers reject the resource parameter outright — Microsoft Entra ID v2 answers
+`AADSTS9010010`, for example. Pass `--disable-resource-parameter` to omit it entirely:
+
+```json
+{
+  "mcpServers": {
+    "entra-example": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/mcp",
+        "--disable-resource-parameter"
+      ]
+    }
+  }
+}
+```
 
 ### Flags
 

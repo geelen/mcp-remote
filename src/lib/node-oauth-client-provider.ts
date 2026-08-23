@@ -1,5 +1,6 @@
 import open from 'open'
-import { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import { z } from 'zod'
+import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
   OAuthClientInformationFull,
   OAuthClientInformationFullSchema,
@@ -9,11 +10,24 @@ import {
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
 import { StaticOAuthClientInformationFull } from './types'
-import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
-import type { ProtectedResourceMetadata } from './protected-resource-metadata'
+import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './protected-resource-metadata'
+
+/**
+ * The OAuth token response only carries the relative `expires_in`, which is
+ * useless once persisted to disk. We extend the SDK token schema with an
+ * absolute `expires_at` timestamp so later reads can detect imminent expiry
+ * and refresh proactively. The base schema uses `.strip()`, which would
+ * otherwise drop `expires_at` on read, so we parse and serialize tokens with
+ * this extended schema instead.
+ */
+const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
+  expires_at: z.coerce.number().optional(),
+})
+type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -29,11 +43,19 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
+  private skipResourceParameter: boolean
+  /**
+   * Overrides how the SDK picks the RFC 8707 `resource` indicator. Only defined when we have
+   * an opinion; otherwise the SDK derives it from Protected Resource Metadata as usual.
+   */
+  validateResourceURL?: (defaultResource: URL, discoveredResource?: string) => Promise<URL | undefined>
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  /** In-flight proactive refresh, so concurrent requests share one refresh_token use */
+  private refreshInFlight: Promise<OAuthTokensWithExpiresAt | undefined> | null = null
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -48,12 +70,29 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
-    this.authorizeResource = options.authorizeResource
+    const trimmedAuthorizeResource = options.authorizeResource?.trim()
+    this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
+    this.skipResourceParameter = options.skipResourceParameter ?? false
     this._state = randomUUID()
     this._clientInfo = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
+
+    // The SDK feeds one `resource` value into the authorization, token and refresh requests
+    // (selectResourceURL -> startAuthorization / fetchToken / refreshAuthorization). Deciding
+    // it here keeps those three in agreement, which RFC 8707 §2.2 requires - previously the
+    // authorize URL was rewritten after the fact, so it could disagree with the token request.
+    if (this.skipResourceParameter) {
+      this.validateResourceURL = async () => {
+        debugLog('Resource parameter disabled; omitting it from authorization and token requests')
+        return undefined
+      }
+    } else if (this.authorizeResource) {
+      const resourceUrl = new URL(this.authorizeResource)
+      this.validateResourceURL = async () => resourceUrl
+    }
+    // Otherwise left undefined so the SDK applies its default resource selection.
   }
 
   setCallbackPort(port: number): void {
@@ -61,7 +100,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
-    return `http://${this.options.host}:${this.options.callbackPort}${this.callbackPath}`
+    return buildRedirectUrl(this.options.host, this.options.callbackPort, this.callbackPath)
   }
 
   get clientMetadata() {
@@ -207,31 +246,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     debugLog('Reading OAuth tokens')
     debugLog('Token request stack trace:', new Error().stack)
 
-    // Read tokens with extended schema that includes expires_at
-    const tokens = await readJsonFile<OAuthTokens & { expires_at?: number }>(this.serverUrlHash, 'tokens.json', OAuthTokensSchema)
+    const tokens = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
 
     if (tokens) {
-      // Calculate actual time left using expires_at if available (preferred),
-      // otherwise fall back to expires_in (less accurate - doesn't account for time since save)
-      let timeLeft: number
-      let isExpired: boolean
-
-      if (typeof tokens.expires_at === 'number' && tokens.expires_at > 0) {
-        // Use absolute timestamp for accurate expiration check
-        timeLeft = Math.floor((tokens.expires_at - Date.now()) / 1000)
-        isExpired = timeLeft <= 0
-        debugLog('Using expires_at for expiration check', {
-          expiresAt: new Date(tokens.expires_at).toISOString(),
-          timeLeftSeconds: timeLeft,
-        })
-      } else {
-        // Fall back to expires_in (legacy behavior - may be inaccurate)
-        timeLeft = tokens.expires_in || 0
-        isExpired = timeLeft <= 0
-        debugLog('⚠️ Using legacy expires_in (may be inaccurate)', {
-          expiresIn: tokens.expires_in,
-        })
-      }
+      const timeLeft = tokens.expires_in || 0
 
       // Alert if expires_in is invalid
       if (typeof tokens.expires_in !== 'number' || tokens.expires_in < 0) {
@@ -242,20 +260,105 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         })
       }
 
+      // Use the persisted absolute expiry timestamp to detect imminent expiry,
+      // refreshing ~60s early to avoid sending a token that is about to 401.
+      const isExpired = tokens.expires_at ? Date.now() >= tokens.expires_at - 60_000 : false
+
       debugLog('Token result:', {
         found: true,
         hasAccessToken: !!tokens.access_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
+        expiresAt: tokens.expires_at ? new Date(tokens.expires_at).toISOString() : 'unknown',
         isExpired,
-        expiresInValue: tokens.expires_in,
-        expiresAtValue: tokens.expires_at,
       })
+
+      // Renew before the token is sent rather than after the server rejects it.
+      // Waiting for a 401 assumes the server answers expiry with exactly 401 -
+      // one that replies 400 or 403 instead never reaches the SDK's refresh path
+      // and the connection just fails (see issue #273).
+      if (isExpired && tokens.refresh_token) {
+        const refreshed = await this.refreshTokens(tokens.refresh_token)
+        if (refreshed) {
+          return refreshed
+        }
+        // Refresh failed: hand back what we have and let the SDK's own 401
+        // handling take it from here, exactly as it did before.
+        log('Proactive token refresh failed, falling back to the stored token')
+      }
     } else {
       debugLog('Token result: Not found')
     }
 
     return tokens
+  }
+
+  /**
+   * Exchanges a refresh token for a new access token, reusing the same authorization
+   * server, client credentials and RFC 8707 resource indicator the SDK would have
+   * picked, so the refresh request agrees with the authorization that produced it.
+   *
+   * Concurrent callers share one attempt: `tokens()` runs on every outgoing request,
+   * and with refresh token rotation a second, parallel use of the same token can
+   * invalidate the whole chain rather than merely wasting a round trip.
+   *
+   * @param refreshToken The refresh token to redeem
+   * @returns The refreshed tokens, or undefined if the refresh could not be completed
+   */
+  private async refreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    if (!this.refreshInFlight) {
+      this.refreshInFlight = this.doRefreshTokens(refreshToken).finally(() => {
+        this.refreshInFlight = null
+      })
+    }
+    return this.refreshInFlight
+  }
+
+  private async doRefreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    try {
+      const clientInformation = await this.clientInformation()
+      if (!clientInformation) {
+        debugLog('No client information available, cannot refresh proactively')
+        return undefined
+      }
+
+      const metadata = await this.getAuthorizationServerMetadata()
+      const authorizationServerUrl =
+        (this.protectedResourceMetadata ? getAuthorizationServerUrl(this.protectedResourceMetadata) : undefined) ??
+        new URL('/', this.options.serverUrl).toString()
+      const resource = await selectResourceURL(new URL(this.options.serverUrl), this, this.protectedResourceMetadata)
+
+      debugLog('Refreshing access token before it expires', { authorizationServerUrl, resource: resource?.toString() })
+
+      // The SDK types metadata as the full OIDC discovery document, while ours is
+      // the RFC 8414 subset. Only these two fields reach the token request
+      // (executeTokenRequest), so narrow to them rather than cast the whole object.
+      const tokenRequestMetadata = metadata
+        ? ({
+            token_endpoint: metadata.token_endpoint,
+            token_endpoint_auth_methods_supported: metadata.token_endpoint_auth_methods_supported,
+          } as Parameters<typeof refreshAuthorization>[1]['metadata'])
+        : undefined
+
+      const refreshed = await refreshAuthorization(authorizationServerUrl, {
+        metadata: tokenRequestMetadata,
+        clientInformation,
+        refreshToken,
+        resource,
+      })
+
+      // Goes through saveTokens so the new expiry is persisted the same way
+      await this.saveTokens(refreshed)
+      log('Refreshed the access token before it expired')
+
+      return OAuthTokensWithExpiresAtSchema.parse({
+        ...refreshed,
+        expires_at: refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : undefined,
+      })
+    } catch (error) {
+      debugLog('Proactive token refresh failed', error)
+      return undefined
+    }
   }
 
   /**
@@ -274,25 +377,22 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       })
     }
 
-    // Calculate and store absolute expiration timestamp for accurate expiration checks later
-    // This prevents the issue where expires_in becomes stale when read from disk
-    const expiresAt = typeof tokens.expires_in === 'number' && tokens.expires_in > 0 ? Date.now() + tokens.expires_in * 1000 : undefined
-
     debugLog('Saving tokens', {
       hasAccessToken: !!tokens.access_token,
       hasRefreshToken: !!tokens.refresh_token,
       expiresIn: `${timeLeft} seconds`,
       expiresInValue: tokens.expires_in,
-      expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
     })
 
-    // Store tokens with additional expires_at field for accurate expiration tracking
-    const tokensWithExpiry = {
+    // Persist an absolute expiry timestamp alongside the token so that future
+    // reads can detect imminent expiry and refresh proactively (the spec only
+    // provides the relative `expires_in`, which is meaningless once stored).
+    const tokensToSave: OAuthTokensWithExpiresAt = {
       ...tokens,
-      ...(expiresAt ? { expires_at: expiresAt } : {}),
+      expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
     }
 
-    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensWithExpiry)
+    await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)
   }
 
   /**
@@ -304,10 +404,6 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
     })
-
-    if (this.authorizeResource) {
-      authorizationUrl.searchParams.set('resource', this.authorizeResource)
-    }
 
     const effectiveScope = this.getEffectiveScope()
     if (effectiveScope) {

@@ -3,6 +3,7 @@ import { NodeOAuthClientProvider } from './node-oauth-client-provider'
 import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
+import { refreshAuthorization } from '@modelcontextprotocol/sdk/client/auth.js'
 
 vi.mock('./mcp-auth-config')
 vi.mock('./authorization-server-metadata', () => ({
@@ -14,8 +15,15 @@ vi.mock('./utils', () => ({
   debugLog: vi.fn(),
   DEBUG: false,
   MCP_REMOTE_VERSION: '1.0.0',
+  // Must mirror the real implementation: the redirect URI registered with the authorization
+  // server and the one checked against a cached registration have to match exactly.
+  buildRedirectUrl: (host: string, port: number, callbackPath = '/oauth/callback') => `http://${host}:${port}${callbackPath}`,
 }))
 vi.mock('open', () => ({ default: vi.fn() }))
+vi.mock('@modelcontextprotocol/sdk/client/auth.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refreshAuthorization: vi.fn(),
+}))
 
 describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   let provider: NodeOAuthClientProvider
@@ -405,5 +413,176 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       // Empty scope should fallback to default
       expect(clientMetadata.scope).toBe('openid email profile')
     })
+  })
+})
+
+// The SDK feeds a single `resource` value into the authorization, token and refresh
+// requests via selectResourceURL(). These tests pin that value, because RFC 8707 §2.2
+// requires the token request to carry the same resource that was authorized.
+describe('NodeOAuthClientProvider - RFC 8707 resource indicator', () => {
+  const defaultOptions: OAuthProviderOptions = {
+    serverUrl: 'https://mcp.example.com/mcp',
+    callbackPort: 8080,
+    host: 'localhost',
+    serverUrlHash: 'test-hash',
+  }
+  const prm: any = { resource: 'https://mcp.example.com' }
+  const defaultResource = new URL('https://mcp.example.com/mcp')
+
+  it('defers to the SDK default when no resource options are given', () => {
+    const provider = new NodeOAuthClientProvider(defaultOptions)
+    // Left undefined so selectResourceURL applies its Protected Resource Metadata logic
+    expect(provider.validateResourceURL).toBeUndefined()
+  })
+
+  it('sends the user-supplied --resource to token requests too, not just authorize', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, authorizeResource: 'https://tenant1.example.com/' })
+    const resolved = await provider.validateResourceURL!(defaultResource, prm.resource)
+    // Previously this resolved to the PRM resource, so the authorize request said tenant1
+    // while the token request said mcp.example.com and the server could reject the exchange.
+    expect(String(resolved)).toBe('https://tenant1.example.com/')
+  })
+
+  it('omits the resource entirely when disabled', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, skipResourceParameter: true })
+    expect(await provider.validateResourceURL!(defaultResource, prm.resource)).toBeUndefined()
+  })
+
+  it('lets the disable flag win over an explicit resource', async () => {
+    const provider = new NodeOAuthClientProvider({
+      ...defaultOptions,
+      authorizeResource: 'https://tenant1.example.com/',
+      skipResourceParameter: true,
+    })
+    expect(await provider.validateResourceURL!(defaultResource, prm.resource)).toBeUndefined()
+  })
+
+  it('no longer rewrites the resource on the authorization URL after the fact', async () => {
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions, authorizeResource: 'https://tenant1.example.com/' })
+    const authUrl = new URL('https://auth.example.com/authorize')
+    await provider.redirectToAuthorization(authUrl)
+    // The SDK sets `resource` from validateResourceURL before we ever see the URL, so the
+    // provider must not touch it - that post-hoc rewrite was the source of the mismatch.
+    expect(authUrl.searchParams.has('resource')).toBe(false)
+  })
+})
+
+describe('NodeOAuthClientProvider - proactive token refresh', () => {
+  const options: OAuthProviderOptions = {
+    serverUrl: 'https://example.com/mcp',
+    callbackPort: 8080,
+    host: 'localhost',
+    serverUrlHash: 'test-hash',
+  }
+
+  const storedTokens = (overrides: Record<string, unknown> = {}) => ({
+    access_token: 'stale-token',
+    refresh_token: 'r1',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    ...overrides,
+  })
+
+  let mockReadJsonFile: any
+  let mockWriteJsonFile: any
+  let mockRefresh: any
+
+  beforeEach(() => {
+    mockReadJsonFile = vi.mocked(mcpAuthConfig.readJsonFile)
+    mockWriteJsonFile = vi.mocked(mcpAuthConfig.writeJsonFile)
+    mockRefresh = vi.mocked(refreshAuthorization)
+    mockWriteJsonFile.mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+
+    // Any client_info read hands back a registered client; tokens.json is per-test
+    mockReadJsonFile.mockImplementation(async (_hash: string, file: string) =>
+      file === 'client_info.json' ? { client_id: 'c1', client_secret: 's1', redirect_uris: [] } : undefined,
+    )
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const withStoredTokens = (tokens: Record<string, unknown>) =>
+    mockReadJsonFile.mockImplementation(async (_hash: string, file: string) =>
+      file === 'client_info.json' ? { client_id: 'c1', client_secret: 's1', redirect_uris: [] } : tokens,
+    )
+
+  it('Scenario: an absolute expiry is persisted alongside the token', async () => {
+    const provider = new NodeOAuthClientProvider(options)
+    const before = Date.now()
+
+    await provider.saveTokens({ access_token: 'a', refresh_token: 'r', token_type: 'Bearer', expires_in: 3600 } as any)
+
+    const [, file, written] = mockWriteJsonFile.mock.calls[0]
+    expect(file).toBe('tokens.json')
+    // expires_in alone is meaningless once on disk; the absolute time is what a
+    // later process can actually compare against
+    expect(written.expires_at).toBeGreaterThanOrEqual(before + 3600 * 1000)
+  })
+
+  it('Scenario: a token that is still valid is returned untouched', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() + 10 * 60 * 1000 }))
+    const provider = new NodeOAuthClientProvider(options)
+
+    const result = await provider.tokens()
+
+    expect(result?.access_token).toBe('stale-token')
+    expect(mockRefresh).not.toHaveBeenCalled()
+  })
+
+  it('Scenario: an expired token is refreshed before it is ever sent', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    mockRefresh.mockResolvedValue({ access_token: 'fresh-token', refresh_token: 'r2', token_type: 'Bearer', expires_in: 3600 })
+    const provider = new NodeOAuthClientProvider(options)
+
+    const result = await provider.tokens()
+
+    // Renewed up front, rather than after the server rejects the stale token -
+    // a server that answers expiry with 400 or 403 never reaches the SDK's 401 path
+    expect(mockRefresh).toHaveBeenCalledTimes(1)
+    expect(mockRefresh.mock.calls[0][1].refreshToken).toBe('r1')
+    expect(result?.access_token).toBe('fresh-token')
+  })
+
+  it('Scenario: concurrent requests share a single refresh', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    mockRefresh.mockImplementation(
+      async () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ access_token: 'fresh-token', refresh_token: 'r2', token_type: 'Bearer', expires_in: 3600 }), 10),
+        ),
+    )
+    const provider = new NodeOAuthClientProvider(options)
+
+    const results = await Promise.all([provider.tokens(), provider.tokens(), provider.tokens()])
+
+    // tokens() runs on every outgoing request. With refresh token rotation a
+    // second parallel use of the same token can invalidate the whole chain.
+    expect(mockRefresh).toHaveBeenCalledTimes(1)
+    expect(results.map((r) => r?.access_token)).toEqual(['fresh-token', 'fresh-token', 'fresh-token'])
+  })
+
+  it('Scenario: a failed refresh falls back to the stored token', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    mockRefresh.mockRejectedValue(new Error('authorization server unreachable'))
+    const provider = new NodeOAuthClientProvider(options)
+
+    const result = await provider.tokens()
+
+    // The SDK's own 401 handling is still there to catch this; never hand back
+    // a blank access token, which some servers reject as a malformed request
+    expect(result?.access_token).toBe('stale-token')
+  })
+
+  it('Scenario: an expired token with no refresh token is left alone', async () => {
+    withStoredTokens({ access_token: 'stale-token', token_type: 'Bearer', expires_in: 3600, expires_at: Date.now() - 1000 })
+    const provider = new NodeOAuthClientProvider(options)
+
+    const result = await provider.tokens()
+
+    expect(mockRefresh).not.toHaveBeenCalled()
+    expect(result?.access_token).toBe('stale-token')
   })
 })

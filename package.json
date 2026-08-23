@@ -18,7 +18,6 @@
     "README.md",
     "LICENSE"
   ],
-  "main": "dist/index.js",
   "bin": {
     "mcp-remote": "dist/proxy.js",
     "mcp-remote-client": "dist/client.js"

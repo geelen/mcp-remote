@@ -140,6 +140,10 @@ export function mcpProxy({
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let initializeRequestId: string | number | undefined
+  let lastInitialize: Message | null = null
+  let reinitSeq = 0
+  const pendingReinit = new Map<string, (message: Message) => void>()
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -195,40 +199,29 @@ export function mcpProxy({
     })
 
     if (message.method === 'initialize') {
+      initializeRequestId = message.id
       const { clientInfo } = message.params
       if (clientInfo) clientInfo.name = `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})`
       log(JSON.stringify(message, null, 2))
 
       debugLog('Initialize message with modified client info', { clientInfo })
+
+      lastInitialize = message
     }
 
-    transportToServer.send(message).catch((error) => {
-      onServerError(error)
-
-      // If forwarding a request fails, the local client would wait forever
-      // for a response that never arrives (e.g. the server expired the
-      // session and answers 404, see #106). Surface the failure as a
-      // JSON-RPC error response instead.
-      //
-      // Only requests may be answered. Notifications carry no id, and this
-      // handler also sees the client's *responses* to server-initiated
-      // requests - those carry an id but no method, and answering one makes
-      // the local SDK raise "Received a response for an unknown message ID".
-      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
-        const errorResponse = {
-          jsonrpc: '2.0' as const,
-          id: message.id,
-          error: {
-            code: -32603,
-            message: `Failed to forward message to remote server: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        }
-        transportToClient.send(errorResponse).catch(onClientError)
-      }
-    })
+    sendToServer(message)
   }
 
   transportToServer.onmessage = (_message) => {
+    // Responses to our own re-initialize handshake are ours to consume, not the client's
+    const reinitId = (_message as any).id
+    if (typeof reinitId === 'string' && pendingReinit.has(reinitId)) {
+      const settle = pendingReinit.get(reinitId)!
+      pendingReinit.delete(reinitId)
+      settle(_message as any)
+      return
+    }
+
     // TODO: fix types
     const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
@@ -239,6 +232,16 @@ export function mcpProxy({
       result: message.result ? 'result-present' : undefined,
       error: message.error,
     })
+
+    // A Client normally calls setProtocolVersion() on its transport once the
+    // initialize response comes back, so every later request carries the
+    // MCP-Protocol-Version header. In proxy mode no Client drives the remote
+    // transport, so without this the header is missing and servers that only
+    // accept the newest version reject every post-initialize request (see #66).
+    if (initializeRequestId !== undefined && message.id === initializeRequestId) {
+      initializeRequestId = undefined
+      applyNegotiatedProtocolVersion(message)
+    }
 
     transportToClient.send(message).catch(onClientError)
   }
@@ -270,9 +273,132 @@ export function mcpProxy({
     debugLog('Error from local client', { stack: error.stack })
   }
 
+  function applyNegotiatedProtocolVersion(response: Message) {
+    const protocolVersion = response.result?.protocolVersion
+    if (typeof protocolVersion === 'string') {
+      debugLog('Setting negotiated protocol version on remote transport', protocolVersion)
+      transportToServer.setProtocolVersion?.(protocolVersion)
+    }
+  }
+
   function onServerError(error: Error) {
     log('Error from remote server:', error)
     debugLog('Error from remote server', { stack: error.stack })
+  }
+
+  /**
+   * A 404 to a request that carried a session id means the server dropped the
+   * session (idle expiry, restart, eviction). The spec says the client must then
+   * start a new session with a fresh InitializeRequest.
+   *
+   * The session id has to be there: a 404 without one is an ordinary "no such
+   * endpoint" from a stateless server or a mistyped URL, and re-initializing
+   * would just add a doomed handshake to every failing request.
+   */
+  function isSessionExpired(error: Error) {
+    return error instanceof StreamableHTTPError && error.code === 404 && transportToServer.sessionId !== undefined
+  }
+
+  let reinitInFlight: Promise<void> | null = null
+
+  /** Coalesces concurrent callers so several in-flight 404s produce one new session, not one each */
+  function reinitializeSession(): Promise<void> {
+    if (!reinitInFlight) {
+      reinitInFlight = doReinitializeSession().finally(() => {
+        reinitInFlight = null
+      })
+    }
+    return reinitInFlight
+  }
+
+  async function doReinitializeSession() {
+    if (!lastInitialize) {
+      throw new Error('no initialize request was seen, cannot re-establish the session')
+    }
+
+    // Must be cleared before we send, or the transport re-attaches the dead id
+    // and the server 404s the handshake too. The SDK exposes sessionId read-only.
+    ;(transportToServer as unknown as { _sessionId?: string })._sessionId = undefined
+
+    const id = `mcp-remote-reinit-${++reinitSeq}`
+    const response = await new Promise<Message>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingReinit.delete(id)
+        reject(new Error('timed out waiting for the re-initialize response'))
+      }, 30000)
+      pendingReinit.set(id, (message) => {
+        clearTimeout(timer)
+        resolve(message)
+      })
+      transportToServer.send({ ...lastInitialize, id }).catch((error) => {
+        clearTimeout(timer)
+        pendingReinit.delete(id)
+        reject(error)
+      })
+    })
+
+    if (response.error) {
+      throw new Error(`server rejected re-initialize: ${JSON.stringify(response.error)}`)
+    }
+
+    // The new session negotiates its own version; the MCP-Protocol-Version header
+    // has to follow it or the server 400s everything sent afterwards
+    applyNegotiatedProtocolVersion(response)
+
+    // Not ceremony: the SDK only (re)opens the GET SSE stream when it sees this
+    // notification, so without it the server could no longer push to the client.
+    await transportToServer.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+
+    // The client is never told any of this happened, so whatever the server kept
+    // per session - subscriptions, roots, progress tokens - is quietly gone. The
+    // spec mandates the new session anyway; there is no way to replay that state.
+    log(`Re-established session ${transportToServer.sessionId ?? '(none)'} after server expiry`)
+  }
+
+  async function sendToServer(message: Message) {
+    try {
+      await transportToServer.send(message)
+      return
+    } catch (error) {
+      // Re-initializing in response to a failed initialize would loop
+      if (!isSessionExpired(error as Error) || message.method === 'initialize') {
+        onServerError(error as Error)
+        replyWithError(message, error as Error)
+        return
+      }
+
+      log('Remote session expired, re-initializing')
+      debugLog('Remote session expired', { id: message.id, method: message.method })
+
+      try {
+        await reinitializeSession()
+        await transportToServer.send(message)
+      } catch (retryError) {
+        onServerError(retryError as Error)
+        replyWithError(message, retryError as Error)
+      }
+    }
+  }
+
+  /**
+   * Without this a failed send leaves the client waiting forever on a request
+   * that will never be answered.
+   */
+  function replyWithError(message: Message, error: Error) {
+    // Only requests may be answered. Notifications carry no id, and this handler
+    // also sees the client's *responses* to server-initiated requests - those
+    // carry an id but no method, and answering one makes the local SDK raise
+    // "Received a response for an unknown message ID".
+    if (message.method === undefined || message.id === undefined || message.id === null) {
+      return
+    }
+    transportToClient
+      .send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: -32001, message: `mcp-remote: ${error.message ?? String(error)}` },
+      })
+      .catch(onClientError)
   }
 }
 
@@ -586,34 +712,8 @@ export async function connectToRemoteServer(
         log('Authorization error:', authError)
         debugLog('Authorization error during finishAuth', {
           errorMessage: authError.message,
-          errorCode: authError instanceof OAuthError ? authError.errorCode : undefined,
           stack: authError.stack,
         })
-
-        // Handle invalid_grant error specifically - this means the refresh token is invalid/expired
-        // Clear tokens and trigger fresh authentication
-        const isInvalidGrant =
-          (authError instanceof OAuthError && authError.errorCode === 'invalid_grant') ||
-          (authError.message && authError.message.includes('invalid_grant'))
-
-        if (isInvalidGrant) {
-          log('Refresh token is invalid or expired. Clearing tokens and re-authenticating...')
-          debugLog('Detected invalid_grant error, invalidating tokens')
-
-          // Invalidate the stale tokens
-          if (authProvider && typeof authProvider.invalidateCredentials === 'function') {
-            await authProvider.invalidateCredentials('tokens')
-          }
-
-          // If we haven't already retried due to invalid_grant, try fresh auth
-          const REASON_INVALID_GRANT = 'invalid-grant-retry'
-          if (!recursionReasons.has(REASON_INVALID_GRANT)) {
-            recursionReasons.add(REASON_INVALID_GRANT)
-            log('Retrying with fresh authentication...')
-            return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
-          }
-        }
-
         throw authError
       }
     } else {
@@ -780,6 +880,18 @@ export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptio
   return { server, authCode, waitForAuthCode }
 }
 
+/** The callback path the OAuth redirect URI is built on. */
+export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
+
+/**
+ * Builds the OAuth redirect URI for a given host/port. Kept in one place because the value
+ * registered with the authorization server and the value checked against a cached
+ * registration must match exactly - see invalidateMismatchedClientRegistration.
+ */
+export function buildRedirectUrl(host: string, port: number, callbackPath: string = DEFAULT_CALLBACK_PATH): string {
+  return `http://${host}:${port}${callbackPath}`
+}
+
 async function findExistingClientPort(serverUrlHash: string): Promise<number | undefined> {
   const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
   if (!clientInfo) {
@@ -790,10 +902,30 @@ async function findExistingClientPort(serverUrlHash: string): Promise<number | u
     .map((uri) => new URL(uri))
     .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
   if (!localhostRedirectUri) {
-    throw new Error('Cannot find localhost callback URI from existing client information')
+    // A registration that points somewhere we cannot listen (e.g. it was made behind a reverse
+    // proxy, or by an earlier `--host` run) yields no reusable port. Fall back to picking one;
+    // invalidateMismatchedClientRegistration then discards the unusable registration.
+    return undefined
   }
 
   return parseInt(localhostRedirectUri.port)
+}
+
+/**
+ * Deletes a cached client registration whose redirect_uris do not include the redirect URI
+ * this session will send, forcing a fresh dynamic registration on the next request.
+ */
+async function invalidateMismatchedClientRegistration(serverUrlHash: string, redirectUrl: string): Promise<void> {
+  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
+  if (!clientInfo || clientInfo.redirect_uris.includes(redirectUrl)) {
+    return
+  }
+
+  log(
+    `Cached client registration is for ${clientInfo.redirect_uris.join(', ')} but this session will use ${redirectUrl}. ` +
+      `Deleting it so the client re-registers.`,
+  )
+  await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
 }
 
 function calculateDefaultPort(serverUrlHash: string): number {
@@ -910,7 +1042,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   }
 
   // Parse host
-  let host = 'localhost' // Default
+  let host = process.platform === 'win32' ? '127.0.0.1' : 'localhost' // Default
   const hostIndex = args.indexOf('--host')
   if (hostIndex !== -1 && hostIndex < args.length - 1) {
     host = args[hostIndex + 1]
@@ -947,11 +1079,34 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
-  // Parse resource to authorize
-  let authorizeResource = '' // Default
+  // Parse the RFC 8707 resource indicator, and whether to omit it entirely
+  let authorizeResource: string | undefined
+  let skipResourceParameter = args.includes('--disable-resource-parameter')
+
   const resourceIndex = args.indexOf('--resource')
   if (resourceIndex !== -1 && resourceIndex < args.length - 1) {
-    authorizeResource = args[resourceIndex + 1]
+    const value = args[resourceIndex + 1].trim()
+    if (value.length === 0) {
+      // `--resource ""` is how people have been trying to switch this off
+      skipResourceParameter = true
+    } else {
+      authorizeResource = value
+    }
+  }
+
+  if (skipResourceParameter) {
+    if (authorizeResource) {
+      log(`Warning: --disable-resource-parameter overrides --resource ${authorizeResource}; the resource parameter will be omitted.`)
+      // Cleared so it cannot silently split the credential cache - see getServerUrlHash
+      authorizeResource = undefined
+    }
+    log('Resource parameter disabled - it will be omitted from authorization and token requests')
+  } else if (authorizeResource) {
+    try {
+      new URL(authorizeResource)
+    } catch {
+      throw new Error(`Invalid --resource value: "${authorizeResource}". RFC 8707 requires an absolute URI, e.g. https://example.com/mcp`)
+    }
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
@@ -1011,12 +1166,6 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   let callbackPort: number
 
   if (specifiedPort) {
-    if (existingClientPort && specifiedPort !== existingClientPort) {
-      log(
-        `Warning! Specified callback port of ${specifiedPort}, which conflicts with existing client registration port ${existingClientPort}. Deleting existing client data to force reregistration.`,
-      )
-      await rm(getConfigFilePath(serverUrlHash, 'client_info.json'))
-    }
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
   } else if (existingClientPort) {
@@ -1027,8 +1176,22 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     callbackPort = availablePort
   }
 
+  // A cached dynamic client registration is only usable if it was registered with the exact
+  // redirect_uri this run will send. If it wasn't, the authorization server rejects the
+  // authorize request (RFC 6749 §3.1.2.4) and, because it refuses to redirect back, the user
+  // sees an opaque error at the AS rather than anything actionable here. Worse, the callback
+  // port is re-picked on each run, so it never self-heals. Dropping the registration lets the
+  // next request re-register cleanly.
+  //
+  // Static client info is pinned by the user, so it is never discarded.
+  if (!staticOAuthClientInfo) {
+    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort))
+  }
+
   if (Object.keys(headers).length > 0) {
-    log(`Using custom headers: ${JSON.stringify(headers)}`)
+    // Names only - values routinely carry bearer tokens and API keys, and this
+    // goes to stderr, which MCP clients capture into their own logs.
+    log(`Using custom headers: ${Object.keys(headers).join(', ')}`)
   }
   // Replace environment variables in headers
   // example `Authorization: Bearer ${TOKEN}` will read process.env.TOKEN
@@ -1057,6 +1220,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     authorizeResource,
+    skipResourceParameter,
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,

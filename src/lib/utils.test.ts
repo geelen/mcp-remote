@@ -1,9 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseCommandLineArgs, shouldIncludeTool, mcpProxy, setupOAuthCallbackServerWithLongPoll, getServerUrlHash } from './utils'
+import {
+  parseCommandLineArgs,
+  shouldIncludeTool,
+  mcpProxy,
+  setupOAuthCallbackServerWithLongPoll,
+  getServerUrlHash,
+  MCP_REMOTE_VERSION,
+} from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { EventEmitter } from 'events'
 import express from 'express'
 import net from 'net'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 // All sanitizeUrl tests have been moved to the strict-url-sanitise package
 
@@ -119,6 +130,22 @@ describe('Feature: Command Line Arguments Parsing', () => {
       Authorization: 'Bearer token123',
       'Content-Type': 'application/json',
     })
+  })
+
+  it('Scenario: Never log custom header values', async () => {
+    // Given a header carrying a secret
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const args = ['https://example.com/sse', '--header', 'Authorization: Bearer super-secret-token']
+
+    // When parsing the command line arguments
+    await parseCommandLineArgs(args, 'test usage')
+
+    // Then the header name is logged but the secret never is
+    const logged = logSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n')
+    expect(logged).toContain('Authorization')
+    expect(logged).not.toContain('super-secret-token')
+
+    logSpy.mockRestore()
   })
 
   it('Scenario: Ignore invalid header format', async () => {
@@ -254,6 +281,36 @@ describe('Feature: Command Line Arguments Parsing', () => {
 
     // Then the default host should be localhost
     expect(result.host).toBe('localhost')
+  })
+
+  it('Scenario: Default to the IPv4 loopback literal on Windows', async () => {
+    // Given Windows, where `localhost` often resolves to ::1 first while the
+    // callback server binds 127.0.0.1, so the redirect lands on a closed socket
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+    try {
+      // When parsing without an explicit --host
+      const result = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+
+      // Then the redirect URI names the address the listener is actually on
+      expect(result.host).toBe('127.0.0.1')
+    } finally {
+      Object.defineProperty(process, 'platform', original)
+    }
+  })
+
+  it('Scenario: An explicit --host still wins on Windows', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+    try {
+      const result = await parseCommandLineArgs(['https://example.com/sse', '--host', 'myserver.local'], 'test usage')
+
+      expect(result.host).toBe('myserver.local')
+    } finally {
+      Object.defineProperty(process, 'platform', original)
+    }
   })
 
   it('Scenario: Parse custom IP host', async () => {
@@ -612,6 +669,105 @@ describe('Feature: MCP Proxy', () => {
         }),
       }),
     )
+  })
+
+  it('Scenario: Negotiated protocol version is set on the remote transport', async () => {
+    // Given mock transports where the remote one records the negotiated version
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const setProtocolVersion = vi.fn()
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      setProtocolVersion,
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client initializes and the server answers with a protocol version
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '1',
+      result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'Test Server', version: '1.0.0' } },
+    } as any)
+
+    // Then the remote transport is told which version was negotiated, so later
+    // requests carry the MCP-Protocol-Version header
+    expect(setProtocolVersion).toHaveBeenCalledWith('2025-11-25')
+  })
+
+  it('Scenario: A later response carrying a protocolVersion does not change the negotiated version', async () => {
+    // Given a proxy that has already completed the initialize handshake
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const setProtocolVersion = vi.fn()
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      setProtocolVersion,
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '1',
+      result: { protocolVersion: '2025-11-25' },
+    } as any)
+    setProtocolVersion.mockClear()
+
+    // When an unrelated tool result happens to carry a protocolVersion field
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '2',
+      result: { protocolVersion: 'not-a-negotiated-version' },
+    } as any)
+
+    // Then it is ignored
+    expect(setProtocolVersion).not.toHaveBeenCalled()
   })
 
   it('Scenario: Proxy server response back to client', async () => {
@@ -1015,9 +1171,205 @@ describe('Feature: MCP Proxy', () => {
     )
   })
 
-  it('Scenario: Failed forward of a request surfaces a JSON-RPC error to the client', async () => {
-    // Given a server transport whose send() rejects, e.g. because the
-    // server expired the session and answers HTTP 404 (issue #106)
+  it('Scenario: Re-establish the session when the server has expired it', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a server transport that 404s the first tools/call, as a server does
+    // once it has dropped the session, then answers the fresh handshake
+    const sent: any[] = []
+    let expireNextCall = true
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (typeof message.id === 'string' && message.id.startsWith('mcp-remote-reinit-')) {
+          setTimeout(
+            () =>
+              (mockTransportToServer as any).onmessage?.({
+                jsonrpc: '2.0',
+                id: message.id,
+                result: { protocolVersion: '2025-11-25' },
+              }),
+            0,
+          )
+          return
+        }
+        if (expireNextCall && message.method === 'tools/call') {
+          expireNextCall = false
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Session terminated')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      setProtocolVersion: vi.fn(),
+      sessionId: 'session-2',
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client initializes and then calls a tool
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'tools/call',
+      id: '2',
+      params: { name: 'ping', arguments: {} },
+    } as any)
+
+    await vi.waitFor(() => expect(sent.map((m) => m.method)).toContain('notifications/initialized'))
+
+    // Then a fresh initialize was sent, carrying the client's own parameters
+    const reinitialize = sent.find((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))
+    expect(reinitialize).toBeDefined()
+    expect(reinitialize.method).toBe('initialize')
+    expect(reinitialize.params.clientInfo.name).toContain('Test Client')
+
+    // And the version the new session negotiated is what later requests announce
+    expect((mockTransportToServer as any).setProtocolVersion).toHaveBeenCalledWith('2025-11-25')
+
+    // And the call that triggered it was retried on the new session
+    expect(sent.filter((m) => m.method === 'tools/call' && m.id === '2')).toHaveLength(2)
+
+    // And the handshake response was consumed by the proxy, never shown to the client
+    expect(mockTransportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ id: reinitialize.id }))
+  })
+
+  it('Scenario: Concurrent requests hitting a dead session share one new session', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a server that 404s every tools/call until the session is re-established
+    const sent: any[] = []
+    let sessionAlive = false
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (typeof message.id === 'string' && message.id.startsWith('mcp-remote-reinit-')) {
+          // Answer on a later tick, so a second caller can arrive while this is in flight
+          setTimeout(() => {
+            sessionAlive = true
+            ;(mockTransportToServer as any).onmessage?.({ jsonrpc: '2.0', id: message.id, result: {} })
+          }, 5)
+          return
+        }
+        if (!sessionAlive && message.method === 'tools/call') {
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Session terminated')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      sessionId: 'expired-session',
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+
+    // When two requests are in flight when the session dies
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'a' } } as any)
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '3', params: { name: 'b' } } as any)
+
+    await vi.waitFor(() => expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(4))
+
+    // Then they share a single handshake instead of opening a session each. Racing
+    // handshakes would also blank the session id under a retry already in flight,
+    // and a server that requires one answers that with 400.
+    const handshakes = sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))
+    expect(handshakes).toHaveLength(1)
+    expect(sent.filter((m) => m.method === 'notifications/initialized')).toHaveLength(1)
+
+    // And both requests were retried on it
+    expect(sent.filter((m) => m.method === 'tools/call' && m.params.name === 'a')).toHaveLength(2)
+    expect(sent.filter((m) => m.method === 'tools/call' && m.params.name === 'b')).toHaveLength(2)
+  })
+
+  it('Scenario: A 404 without a session id is not treated as an expired session', async () => {
+    // Given a client transport
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    // And a stateless server that never issued a session id, 404ing a bad endpoint
+    const sent: any[] = []
+    const mockTransportToServer = {
+      send: vi.fn(async (message: any) => {
+        sent.push(message)
+        if (message.method === 'tools/call') {
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: Not Found')
+        }
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+      sessionId: undefined,
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'ping' } } as any)
+
+    // Then the failure goes straight back to the client, with no pointless handshake
+    await vi.waitFor(() => expect(mockTransportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: '2' })))
+    expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(0)
+    expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(1)
+  })
+  it('Scenario: Answer the client when a request cannot be delivered', async () => {
+    // Given a server transport that fails for a reason a new session cannot fix
     const mockTransportToClient = {
       send: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
@@ -1028,7 +1380,7 @@ describe('Feature: MCP Proxy', () => {
     } as unknown as Transport
 
     const mockTransportToServer = {
-      send: vi.fn().mockRejectedValue(new Error('Error POSTing to endpoint (HTTP 404): Session not found')),
+      send: vi.fn().mockRejectedValue(new Error('connection reset')),
       close: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue(undefined),
       onmessage: vi.fn(),
@@ -1042,31 +1394,24 @@ describe('Feature: MCP Proxy', () => {
       ignoredTools: [],
     })
 
-    // When the client sends a request (a message with an id)
-    const clientRequest = {
+    // When the client sends a request
+    mockTransportToClient.onmessage?.({
       jsonrpc: '2.0' as const,
       method: 'tools/call',
-      id: 42,
-      params: { name: 'SomeTool', arguments: {} },
-    }
-    if (mockTransportToClient.onmessage) {
-      mockTransportToClient.onmessage(clientRequest)
-    }
+      id: '7',
+      params: { name: 'ping', arguments: {} },
+    } as any)
 
-    // Then the client receives a JSON-RPC error response for that id
-    // instead of waiting forever for a reply that never arrives
-    await vi.waitFor(() => {
+    // Then it gets an error rather than waiting forever for a reply
+    await vi.waitFor(() =>
       expect(mockTransportToClient.send).toHaveBeenCalledWith(
         expect.objectContaining({
           jsonrpc: '2.0',
-          id: 42,
-          error: expect.objectContaining({
-            code: -32603,
-            message: expect.stringContaining('HTTP 404'),
-          }),
+          id: '7',
+          error: expect.objectContaining({ code: -32001 }),
         }),
-      )
-    })
+      ),
+    )
   })
 
   it('Scenario: Failed forward of a notification does not produce a response', async () => {
@@ -1291,5 +1636,143 @@ describe('Feature: Server URL Hash Generation', () => {
     const hash1 = getServerUrlHash('https://example.com', '')
     const hash2 = getServerUrlHash('https://example.com')
     expect(hash1).toBe(hash2)
+  })
+})
+
+describe('Feature: Stale Client Registration Invalidation', () => {
+  const originalConfigDir = process.env.MCP_REMOTE_CONFIG_DIR
+  let baseDir: string
+  let versionDir: string
+
+  const clientInfoPath = (serverUrl: string, headers: Record<string, string> = {}) =>
+    path.join(versionDir, `${getServerUrlHash(serverUrl, undefined, headers)}_client_info.json`)
+
+  const writeRegistration = (serverUrl: string, redirectUris: string[]) => {
+    fs.mkdirSync(versionDir, { recursive: true })
+    fs.writeFileSync(clientInfoPath(serverUrl), JSON.stringify({ client_id: 'registered-id', redirect_uris: redirectUris }))
+  }
+
+  beforeEach(() => {
+    baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-remote-test-'))
+    process.env.MCP_REMOTE_CONFIG_DIR = baseDir
+    versionDir = path.join(baseDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+  })
+
+  afterEach(() => {
+    if (originalConfigDir === undefined) delete process.env.MCP_REMOTE_CONFIG_DIR
+    else process.env.MCP_REMOTE_CONFIG_DIR = originalConfigDir
+    fs.rmSync(baseDir, { recursive: true, force: true })
+  })
+
+  it('Scenario: Reuse a registration whose redirect_uri still matches', async () => {
+    // Given a registration made for a localhost port
+    const serverUrl = 'https://reuse.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When starting with no port override
+    const result = await parseCommandLineArgs([serverUrl], 'test usage')
+
+    // Then that port is reused and the registration is kept
+    expect(result.callbackPort).toBe(5599)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
+  })
+
+  it('Scenario: Discard a registration whose redirect_uri is not reachable locally', async () => {
+    // Given a registration pointing at a reverse proxy - no local port can be derived from it.
+    // This used to throw "Cannot find localhost callback URI" and kill the process.
+    const serverUrl = 'https://proxied.example.com/mcp'
+    writeRegistration(serverUrl, ['https://proxy.example.com/oauth/callback'])
+
+    // When starting
+    const result = await parseCommandLineArgs([serverUrl], 'test usage')
+
+    // Then it does not throw, and the unusable registration is gone so the next request
+    // re-registers with a redirect_uri the authorization server will actually accept
+    expect(result.callbackPort).toBeGreaterThan(0)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Discard a registration when the callback host changes', async () => {
+    // Given a registration made against localhost
+    const serverUrl = 'https://hostchange.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When the same server is started with a different callback host
+    const result = await parseCommandLineArgs([serverUrl, '--host', '127.0.0.1'], 'test usage')
+
+    // Then the registration is discarded - 127.0.0.1 and localhost are distinct redirect_uris
+    expect(result.callbackPort).toBe(5599)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Discard a registration when an explicit port conflicts', async () => {
+    // Given a registration on one port
+    const serverUrl = 'https://portconflict.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    // When a different port is demanded
+    const result = await parseCommandLineArgs([serverUrl, '7788'], 'test usage')
+
+    // Then the stale registration is discarded
+    expect(result.callbackPort).toBe(7788)
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
+  })
+
+  it('Scenario: Never discard a user-pinned static client registration', async () => {
+    // Given a registration that does not match, but static client info was supplied
+    const serverUrl = 'https://static.example.com/mcp'
+    writeRegistration(serverUrl, ['https://proxy.example.com/oauth/callback'])
+
+    // When starting with --static-oauth-client-info
+    await parseCommandLineArgs(
+      [serverUrl, '--static-oauth-client-info', '{"client_id":"pinned","redirect_uris":["https://proxy.example.com/oauth/callback"]}'],
+      'test usage',
+    )
+
+    // Then it is left alone - the user pinned it deliberately
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
+  })
+})
+
+describe('Feature: Resource Indicator Flags', () => {
+  it('Scenario: Parse --resource', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--resource', 'https://tenant.example.com/'], 'test usage')
+    expect(result.authorizeResource).toBe('https://tenant.example.com/')
+    expect(result.skipResourceParameter).toBe(false)
+  })
+
+  it('Scenario: Reject a --resource value that is not an absolute URI', async () => {
+    // RFC 8707 requires an absolute URI; failing here beats an opaque error from the server
+    await expect(parseCommandLineArgs(['https://example.com/mcp', '--resource', 'not-a-uri'], 'test usage')).rejects.toThrow(/absolute URI/)
+  })
+
+  it('Scenario: Disable the resource parameter', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--disable-resource-parameter'], 'test usage')
+    expect(result.skipResourceParameter).toBe(true)
+    expect(result.authorizeResource).toBeUndefined()
+  })
+
+  it('Scenario: Treat an empty --resource as disabling it', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--resource', ''], 'test usage')
+    expect(result.skipResourceParameter).toBe(true)
+    expect(result.authorizeResource).toBeUndefined()
+  })
+
+  it('Scenario: Disabling wins over an explicit resource, without splitting the cache', async () => {
+    const withBoth = await parseCommandLineArgs(
+      ['https://example.com/mcp', '--resource', 'https://tenant.example.com/', '--disable-resource-parameter'],
+      'test usage',
+    )
+    const withDisableOnly = await parseCommandLineArgs(['https://example.com/mcp', '--disable-resource-parameter'], 'test usage')
+
+    expect(withBoth.skipResourceParameter).toBe(true)
+    expect(withBoth.authorizeResource).toBeUndefined()
+    // Both send identical requests, so they must share one credential cache
+    expect(withBoth.serverUrlHash).toBe(withDisableOnly.serverUrlHash)
+  })
+
+  it('Scenario: Existing caches are unaffected when no resource flags are used', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp'], 'test usage')
+    expect(result.serverUrlHash).toBe(getServerUrlHash('https://example.com/mcp', undefined, {}))
   })
 })

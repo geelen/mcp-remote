@@ -29,13 +29,42 @@ export interface AuthorizationServerMetadata {
  * @returns The well-known metadata URL
  */
 export function getMetadataUrl(serverUrl: string): string {
-  const url = new URL(serverUrl)
-  // Per RFC 8414, the metadata is at /.well-known/oauth-authorization-server
-  // relative to the issuer identifier
-  const metadataPath = '/.well-known/oauth-authorization-server'
+  return getMetadataUrls(serverUrl)[0]
+}
 
-  // Construct the full metadata URL
-  return `${url.origin}${metadataPath}`
+/**
+ * Builds the discovery URLs to try, most specific first.
+ *
+ * An issuer with a path has to be probed rather than guessed. RFC 8414 §3.1 inserts
+ * the well-known segment *before* the path, OpenID Discovery 1.0 appends it after,
+ * and plenty of deployments only answer at the root - so trying one shape and giving
+ * up strands whichever servers use the others (see issues #128, #174, #207, #249).
+ *
+ * @param serverUrl The issuer or server URL
+ * @returns Candidate metadata URLs in priority order
+ */
+export function getMetadataUrls(serverUrl: string): string[] {
+  const url = new URL(serverUrl)
+  const oauthPath = '/.well-known/oauth-authorization-server'
+  const oidcPath = '/.well-known/openid-configuration'
+
+  // A trailing slash would otherwise double up when the path is spliced in
+  const pathname = url.pathname.replace(/\/+$/, '')
+
+  if (pathname === '') {
+    return [`${url.origin}${oauthPath}`, `${url.origin}${oidcPath}`]
+  }
+
+  return [
+    // RFC 8414 §3.1: insert the well-known segment between host and path
+    `${url.origin}${oauthPath}${pathname}`,
+    // Servers that ignore the path and answer only at the root, which is what
+    // this function used to assume and what #240 relies on
+    `${url.origin}${oauthPath}`,
+    // The same two shapes again for OIDC issuers, e.g. Keycloak realms
+    `${url.origin}${oidcPath}${pathname}`,
+    `${url.origin}${pathname}${oidcPath}`,
+  ]
 }
 
 /**
@@ -44,10 +73,27 @@ export function getMetadataUrl(serverUrl: string): string {
  * @returns The authorization server metadata, or undefined if fetch fails
  */
 export async function fetchAuthorizationServerMetadata(serverUrl: string): Promise<AuthorizationServerMetadata | undefined> {
-  const metadataUrl = getMetadataUrl(serverUrl)
+  const candidates = getMetadataUrls(serverUrl)
 
-  debugLog('Fetching authorization server metadata', { serverUrl, metadataUrl })
+  debugLog('Fetching authorization server metadata', { serverUrl, candidates })
 
+  for (const metadataUrl of candidates) {
+    const metadata = await fetchMetadataFrom(metadataUrl)
+    if (metadata) {
+      return metadata
+    }
+  }
+
+  debugLog('No authorization server metadata found at any candidate URL', { serverUrl, candidates })
+  return undefined
+}
+
+/**
+ * Fetches metadata from a single candidate URL
+ * @param metadataUrl The candidate URL to try
+ * @returns The metadata, or undefined if this candidate did not serve it
+ */
+async function fetchMetadataFrom(metadataUrl: string): Promise<AuthorizationServerMetadata | undefined> {
   try {
     const response = await fetch(metadataUrl, {
       headers: {
