@@ -140,6 +140,7 @@ export function mcpProxy({
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
+  let initializeRequestId: string | number | undefined
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -195,6 +196,7 @@ export function mcpProxy({
     })
 
     if (message.method === 'initialize') {
+      initializeRequestId = message.id
       const { clientInfo } = message.params
       if (clientInfo) clientInfo.name = `${clientInfo.name} (via mcp-remote ${MCP_REMOTE_VERSION})`
       log(JSON.stringify(message, null, 2))
@@ -240,10 +242,18 @@ export function mcpProxy({
       error: message.error,
     })
 
-    // After initialize response, set the negotiated protocol version on the remote
-    // transport so that subsequent requests include the MCP-Protocol-Version header.
-    if (message.result?.protocolVersion && 'setProtocolVersion' in transportToServer) {
-      ;(transportToServer as any).setProtocolVersion(message.result.protocolVersion)
+    // A Client normally calls setProtocolVersion() on its transport once the
+    // initialize response comes back, so every later request carries the
+    // MCP-Protocol-Version header. In proxy mode no Client drives the remote
+    // transport, so without this the header is missing and servers that only
+    // accept the newest version reject every post-initialize request (see #66).
+    if (initializeRequestId !== undefined && message.id === initializeRequestId) {
+      initializeRequestId = undefined
+      const protocolVersion = message.result?.protocolVersion
+      if (typeof protocolVersion === 'string') {
+        debugLog('Setting negotiated protocol version on remote transport', protocolVersion)
+        transportToServer.setProtocolVersion?.(protocolVersion)
+      }
     }
 
     transportToClient.send(message).catch(onClientError)

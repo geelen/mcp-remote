@@ -640,6 +640,105 @@ describe('Feature: MCP Proxy', () => {
     )
   })
 
+  it('Scenario: Negotiated protocol version is set on the remote transport', async () => {
+    // Given mock transports where the remote one records the negotiated version
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const setProtocolVersion = vi.fn()
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      setProtocolVersion,
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client initializes and the server answers with a protocol version
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '1',
+      result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'Test Server', version: '1.0.0' } },
+    } as any)
+
+    // Then the remote transport is told which version was negotiated, so later
+    // requests carry the MCP-Protocol-Version header
+    expect(setProtocolVersion).toHaveBeenCalledWith('2025-11-25')
+  })
+
+  it('Scenario: A later response carrying a protocolVersion does not change the negotiated version', async () => {
+    // Given a proxy that has already completed the initialize handshake
+    const mockTransportToClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    const setProtocolVersion = vi.fn()
+    const mockTransportToServer = {
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      setProtocolVersion,
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    mockTransportToClient.onmessage?.({
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: '1',
+      params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+    } as any)
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '1',
+      result: { protocolVersion: '2025-11-25' },
+    } as any)
+    setProtocolVersion.mockClear()
+
+    // When an unrelated tool result happens to carry a protocolVersion field
+    mockTransportToServer.onmessage?.({
+      jsonrpc: '2.0' as const,
+      id: '2',
+      result: { protocolVersion: 'not-a-negotiated-version' },
+    } as any)
+
+    // Then it is ignored
+    expect(setProtocolVersion).not.toHaveBeenCalled()
+  })
+
   it('Scenario: Proxy server response back to client', async () => {
     // Given mock transports for client and server
     const mockTransportToClient = {
