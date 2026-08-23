@@ -283,6 +283,36 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.host).toBe('localhost')
   })
 
+  it('Scenario: Default to the IPv4 loopback literal on Windows', async () => {
+    // Given Windows, where `localhost` often resolves to ::1 first while the
+    // callback server binds 127.0.0.1, so the redirect lands on a closed socket
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+    try {
+      // When parsing without an explicit --host
+      const result = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+
+      // Then the redirect URI names the address the listener is actually on
+      expect(result.host).toBe('127.0.0.1')
+    } finally {
+      Object.defineProperty(process, 'platform', original)
+    }
+  })
+
+  it('Scenario: An explicit --host still wins on Windows', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+    try {
+      const result = await parseCommandLineArgs(['https://example.com/sse', '--host', 'myserver.local'], 'test usage')
+
+      expect(result.host).toBe('myserver.local')
+    } finally {
+      Object.defineProperty(process, 'platform', original)
+    }
+  })
+
   it('Scenario: Parse custom IP host', async () => {
     // Given command line arguments with custom IP host
     const args = ['https://example.com/sse', '--host', '127.0.0.1']
