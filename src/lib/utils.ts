@@ -750,7 +750,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   })
 
   // Long-polling endpoint
-  app.get('/wait-for-auth', (req, res) => {
+  app.get(LONG_POLL_PATH, (req, res) => {
     if (authCode) {
       // Auth already completed - just return 200 without the actual code
       // Secondary instances will read tokens from disk
@@ -880,8 +880,11 @@ export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptio
   return { server, authCode, waitForAuthCode }
 }
 
-/** The callback path the OAuth redirect URI is built on. */
+/** The callback path the OAuth redirect URI is built on, unless --callback-path overrides it. */
 export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
+
+/** Endpoint secondary instances long-poll to await the auth flow the primary instance is running. */
+export const LONG_POLL_PATH = '/wait-for-auth'
 
 /**
  * Builds the OAuth redirect URI for a given host/port. Kept in one place because the value
@@ -1049,6 +1052,23 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using callback hostname: ${host}`)
   }
 
+  // Parse callback path. It has to be a path Express can route and that does not shadow the
+  // long-poll endpoint the coordination protocol between concurrent instances relies on,
+  // otherwise the authorization server redirects back to an endpoint that never resolves.
+  let callbackPath = DEFAULT_CALLBACK_PATH
+  const callbackPathIndex = args.indexOf('--callback-path')
+  if (callbackPathIndex !== -1 && callbackPathIndex < args.length - 1) {
+    const value = args[callbackPathIndex + 1]
+    if (!value.startsWith('/')) {
+      log(`Warning: Ignoring invalid callback path: ${value}. It must start with '/'.`)
+    } else if (value === LONG_POLL_PATH) {
+      log(`Warning: Ignoring reserved callback path: ${value}. It is used to coordinate concurrent instances.`)
+    } else {
+      callbackPath = value
+      log(`Using callback path: ${callbackPath}`)
+    }
+  }
+
   let staticOAuthClientMetadata: StaticOAuthClientMetadata = null
   const staticOAuthClientMetadataIndex = args.indexOf('--static-oauth-client-metadata')
   if (staticOAuthClientMetadataIndex !== -1 && staticOAuthClientMetadataIndex < args.length - 1) {
@@ -1185,7 +1205,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   //
   // Static client info is pinned by the user, so it is never discarded.
   if (!staticOAuthClientInfo) {
-    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort))
+    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort, callbackPath))
   }
 
   if (Object.keys(headers).length > 0) {
@@ -1211,6 +1231,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   return {
     serverUrl,
+    callbackPath,
     callbackPort,
     specifiedPort,
     headers,
