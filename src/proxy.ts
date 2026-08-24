@@ -108,14 +108,6 @@ async function runProxy(
       }
     }
 
-    // If auth was completed by another instance, just log that we'll use the auth from disk
-    if (authState.skipBrowserAuth) {
-      log('Authentication was completed by another instance - will use tokens from disk')
-      // TODO: remove, the callback is happening before the tokens are exchanged
-      //  so we're slightly too early
-      await new Promise((res) => setTimeout(res, 1_000))
-    }
-
     return {
       waitForAuthCode: authState.waitForAuthCode,
       skipBrowserAuth: authState.skipBrowserAuth,

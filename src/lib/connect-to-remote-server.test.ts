@@ -7,6 +7,8 @@ const mockState = vi.hoisted(() => ({
   httpTransports: [] as Array<{ start: ReturnType<typeof vi.fn>; finishAuth: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }>,
   // Number of remaining `Client.connect` calls that should fail with an auth error.
   connectFailuresRemaining: 1,
+  // Every authorization code handed to `finishAuth`, in order.
+  finishAuthCalls: [] as string[],
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => {
@@ -19,7 +21,9 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => {
   }
   class StreamableHTTPClientTransport {
     start = vi.fn().mockResolvedValue(undefined)
-    finishAuth = vi.fn().mockResolvedValue(undefined)
+    finishAuth = vi.fn(async (code: string) => {
+      mockState.finishAuthCalls.push(code)
+    })
     close = vi.fn().mockResolvedValue(undefined)
     constructor(
       public url: URL,
@@ -69,6 +73,7 @@ import { connectToRemoteServer } from './utils'
 describe('connectToRemoteServer', () => {
   beforeEach(() => {
     mockState.httpTransports.length = 0
+    mockState.finishAuthCalls.length = 0
     mockState.connectFailuresRemaining = 1
     // Keep test output quiet; connectToRemoteServer logs to stderr.
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -124,5 +129,57 @@ describe('connectToRemoteServer', () => {
     const [mainTransport] = mockState.httpTransports
     expect(mainTransport.finishAuth).toHaveBeenCalledTimes(1)
     expect(mainTransport.finishAuth).toHaveBeenCalledWith('auth-code-456')
+  })
+
+  // What `coordinateAuth` hands a secondary instance once a sibling has finished the browser flow:
+  // there is no code to wait for, so awaiting one blocks until the MCP host times the server out.
+  const secondaryInstanceAuth = () => ({
+    waitForAuthCode: vi.fn(() => new Promise<string>(() => {})),
+    skipBrowserAuth: true,
+  })
+
+  it('reconnects instead of awaiting a code when a sibling completed the sign-in (regression: #322)', async () => {
+    const authState = secondaryInstanceAuth()
+    const authInitializer = vi.fn().mockResolvedValue(authState)
+
+    const connecting = connectToRemoteServer(null, 'https://mcp.example.com/mcp', {} as any, {}, authInitializer, 'http-first')
+    const HUNG = Symbol('hung')
+    const outcome = await Promise.race([
+      connecting.then(() => 'connected'),
+      new Promise((resolve) => setTimeout(() => resolve(HUNG), 1000)),
+    ])
+
+    expect(outcome).toBe('connected')
+
+    // The sibling already redeemed the authorization code, so there is nothing to exchange here
+    expect(authState.waitForAuthCode).not.toHaveBeenCalled()
+    expect(mockState.finishAuthCalls).toEqual([])
+  })
+
+  it('gives up rather than looping when a sibling instance tokens still do not work (regression: #322)', async () => {
+    const authInitializer = vi.fn().mockResolvedValue(secondaryInstanceAuth())
+    // Server keeps rejecting even after reading the sibling's tokens
+    mockState.connectFailuresRemaining = Number.MAX_SAFE_INTEGER
+
+    await expect(connectToRemoteServer(null, 'https://mcp.example.com/mcp', {} as any, {}, authInitializer, 'http-first')).rejects.toThrow(
+      'Already attempted reconnection',
+    )
+  })
+
+  it('does not re-exchange a spent authorization code when the retry also fails (regression: #322)', async () => {
+    // A real callback server retains the code it received, so a second call yields the same one
+    const authInitializer = vi.fn().mockResolvedValue({
+      waitForAuthCode: async () => 'auth-code-789',
+      skipBrowserAuth: false,
+    })
+    mockState.connectFailuresRemaining = Number.MAX_SAFE_INTEGER
+
+    // Without the guard ordering, the second exchange of 'auth-code-789' fails with invalid_grant,
+    // masking the real reason the connection is being abandoned.
+    await expect(connectToRemoteServer(null, 'https://mcp.example.com/mcp', {} as any, {}, authInitializer, 'http-first')).rejects.toThrow(
+      'Already attempted reconnection',
+    )
+
+    expect(mockState.finishAuthCalls).toEqual(['auth-code-789'])
   })
 })

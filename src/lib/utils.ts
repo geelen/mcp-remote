@@ -673,16 +673,43 @@ export async function connectToRemoteServer(
       debugLog('Calling authInitializer to start auth flow')
       const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
-      if (skipBrowserAuth) {
-        log('Authentication required but skipping browser auth - using shared auth')
-      } else {
-        log('Authentication required. Waiting for authorization...')
+      const giveUpIfAlreadyRetried = () => {
+        if (!recursionReasons.has(REASON_AUTH_NEEDED)) return
+        const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
+        log(errorMessage)
+        debugLog('Already attempted auth reconnection, giving up', {
+          recursionReasons: Array.from(recursionReasons),
+        })
+        throw new Error(errorMessage)
       }
+
+      // A concurrent instance ran the browser flow for us and persisted the tokens. There is no
+      // authorization code of our own to exchange - our callback server never received one, and
+      // the sibling's code has already been redeemed - so `waitForAuthCode` here is a promise
+      // that never settles (see coordinateAuth). Reconnect instead, which makes the auth provider
+      // re-read the tokens the sibling wrote (see https://github.com/geelen/mcp-remote/issues/322).
+      if (skipBrowserAuth) {
+        log('Authentication was completed by another instance - reconnecting with the tokens it wrote')
+        giveUpIfAlreadyRetried()
+
+        recursionReasons.add(REASON_AUTH_NEEDED)
+        debugLog('Recursively reconnecting using a sibling instance tokens', {
+          recursionReasons: Array.from(recursionReasons),
+        })
+        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+      }
+
+      log('Authentication required. Waiting for authorization...')
 
       // Wait for the authorization code from the callback
       debugLog('Waiting for auth code from callback server')
       const code = await waitForAuthCode()
       debugLog('Received auth code from callback server')
+
+      // Checked before the exchange, not after: an authorization code is single-use (RFC 6749
+      // 4.1.2) and the callback server hands back the same retained code on a second call, so
+      // exchanging it again fails with invalid_grant and masks this message.
+      giveUpIfAlreadyRetried()
 
       try {
         log('Completing authorization...')
@@ -691,15 +718,6 @@ export async function connectToRemoteServer(
         // discover the correct token_endpoint. Falls back to `transport` for the with-client path.
         await (authChallengeTransport ?? transport).finishAuth(code)
         debugLog('Authorization completed successfully')
-
-        if (recursionReasons.has(REASON_AUTH_NEEDED)) {
-          const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
-          log(errorMessage)
-          debugLog('Already attempted auth reconnection, giving up', {
-            recursionReasons: Array.from(recursionReasons),
-          })
-          throw new Error(errorMessage)
-        }
 
         // Track this reason for recursion
         recursionReasons.add(REASON_AUTH_NEEDED)

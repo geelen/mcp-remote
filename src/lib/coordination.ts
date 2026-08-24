@@ -1,10 +1,15 @@
-import { checkLockfile, createLockfile, deleteLockfile, getConfigFilePath, LockfileData } from './mcp-auth-config'
+import { checkLockfile, createLockfile, deleteLockfile, getConfigFilePath, readJsonFile, LockfileData } from './mcp-auth-config'
+import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { EventEmitter } from 'events'
 import { Server } from 'http'
 import express from 'express'
 import { AddressInfo } from 'net'
 import { unlinkSync } from 'fs'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
+
+/** How long a secondary instance waits for the primary to persist the tokens it just obtained. */
+const TOKEN_HANDOFF_TIMEOUT_MS = 30_000
+const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
   initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }>
@@ -160,6 +165,36 @@ export function createLazyAuthCoordinator(
 }
 
 /**
+ * Waits for the primary instance to persist the tokens it obtained.
+ *
+ * `waitForAuthentication` resolves as soon as the primary's callback server has *received* the
+ * authorization code, which is strictly earlier than the code being exchanged and the result
+ * written to disk. Reconnecting in that window reads no tokens and 401s again, so poll for the
+ * file rather than guessing at a fixed delay.
+ *
+ * @param serverUrlHash The hash of the server URL
+ * @returns True if tokens showed up before the timeout
+ */
+export async function waitForTokensFromPrimary(serverUrlHash: string, timeoutMs = TOKEN_HANDOFF_TIMEOUT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+
+  while (true) {
+    const tokens = await readJsonFile(serverUrlHash, 'tokens.json', OAuthTokensSchema)
+    if (tokens) {
+      debugLog('Tokens from the primary instance are on disk')
+      return true
+    }
+
+    if (Date.now() >= deadline) {
+      log(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for the other instance to write its tokens`)
+      return false
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, TOKEN_HANDOFF_POLL_INTERVAL_MS))
+  }
+}
+
+/**
  * Coordinates authentication between multiple instances of the client/proxy
  * @param serverUrlHash The hash of the server URL
  * @param callbackPath The path to serve the callback endpoint on
@@ -196,7 +231,11 @@ export async function coordinateAuth(
       debugLog('Waiting for authentication from other instance')
       const authCompleted = await waitForAuthentication(lockData.port)
 
-      if (authCompleted) {
+      // `waitForAuthentication` only reports that the primary's callback fired, which is strictly
+      // earlier than its token exchange finishing, so wait for the tokens themselves. If they
+      // never land, the primary failed somewhere we cannot observe - run the flow ourselves
+      // rather than hand back credentials that do not exist.
+      if (authCompleted && (await waitForTokensFromPrimary(serverUrlHash))) {
         log('Authentication completed by another instance. Using tokens from disk')
 
         // Setup a dummy server - the client will use tokens directly from disk
@@ -204,11 +243,15 @@ export async function coordinateAuth(
         const dummyPort = (dummyServer.address() as AddressInfo).port
         debugLog('Started dummy server', { port: dummyPort })
 
-        // This shouldn't actually be called in normal operation, but provide it for API compatibility
+        // Never called: callers must branch on `skipBrowserAuth` and reconnect with the tokens
+        // from disk instead of awaiting a code this instance will never receive. Kept only so the
+        // returned shape matches the primary's, and it rejects rather than hangs so a caller that
+        // regresses to awaiting it fails loudly instead of blocking until the host times out.
         const dummyWaitForAuthCode = () => {
           log('WARNING: waitForAuthCode called in secondary instance - this is unexpected')
-          // Return a promise that never resolves - the client should use the tokens from disk instead
-          return new Promise<string>(() => {})
+          return Promise.reject(
+            new Error('waitForAuthCode is not available in a secondary instance; reconnect using the tokens on disk instead'),
+          )
         }
 
         return {
@@ -221,9 +264,9 @@ export async function coordinateAuth(
           waitForAuthCode: dummyWaitForAuthCode,
           skipBrowserAuth: true,
         }
-      } else {
-        log('Taking over authentication process...')
       }
+
+      log('Taking over authentication process...')
     } catch (error) {
       log(`Error waiting for authentication: ${error}`)
       debugLog('Error waiting for authentication', error)
