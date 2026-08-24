@@ -167,6 +167,17 @@ Some authorization servers reject the resource parameter outright — Microsoft 
       ]
 ```
 
+* To change the path `mcp-remote` serves the OAuth callback on (by default `/oauth/callback`), add the `--callback-path` flag. The path must start with `/`, and `/wait-for-auth` is reserved.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--callback-path",
+        "/custom/callback"
+      ]
+```
+
 * To allow HTTP connections in trusted private networks, add the `--allow-http` flag. Note: This should only be used in secure private networks where traffic cannot be intercepted.
 
 ```json

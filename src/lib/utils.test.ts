@@ -79,6 +79,51 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.callbackPort).toBe(3000)
   })
 
+  it('Scenario: Default to the standard callback path when --callback-path is absent', async () => {
+    // Given command line arguments without a callback path
+    const args = ['https://example.com/sse']
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    // Then the standard callback path should be used
+    expect(result.callbackPath).toBe('/oauth/callback')
+  })
+
+  it('Scenario: Parse server URL with callback path', async () => {
+    // Given command line arguments with a custom callback path
+    const args = ['https://example.com/sse', '--callback-path', '/custom-callback']
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    // Then both server URL and callback path should be correctly extracted
+    expect(result.serverUrl).toBe('https://example.com/sse')
+    expect(result.callbackPath).toBe('/custom-callback')
+  })
+
+  it('Scenario: Ignore a callback path that is not rooted', async () => {
+    // Given a callback path Express cannot route back to the redirect URI we would advertise
+    const args = ['https://example.com/sse', '--callback-path', 'custom-callback']
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    // Then the standard callback path should be kept
+    expect(result.callbackPath).toBe('/oauth/callback')
+  })
+
+  it('Scenario: Ignore a callback path that shadows the long-poll endpoint', async () => {
+    // Given a callback path that collides with the endpoint secondary instances poll
+    const args = ['https://example.com/sse', '--callback-path', '/wait-for-auth']
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    // Then the standard callback path should be kept
+    expect(result.callbackPath).toBe('/oauth/callback')
+  })
+
   it('Scenario: Parse localhost URL with HTTP protocol', async () => {
     // Given command line arguments with localhost HTTP URL
     const args = ['http://localhost:8080/sse']
@@ -1575,6 +1620,25 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     } finally {
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
     }
+  })
+
+  it('should serve the callback on the configured path', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/custom/callback',
+      events,
+    })
+
+    server = result.server
+
+    const response = await fetch(`http://127.0.0.1:${result.actualPort}/custom/callback?code=test-code`)
+    expect(response.status).toBe(200)
+    await expect(result.waitForAuthCode()).resolves.toBe('test-code')
+
+    // The default path must not be served when it was overridden, otherwise the redirect URI
+    // we advertise and the endpoint we listen on can silently disagree
+    const defaultPath = await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?code=test-code`)
+    expect(defaultPath.status).toBe(404)
   })
 
   it('should reject with EADDRINUSE error when strictPort is true and port is already in use', async () => {
