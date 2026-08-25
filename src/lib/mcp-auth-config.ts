@@ -78,13 +78,6 @@ export async function deleteConfigFile(serverUrlHash: string, filename: string):
 }
 
 /**
- * Reads a JSON file and parses it with the provided schema
- * @param serverUrlHash The hash of the server URL
- * @param filename The name of the file to read
- * @param schema The schema to validate against
- * @returns The parsed file content or undefined if the file doesn't exist
- */
-/**
  * Removes this server's config files with the given prefix that are older than maxAgeMs
  *
  * A filename carrying a one-off identifier is never written again, so abandoned ones would stay
@@ -119,6 +112,13 @@ export async function deleteStaleConfigFiles(serverUrlHash: string, prefix: stri
   }
 }
 
+/**
+ * Reads a JSON file and parses it with the provided schema
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the file to read
+ * @param schema The schema to validate against
+ * @returns The parsed file content or undefined if the file doesn't exist
+ */
 export async function readJsonFile<T>(serverUrlHash: string, filename: string, schema: any): Promise<T | undefined> {
   try {
     await ensureConfigDir()

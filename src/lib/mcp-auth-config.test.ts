@@ -11,14 +11,22 @@ vi.mock('./utils', () => ({
   getServerUrlHash: () => 'test-hash',
 }))
 
+let configDir: string
+
+beforeEach(async () => {
+  configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-remote-config-'))
+  process.env.MCP_REMOTE_CONFIG_DIR = configDir
+})
+
+afterEach(async () => {
+  delete process.env.MCP_REMOTE_CONFIG_DIR
+  await fs.rm(configDir, { recursive: true, force: true })
+})
+
 describe('Feature: Config file writes', () => {
   const hash = 'write-test'
   const filename = 'tokens.json'
-  const target = getConfigFilePath(hash, filename)
-
-  afterEach(async () => {
-    await fs.unlink(target).catch(() => {})
-  })
+  const target = () => getConfigFilePath(hash, filename)
 
   it('Scenario: A reader never observes a half-written file', async () => {
     // Given a payload large enough that a plain writeFile spans several syscalls.
@@ -30,7 +38,7 @@ describe('Feature: Config file writes', () => {
     let torn = false
     const poll = setInterval(() => {
       try {
-        JSON.parse(require('fs').readFileSync(target, 'utf-8'))
+        JSON.parse(require('fs').readFileSync(target(), 'utf-8'))
       } catch (error: any) {
         // ENOENT is fine - the file simply is not there yet. A parse error is not.
         if (error.code !== 'ENOENT') torn = true
@@ -42,14 +50,14 @@ describe('Feature: Config file writes', () => {
 
     // Then every observation was either "absent" or "complete"
     expect(torn).toBe(false)
-    const written = JSON.parse(await fs.readFile(target, 'utf-8'))
+    const written = JSON.parse(await fs.readFile(target(), 'utf-8'))
     expect(written.access_token).toHaveLength(5_000_000)
   })
 
   it('Scenario: No temp files are left behind', async () => {
     await writeJsonFile(hash, filename, { access_token: 'a' })
 
-    const dir = path.dirname(target)
+    const dir = path.dirname(target())
     const leftovers = (await fs.readdir(dir)).filter((f) => f.startsWith(`${filename}`) && f.endsWith('.tmp'))
     expect(leftovers).toEqual([])
   })
@@ -57,7 +65,7 @@ describe('Feature: Config file writes', () => {
   it('Scenario: The file stays owner-only', async () => {
     await writeJsonFile(hash, filename, { access_token: 'a' })
 
-    const stat = await fs.stat(target)
+    const stat = await fs.stat(target())
     // The temp file carries mode 0o600 through the rename
     expect(stat.mode & 0o777).toBe(0o600)
   })
@@ -68,11 +76,11 @@ describe('Feature: Sweeping files nothing will name again', () => {
   const prefix = 'code_verifier_'
 
   const write = async (filename: string, ageMs: number) => {
-    const target = getConfigFilePath(hash, filename)
+    const filePath = getConfigFilePath(hash, filename)
     await writeJsonFile(hash, filename, 'verifier')
     const when = new Date(Date.now() - ageMs)
-    await fs.utimes(target, when, when)
-    return target
+    await fs.utimes(filePath, when, when)
+    return filePath
   }
 
   it('Scenario: An abandoned flow leaves nothing behind, a live one keeps its file', async () => {
