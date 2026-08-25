@@ -24,7 +24,7 @@ import {
   discoverOAuthServerInfo,
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
-import { createLazyAuthCoordinator, hasUsableTokens } from './lib/coordination'
+import { createLazyAuthCoordinator, hasUsableTokens, serverIssuesAuthChallenge } from './lib/coordination'
 
 /**
  * Main function to run the client
@@ -125,7 +125,7 @@ async function runClient(
   // discovered it was a follower afterwards would already have registered its own client and
   // issued its own PKCE challenge - which is what produced one registration and one tab per
   // instance. Skipped when tokens are already on disk, so a warm start still binds nothing.
-  if (!(await hasUsableTokens(serverUrlHash))) {
+  if (!(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
     await authInitializer()
   }
 

@@ -214,3 +214,54 @@ export async function startOAuthSimulator(): Promise<OAuthSimulator> {
       }),
   }
 }
+
+export type PublicMcpServer = { url: string; initializations: number; close: () => Promise<void> }
+
+/**
+ * An MCP server that never asks for OAuth, as a public one or one authenticated by `--header` is.
+ *
+ * Instances must not coordinate a sign-in for a server that will never have one: no tokens are
+ * ever written, so anything waiting for them waits forever.
+ */
+export async function startPublicMcpServer(): Promise<PublicMcpServer> {
+  const app = express()
+  app.use(express.json())
+  const state = { initializations: 0 }
+
+  app.all('/mcp', (req, res) => {
+    if (req.body?.method === 'initialize') {
+      state.initializations++
+      res.json({
+        jsonrpc: '2.0',
+        id: req.body.id,
+        result: {
+          protocolVersion: req.body?.params?.protocolVersion ?? '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'public-mcp', version: '1.0.0' },
+        },
+      })
+      return
+    }
+    if (req.body?.id === undefined) {
+      res.status(202).end()
+      return
+    }
+    res.json({ jsonrpc: '2.0', id: req.body.id, result: {} })
+  })
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s))
+  })
+  const port = (server.address() as AddressInfo).port
+
+  return {
+    url: `http://127.0.0.1:${port}`,
+    get initializations() {
+      return state.initializations
+    },
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve())
+      }),
+  }
+}
