@@ -7,7 +7,7 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
+import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
 import { openBrowser } from './open-browser'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
@@ -31,6 +31,11 @@ type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
 /** The shape of the state we issue, and the only shape accepted into a config filename. */
 const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
+
+const CODE_VERIFIER_PREFIX = 'code_verifier_'
+
+/** How long a flow may still be in progress, and its verifier still needed. */
+const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -397,6 +402,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)
+
+    // The flow is over, and its verifier is named after a state nothing will use again
+    await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState))
+    await deleteStaleConfigFiles(this.serverUrlHash, CODE_VERIFIER_PREFIX, ABANDONED_FLOW_AGE_MS)
   }
 
   /**
@@ -461,7 +470,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   private codeVerifierFile(state: string): string {
-    return `code_verifier_${state}.txt`
+    return `${CODE_VERIFIER_PREFIX}${state}.txt`
   }
 
   /**

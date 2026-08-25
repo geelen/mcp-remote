@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { writeJsonFile, readJsonFile, getConfigFilePath } from './mcp-auth-config'
+import { writeJsonFile, readJsonFile, getConfigFilePath, deleteStaleConfigFiles } from './mcp-auth-config'
 
 vi.mock('./utils', () => ({
   log: vi.fn(),
@@ -60,5 +60,34 @@ describe('Feature: Config file writes', () => {
     const stat = await fs.stat(target)
     // The temp file carries mode 0o600 through the rename
     expect(stat.mode & 0o777).toBe(0o600)
+  })
+})
+
+describe('Feature: Sweeping files nothing will name again', () => {
+  const hash = 'sweep-test'
+  const prefix = 'code_verifier_'
+
+  const write = async (filename: string, ageMs: number) => {
+    const target = getConfigFilePath(hash, filename)
+    await writeJsonFile(hash, filename, 'verifier')
+    const when = new Date(Date.now() - ageMs)
+    await fs.utimes(target, when, when)
+    return target
+  }
+
+  it('Scenario: An abandoned flow leaves nothing behind, a live one keeps its file', async () => {
+    const abandoned = await write(`${prefix}old.txt`, 60 * 60 * 1000)
+    const inFlight = await write(`${prefix}fresh.txt`, 0)
+    const unrelated = await write('tokens.json', 60 * 60 * 1000)
+
+    await deleteStaleConfigFiles(hash, prefix, 10 * 60 * 1000)
+
+    await expect(fs.access(abandoned)).rejects.toThrow()
+    await expect(fs.access(inFlight)).resolves.toBeUndefined()
+    // The sweep stays inside the prefix it was given
+    await expect(fs.access(unrelated)).resolves.toBeUndefined()
+
+    await fs.unlink(inFlight).catch(() => {})
+    await fs.unlink(unrelated).catch(() => {})
   })
 })
