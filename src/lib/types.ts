@@ -62,3 +62,9 @@ export interface OAuthCallbackServerOptions {
 // optional tatic OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
+
+/** The authorization code delivered to the callback server, with the state that identifies its flow. */
+export type AuthCodeResult = {
+  code: string
+  state?: string
+}

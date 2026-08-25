@@ -1,4 +1,3 @@
-import open from 'open'
 import { z } from 'zod'
 import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
@@ -8,7 +7,16 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
+import {
+  readJsonFile,
+  writeJsonFile,
+  readTextFile,
+  writeTextFile,
+  deleteConfigFile,
+  claimConfigFile,
+  deleteStaleConfigFiles,
+} from './mcp-auth-config'
+import { openBrowser } from './open-browser'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -28,6 +36,53 @@ const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
   expires_at: z.coerce.number().optional(),
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
+
+const PENDING_AUTH_FILE = 'pending_auth.json'
+const CODE_VERIFIER_PREFIX = 'code_verifier_'
+const FLOW_CLIENT_PREFIX = 'flow_client_'
+
+/**
+ * The client registration and callback URL an authorization flow was started with.
+ *
+ * Instances share one client_info.json but listen on different ports, so a sibling starting
+ * mid-flow re-registers and overwrites it. The code has to be redeemed with what it was issued to.
+ */
+type FlowClient = {
+  clientInformation: OAuthClientInformationFull
+  redirectUri: string
+}
+
+const FlowClientSchema = {
+  async parseAsync(data: any) {
+    if (typeof data !== 'object' || data === null) return null
+    if (typeof data.redirectUri !== 'string' || typeof data.clientInformation?.client_id !== 'string') return null
+    return data as FlowClient
+  },
+}
+
+/**
+ * The shape of the authorization state we issue, and the only shape we will put in a filename.
+ *
+ * Any local process can reach the callback server, so a crafted state would otherwise traverse
+ * out of the config directory.
+ */
+const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
+
+/** How long an unfinished authorization tab is assumed to still be worth waiting for. */
+const PENDING_AUTH_TTL = 3 * 60 * 1000
+
+type PendingAuthorization = {
+  state: string
+  timestamp: number
+}
+
+const PendingAuthorizationSchema = {
+  async parseAsync(data: any) {
+    if (typeof data !== 'object' || data === null) return null
+    if (typeof data.state !== 'string' || typeof data.timestamp !== 'number') return null
+    return data as PendingAuthorization
+  },
+}
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -56,6 +111,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private wwwAuthenticateScope: string | undefined
   /** In-flight proactive refresh, so concurrent requests share one refresh_token use */
   private refreshInFlight: Promise<OAuthTokensWithExpiresAt | undefined> | null = null
+  private pendingAuthorizationUrl: string | undefined
+  private incomingState: string | undefined
+  /** Cached by clientInformation(), which the SDK always calls before it needs the redirect URI */
+  private incomingFlowClientSync: FlowClient | undefined
 
   /**
    * Creates a new NodeOAuthClientProvider
@@ -100,6 +159,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   get redirectUrl(): string {
+    // The authorization server checks this against the URI it saw on /authorize
+    if (this.incomingFlowClientSync) {
+      return this.incomingFlowClientSync.redirectUri
+    }
     return buildRedirectUrl(this.options.host, this.options.callbackPort, this.callbackPath)
   }
 
@@ -209,6 +272,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async clientInformation(): Promise<OAuthClientInformationFull | undefined> {
     debugLog('Reading client info')
+    const flowClient = await this.incomingFlowClient()
+    if (flowClient) {
+      debugLog('Using the client registration of the flow that produced this code', {
+        client_id: flowClient.clientInformation.client_id,
+      })
+      return flowClient.clientInformation
+    }
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
       this._clientInfo = this.staticOAuthClientInfo
@@ -393,6 +463,12 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)
+    await deleteConfigFile(this.serverUrlHash, PENDING_AUTH_FILE)
+    await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.incomingState ?? this._state))
+    await deleteConfigFile(this.serverUrlHash, this.flowClientFile(this.incomingState ?? this._state))
+    // Records left behind by instances that lost the race to complete this flow
+    await deleteStaleConfigFiles(this.serverUrlHash, CODE_VERIFIER_PREFIX, PENDING_AUTH_TTL)
+    await deleteStaleConfigFiles(this.serverUrlHash, FLOW_CLIENT_PREFIX, PENDING_AUTH_TTL)
   }
 
   /**
@@ -415,33 +491,93 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
-    debugLog('Redirecting to authorization URL', authorizationUrl.toString())
+    if (this._clientInfo) {
+      await writeJsonFile(this.serverUrlHash, this.flowClientFile(this._state), {
+        clientInformation: this._clientInfo,
+        redirectUri: this.redirectUrl,
+      })
+    }
 
-    try {
-      await open(sanitizeUrl(authorizationUrl.toString()))
+    debugLog('Deferring browser launch until this instance is known to own the callback server')
+    this.pendingAuthorizationUrl = sanitizeUrl(authorizationUrl.toString())
+  }
+
+  /**
+   * Opens the deferred authorization URL, once this instance is known to own the callback server
+   */
+  async openPendingAuthorization(): Promise<void> {
+    const url = this.pendingAuthorizationUrl
+    if (!url) {
+      debugLog('No pending authorization URL to open')
+      return
+    }
+    this.pendingAuthorizationUrl = undefined
+
+    // Claimed rather than read-then-written: instances starting together would both see no marker
+    if (!(await claimConfigFile(this.serverUrlHash, PENDING_AUTH_FILE, { state: this._state, timestamp: Date.now() }))) {
+      const pending = await readJsonFile<PendingAuthorization>(this.serverUrlHash, PENDING_AUTH_FILE, PendingAuthorizationSchema)
+      if (pending && pending.state !== this._state && Date.now() - pending.timestamp < PENDING_AUTH_TTL) {
+        log('An authorization tab is already open for this server; waiting for it to be completed.')
+        debugLog('Reusing the authorization flow of an earlier instance', pending)
+        return
+      }
+      // The marker is ours, or belongs to a flow too old to still be waited on
+      await writeJsonFile(this.serverUrlHash, PENDING_AUTH_FILE, { state: this._state, timestamp: Date.now() })
+    }
+
+    if (await openBrowser(url)) {
       log('Browser opened automatically.')
-    } catch (error) {
-      log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
-      debugLog('Failed to open browser', error)
+    } else {
+      log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
     }
   }
 
   /**
    * Saves the PKCE code verifier
    *
-   * The filename is scoped to the current process ID. Multiple mcp-remote
-   * processes can be started concurrently for the same server (e.g. an MCP
-   * host reconnecting or launching duplicate instances) - since coordination
-   * between those processes is currently disabled on Windows (see
-   * coordination.ts), each process must keep its own verifier so a second
-   * process can't overwrite the first one's file mid-flow and break the
-   * PKCE exchange for whichever process the browser callback actually
-   * reaches. See https://github.com/geelen/mcp-remote/issues/235.
+   * The filename is scoped to this flow's authorization state, so concurrent instances neither
+   * overwrite each other's verifier nor redeem a code with the wrong one
+   * (https://github.com/geelen/mcp-remote/issues/235).
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
-    debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, codeVerifier)
+    debugLog('Saving code verifier', { state: this._state })
+    await writeTextFile(this.serverUrlHash, this.codeVerifierFile(this._state), codeVerifier)
+  }
+
+  /**
+   * Records the state an authorization code came back with, so the verifier saved for that flow
+   * is the one used to redeem it, whichever instance started the flow
+   */
+  async useAuthorizationState(state: string): Promise<void> {
+    if (!ISSUED_STATE.test(state)) {
+      log('Ignoring an authorization state this client could not have issued')
+      debugLog('Rejected authorization state', { state })
+      return
+    }
+    debugLog('Using code verifier from the flow that produced this code', { state })
+    this.incomingState = state
+    // Loaded now rather than on demand: the SDK reads `redirectUrl` before it asks for the client
+    // information, so the record has to be in hand before either is touched.
+    await this.incomingFlowClient()
+  }
+
+  private codeVerifierFile(state: string): string {
+    return `${CODE_VERIFIER_PREFIX}${state}.txt`
+  }
+
+  private flowClientFile(state: string): string {
+    return `${FLOW_CLIENT_PREFIX}${state}.json`
+  }
+
+  /**
+   * The record for the flow whose code we are redeeming, if that flow is not this instance's own
+   */
+  private async incomingFlowClient(): Promise<FlowClient | undefined> {
+    if (!this.incomingState) return undefined
+    const flowClient = await readJsonFile<FlowClient>(this.serverUrlHash, this.flowClientFile(this.incomingState), FlowClientSchema)
+    this.incomingFlowClientSync = flowClient ?? undefined
+    return this.incomingFlowClientSync
   }
 
   /**
@@ -449,8 +585,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @returns The code verifier
    */
   async codeVerifier(): Promise<string> {
-    debugLog('Reading code verifier')
-    const verifier = await readTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, 'No code verifier saved for session')
+    const state = this.incomingState ?? this._state
+    debugLog('Reading code verifier', { state })
+    const verifier = await readTextFile(this.serverUrlHash, this.codeVerifierFile(state), 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
   }
@@ -467,7 +604,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
-          deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`),
+          deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.incomingState ?? this._state)),
         ])
         this._clientInfo = undefined
         debugLog('All credentials invalidated')
@@ -485,7 +622,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`)
+        await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.incomingState ?? this._state))
         debugLog('Code verifier invalidated')
         break
 

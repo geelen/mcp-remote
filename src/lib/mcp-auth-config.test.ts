@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { writeJsonFile, readJsonFile, getConfigFilePath } from './mcp-auth-config'
+import { writeJsonFile, readJsonFile, getConfigFilePath, claimConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
 
 vi.mock('./utils', () => ({
   log: vi.fn(),
@@ -60,5 +60,54 @@ describe('Feature: Config file writes', () => {
     const stat = await fs.stat(target)
     // The temp file carries mode 0o600 through the rename
     expect(stat.mode & 0o777).toBe(0o600)
+  })
+})
+
+describe('Feature: Claiming a file exactly once', () => {
+  const hash = 'claim-test'
+  const filename = 'pending_auth.json'
+
+  afterEach(async () => {
+    await fs.unlink(getConfigFilePath(hash, filename)).catch(() => {})
+  })
+
+  it('Scenario: Only one of several concurrent instances wins the claim', async () => {
+    // Given three instances started together, as an MCP host does
+    const claims = await Promise.all([1, 2, 3].map((n) => claimConfigFile(hash, filename, { state: `instance-${n}` })))
+
+    // Then exactly one of them may act on it, and the file records that one
+    expect(claims.filter(Boolean)).toHaveLength(1)
+    const stored = await readJsonFile<{ state: string }>(hash, filename, { parseAsync: async (d: any) => d })
+    expect(stored?.state).toBe(`instance-${claims.indexOf(true) + 1}`)
+  })
+})
+
+describe('Feature: Sweeping files nothing will name again', () => {
+  const hash = 'sweep-test'
+  const prefix = 'code_verifier_'
+
+  const write = async (name: string, ageMs: number) => {
+    const target = getConfigFilePath(hash, name)
+    await writeJsonFile(hash, name, 'verifier')
+    const when = new Date(Date.now() - ageMs)
+    await fs.utimes(target, when, when)
+    return target
+  }
+
+  it('Scenario: Abandoned files go, files a live flow may still need stay', async () => {
+    // Given one verifier from a flow long abandoned and one from a flow still in progress
+    const abandoned = await write(`${prefix}old.txt`, 10 * 60 * 1000)
+    const inFlight = await write(`${prefix}fresh.txt`, 0)
+    const unrelated = await write('tokens.json', 10 * 60 * 1000)
+
+    await deleteStaleConfigFiles(hash, prefix, 3 * 60 * 1000)
+
+    await expect(fs.access(abandoned)).rejects.toThrow()
+    await expect(fs.access(inFlight)).resolves.toBeUndefined()
+    // The sweep is scoped to the prefix it was given
+    await expect(fs.access(unrelated)).resolves.toBeUndefined()
+
+    await fs.unlink(inFlight).catch(() => {})
+    await fs.unlink(unrelated).catch(() => {})
   })
 })

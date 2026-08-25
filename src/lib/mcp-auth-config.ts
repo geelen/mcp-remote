@@ -223,6 +223,66 @@ export async function readTextFile(serverUrlHash: string, filename: string, erro
  * @param filename The name of the file to write
  * @param text The text to write
  */
+/**
+ * Creates a config file only if it does not exist yet, so concurrent instances racing for it
+ * agree on a single winner
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the file to create
+ * @param data The data to write
+ * @returns True if this call created the file
+ */
+export async function claimConfigFile(serverUrlHash: string, filename: string, data: any): Promise<boolean> {
+  await ensureConfigDir()
+  try {
+    await fs.writeFile(getConfigFilePath(serverUrlHash, filename), JSON.stringify(data, null, 2), {
+      encoding: 'utf-8',
+      mode: 0o600,
+      flag: 'wx',
+    })
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    log(`Error claiming ${filename}:`, error)
+    throw error
+  }
+}
+
+/**
+ * Removes this server's config files with the given prefix that are older than maxAgeMs
+ *
+ * Files named after a one-off flow are never named again, so abandoned ones accumulate. The age
+ * check leaves alone anything a concurrent instance may still be about to use.
+ * @param serverUrlHash The hash of the server URL
+ * @param prefix The filename prefix to sweep
+ * @param maxAgeMs How old a file must be before it is removed
+ */
+export async function deleteStaleConfigFiles(serverUrlHash: string, prefix: string, maxAgeMs: number): Promise<void> {
+  try {
+    const configDir = getConfigDir()
+    const entries = await fs.readdir(configDir)
+    const cutoff = Date.now() - maxAgeMs
+
+    await Promise.all(
+      entries
+        .filter((entry) => entry.startsWith(`${serverUrlHash}_${prefix}`))
+        .map(async (entry) => {
+          const filePath = path.join(configDir, entry)
+          try {
+            const stats = await fs.stat(filePath)
+            if (stats.mtimeMs > cutoff) return
+            await fs.unlink(filePath)
+            debugLog(`Removed stale config file: ${entry}`)
+          } catch (error) {
+            // Another instance may be sweeping the same directory
+            debugLog(`Could not remove stale config file ${entry}`, error)
+          }
+        }),
+    )
+  } catch (error) {
+    debugLog('Could not sweep stale config files', error)
+  }
+}
+
 export async function writeTextFile(serverUrlHash: string, filename: string, text: string): Promise<void> {
   try {
     await ensureConfigDir()

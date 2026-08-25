@@ -1,10 +1,11 @@
 import { checkLockfile, createLockfile, deleteLockfile, getConfigFilePath, readJsonFile, LockfileData } from './mcp-auth-config'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { AuthCodeResult } from './types'
 import { EventEmitter } from 'events'
 import { Server } from 'http'
 import express from 'express'
 import { AddressInfo } from 'net'
-import { unlinkSync } from 'fs'
+import { readFileSync, unlinkSync } from 'fs'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll } from './utils'
 
 /** How long a secondary instance waits for the primary to persist the tokens it just obtained. */
@@ -12,7 +13,12 @@ const TOKEN_HANDOFF_TIMEOUT_MS = 30_000
 const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }>
+  initializeAuth: () => Promise<{
+    server: Server
+    waitForAuthCode: () => Promise<AuthCodeResult>
+    skipBrowserAuth: boolean
+    actualPort: number
+  }>
 }
 
 /**
@@ -80,16 +86,59 @@ export async function isLockValid(lockData: LockfileData): Promise<boolean> {
   }
 }
 
+/** How long to keep polling a sibling that stops answering before taking over. */
+const UNREACHABLE_SIBLING_TIMEOUT = 6000
+
+function readLockfileSync(serverUrlHash: string): LockfileData | null {
+  try {
+    return JSON.parse(readFileSync(getConfigFilePath(serverUrlHash, 'lock.json'), 'utf-8')) as LockfileData
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Deletes the lockfile, unless another instance owns it
+ *
+ * An exiting duplicate must not strip the lock from the instance driving the flow.
+ * @param serverUrlHash The hash of the server URL
+ */
+export async function deleteOwnLockfile(serverUrlHash: string): Promise<void> {
+  const lockData = readLockfileSync(serverUrlHash)
+  if (lockData && lockData.pid !== process.pid) {
+    debugLog('Leaving lockfile owned by another instance', { owner: lockData.pid, self: process.pid })
+    return
+  }
+  await deleteLockfile(serverUrlHash)
+}
+
+/**
+ * Synchronous counterpart of {@link deleteOwnLockfile}, for the 'exit' event
+ * @param serverUrlHash The hash of the server URL
+ */
+export function deleteOwnLockfileSync(serverUrlHash: string): void {
+  const lockData = readLockfileSync(serverUrlHash)
+  if (lockData && lockData.pid !== process.pid) {
+    debugLog('Leaving lockfile owned by another instance', { owner: lockData.pid, self: process.pid })
+    return
+  }
+  const configPath = getConfigFilePath(serverUrlHash, 'lock.json')
+  unlinkSync(configPath)
+  debugLog(`Removed lockfile on exit: ${configPath}`)
+}
+
 /**
  * Waits for authentication from another server instance
  * @param port The port to connect to
+ * @param lockData The lockfile entry describing the instance we are waiting on, when known
  * @returns True if authentication completed successfully, false otherwise
  */
-export async function waitForAuthentication(port: number): Promise<boolean> {
+export async function waitForAuthentication(port: number, lockData?: LockfileData): Promise<boolean> {
   log(`Waiting for authentication from the server on port ${port}...`)
 
   try {
     let attempts = 0
+    let unreachableSince: number | null = null
     while (true) {
       attempts++
       const url = `http://127.0.0.1:${port}/wait-for-auth`
@@ -99,6 +148,7 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
       try {
         const response = await fetch(url)
         debugLog(`Poll response status: ${response.status}`)
+        unreachableSince = null
 
         if (response.status === 200) {
           // Auth completed, but we don't return the code anymore
@@ -115,6 +165,19 @@ export async function waitForAuthentication(port: number): Promise<boolean> {
         }
       } catch (fetchError) {
         debugLog(`Fetch error during poll`, fetchError)
+
+        // The instance holding the lock may have been killed mid-flow
+        if (lockData && !(await isPidRunning(lockData.pid))) {
+          log(`Instance holding the lock (pid ${lockData.pid}) is gone`)
+          return false
+        }
+        if (unreachableSince === null) {
+          unreachableSince = Date.now()
+        } else if (Date.now() - unreachableSince > UNREACHABLE_SIBLING_TIMEOUT) {
+          log(`Authentication server on port ${port} stopped responding`)
+          return false
+        }
+
         // If we can't connect, we'll try again after a delay
         await new Promise((resolve) => setTimeout(resolve, 2000))
       }
@@ -143,7 +206,8 @@ export function createLazyAuthCoordinator(
   authTimeoutMs: number,
   strictPort = false,
 ): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number } | null = null
+  let authState: { server: Server; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean; actualPort: number } | null =
+    null
 
   return {
     initializeAuth: async () => {
@@ -210,7 +274,7 @@ export async function coordinateAuth(
   events: EventEmitter,
   authTimeoutMs: number,
   strictPort = false,
-): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPath, callbackPort })
 
   // Check for a lockfile (disabled on Windows for the time being)
@@ -229,7 +293,7 @@ export async function coordinateAuth(
     try {
       // Try to wait for the authentication to complete
       debugLog('Waiting for authentication from other instance')
-      const authCompleted = await waitForAuthentication(lockData.port)
+      const authCompleted = await waitForAuthentication(lockData.port, lockData)
 
       // `waitForAuthentication` only reports that the primary's callback fired, which is strictly
       // earlier than its token exchange finishing, so wait for the tokens themselves. If they
@@ -300,7 +364,7 @@ export async function coordinateAuth(
   const cleanupHandler = async () => {
     try {
       log(`Cleaning up lockfile for server ${serverUrlHash}`)
-      await deleteLockfile(serverUrlHash)
+      await deleteOwnLockfile(serverUrlHash)
     } catch (error) {
       log(`Error cleaning up lockfile: ${error}`)
       debugLog('Error cleaning up lockfile', error)
@@ -310,9 +374,7 @@ export async function coordinateAuth(
   process.once('exit', () => {
     try {
       // Synchronous version for 'exit' event since we can't use async here
-      const configPath = getConfigFilePath(serverUrlHash, 'lock.json')
-      unlinkSync(configPath)
-      debugLog(`Removed lockfile on exit: ${configPath}`)
+      deleteOwnLockfileSync(serverUrlHash)
     } catch (error) {
       debugLog(`Error removing lockfile on exit:`, error)
     }
