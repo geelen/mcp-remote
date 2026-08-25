@@ -30,23 +30,37 @@ export function createLazyAuthCoordinator(
   authTimeoutMs: number,
   strictPort = false,
 ): AuthCoordinator {
-  let authState: { server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number } | null = null
+  // The in-flight promise is what gets shared, not the resolved value. Guarding on the result
+  // only rules out sequential re-entry: two 401s landing in the same tick would both find it
+  // unset and both start a flow, and the loser of the resulting port race used to take the
+  // process down with an unhandled EADDRINUSE (https://github.com/geelen/mcp-remote/issues/317).
+  let authState: Promise<{
+    server: Server
+    waitForAuthCode: () => Promise<string>
+    skipBrowserAuth: boolean
+    actualPort: number
+  }> | null = null
 
   return {
     initializeAuth: async () => {
-      // If auth has already been initialized, return the existing state
       if (authState) {
-        debugLog('Auth already initialized, reusing existing state')
+        debugLog('Auth already initializing or initialized, reusing it')
         return authState
       }
 
       log('Initializing auth coordination on-demand')
       debugLog('Initializing auth coordination on-demand', { serverUrlHash, callbackPort })
 
-      // Initialize auth using the existing coordinateAuth logic
-      authState = await coordinateAuth(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs, strictPort)
-      debugLog('Auth coordination completed', { skipBrowserAuth: authState.skipBrowserAuth, actualPort: authState.actualPort })
-      return authState
+      authState = coordinateAuth(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs, strictPort)
+      try {
+        const resolved = await authState
+        debugLog('Auth coordination completed', { skipBrowserAuth: resolved.skipBrowserAuth, actualPort: resolved.actualPort })
+        return resolved
+      } catch (error) {
+        // A failed attempt must not be cached, or every later retry replays the same rejection
+        authState = null
+        throw error
+      }
     },
   }
 }
