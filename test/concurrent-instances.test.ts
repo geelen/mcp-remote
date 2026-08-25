@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import net from 'net'
-import { startOAuthSimulator, type OAuthSimulator } from './oauth-simulator/server'
+import { startOAuthSimulator, startPublicMcpServer, type OAuthSimulator } from './oauth-simulator/server'
 import { runInstances, cleanupRun } from './oauth-simulator/instances'
 
 /**
@@ -109,6 +109,26 @@ describe('concurrent instances against one server', () => {
       expect(auth.counters.initializations).toBe(2)
     } finally {
       cleanupRun(run)
+    }
+  }, 90_000)
+
+  it('does not make instances wait for a sign-in a public server will never do', async () => {
+    // Coordinating up front only makes sense for a server that wants OAuth. A public server, or
+    // one authenticated by --header, never writes tokens - so anything waiting on them waits
+    // forever, and every instance after the first used to exit non-zero.
+    const publicServer = await startPublicMcpServer()
+
+    try {
+      const run = await runInstances({ count: 3, serverUrl: `${publicServer.url}/mcp`, settleMs: 15_000 })
+
+      try {
+        expect(run.tabs).toHaveLength(0)
+        expect(publicServer.initializations).toBe(3)
+      } finally {
+        cleanupRun(run)
+      }
+    } finally {
+      await publicServer.close()
     }
   }, 90_000)
 })

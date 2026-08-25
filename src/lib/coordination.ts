@@ -130,6 +130,30 @@ async function portHeldBySiblingFor(port: number, serverUrlHash: string): Promis
   }
 }
 
+/**
+ * Whether the server answers an unauthenticated request with a challenge.
+ *
+ * Ownership has to be settled before the first connection attempt, because the SDK registers a
+ * client from inside `transport.start()`. But that is only worth doing for a server that actually
+ * wants OAuth: a public one, or one authenticated by `--header`, never writes tokens, so every
+ * instance but the first would wait out the handoff timeout and exit.
+ */
+export async function serverIssuesAuthChallenge(serverUrl: string, headers: Record<string, string> = {}): Promise<boolean> {
+  try {
+    const response = await fetch(serverUrl, {
+      method: 'GET',
+      headers: { ...headers, accept: 'application/json, text/event-stream' },
+      signal: AbortSignal.timeout(5000),
+    })
+    debugLog('Probed the server for an auth challenge', { status: response.status })
+    return response.status === 401
+  } catch (error) {
+    // Unreachable or too slow to say. Leave it to the 401 handler, as before.
+    debugLog('Could not probe the server for an auth challenge', error)
+    return false
+  }
+}
+
 /** Whether a usable access token is already on disk, so no sign-in is needed at all. */
 export async function hasUsableTokens(serverUrlHash: string): Promise<boolean> {
   return tokensOnDisk(serverUrlHash)
@@ -189,7 +213,15 @@ export async function coordinateAuth(
       log(`This instance is running the sign-in for this server (callback port ${actualPort})`)
       return { server, actualPort, waitForAuthCode, skipBrowserAuth: false }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'EADDRINUSE' && code !== 'EACCES') throw error
+
+      if (code === 'EACCES') {
+        // Reserved by the OS rather than held by anyone we can talk to
+        debugLog(`Not permitted to bind port ${port}`, { serverUrlHash })
+        if (strictPort) throw error
+        continue
+      }
 
       if (await portHeldBySiblingFor(port, serverUrlHash)) {
         log(`Another instance is running the sign-in for this server on port ${port}`)
@@ -230,7 +262,9 @@ async function followUntilTokensOrPort(
   events: EventEmitter,
   authTimeoutMs: number,
 ): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
-  const deadline = Date.now() + TOKEN_HANDOFF_TIMEOUT_MS
+  // Bounded by how long a sign-in is allowed to take, not by a fixed handoff window: the person
+  // at the browser may be going through SSO, MFA or a password manager.
+  const deadline = Date.now() + Math.max(authTimeoutMs, TOKEN_HANDOFF_TIMEOUT_MS)
 
   while (Date.now() < deadline) {
     if (await tokensOnDisk(serverUrlHash)) {
