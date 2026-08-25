@@ -226,7 +226,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
     })
 
-    it('should delete the process-scoped verifier file when invalidating the verifier scope', async () => {
+    it('should delete the flow-scoped verifier file when invalidating the verifier scope', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.invalidateCredentials('verifier')
@@ -234,7 +234,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
     })
 
-    it('should delete the process-scoped verifier file when invalidating all credentials', async () => {
+    it('should delete the flow-scoped verifier file when invalidating all credentials', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.invalidateCredentials('all')

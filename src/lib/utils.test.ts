@@ -1627,6 +1627,30 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     }
   })
 
+  it('reports a denied authorization instead of waiting for a code that is not coming', async () => {
+    // ?error= is how "the user clicked Deny", an org policy block or invalid_scope arrives. Waiting
+    // for a code holds the callback port for the life of the process and tells the user nothing.
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      serverUrlHash: 'test-hash',
+    })
+    server = result.server
+    // A handler is attached synchronously: the callback arrives during the await below, and a
+    // rejection with nothing attached yet is reported as unhandled even though it is asserted on
+    const settled = result.waitForAuthCode().then(
+      () => new Error('expected no authorization code'),
+      (error: Error) => error,
+    )
+
+    const response = await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?error=access_denied&error_description=User%20denied`)
+
+    expect(response.status).toBe(400)
+    await expect(response.text()).resolves.toContain('User denied')
+    expect((await settled).message).toMatch(/access_denied/)
+  })
+
   it('answers an identity probe, so a losing instance can tell a sibling from a stranger', async () => {
     const result = await setupOAuthCallbackServerWithLongPoll({
       port: 0,

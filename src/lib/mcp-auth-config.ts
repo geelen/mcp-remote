@@ -17,12 +17,11 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
  *   - Format: OAuthClientInformation object with client_id and other registration details
  * - {server_hash}_tokens.json: Contains OAuth access and refresh tokens
  *   - Format: OAuthTokens object with access_token, refresh_token, and expiration information
- * - {server_hash}_code_verifier_{pid}.txt: Contains the PKCE code verifier for the current OAuth flow
+ * - {server_hash}_code_verifier_{state}.txt: Contains the PKCE code verifier for one OAuth flow
  *   - Format: Plain text string used for PKCE verification
- *   - Scoped per-process (by PID) rather than per-server: multiple mcp-remote processes can be
- *     started concurrently for the same server, and coordination between them is currently
- *     disabled on Windows (see coordination.ts), so a shared filename would let one process's
- *     verifier silently overwrite another's mid-flow (see issue #235)
+ *   - Scoped to the flow's authorization state rather than to a process, so whichever instance
+ *     holds the callback port when the user finishes can redeem a code from a flow another
+ *     instance started - including one the host has since stopped (see issue #235)
  *
  * All JSON files are stored with 2-space indentation for readability.
  */

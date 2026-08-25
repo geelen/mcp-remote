@@ -103,8 +103,23 @@ export async function runInstances(options: RunOptions): Promise<InstanceRun> {
   if (options.approveFirstTabAfterKillMs !== undefined) {
     await new Promise((resolve) => setTimeout(resolve, options.approveFirstTabAfterKillMs))
     const [firstTab] = readTabUrls(tabLog)
-    // Following the redirect chain is what a browser does: authorize, then the callback
-    if (firstTab) await fetch(firstTab).catch(() => {})
+    // Following the redirect chain is what a browser does: authorize, then the callback. The
+    // callback leg is retried because the instance taking the flow over may not have rebound the
+    // port yet - and only that leg, since re-fetching the authorize URL would mint a second code.
+    if (firstTab) {
+      const authorized = await fetch(firstTab, { redirect: 'manual' }).catch(() => undefined)
+      const callback = authorized?.headers.get('location')
+      if (callback) {
+        for (let attempt = 0; attempt < 40; attempt++) {
+          try {
+            await fetch(callback)
+            break
+          } catch {
+            await new Promise((r) => setTimeout(r, 50))
+          }
+        }
+      }
+    }
   }
 
   await new Promise((resolve) => setTimeout(resolve, settleMs))

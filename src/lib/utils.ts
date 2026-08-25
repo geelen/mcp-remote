@@ -822,6 +822,14 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
     const state = req.query.state as string | undefined
+    const authorizationError = req.query.error as string | undefined
+    if (authorizationError) {
+      const description = (req.query.error_description as string | undefined) ?? authorizationError
+      log(`Authorization failed: ${authorizationError} - ${description}`)
+      res.status(400).send(`Authorization failed: ${description}\n\nYou may close this window and return to the CLI.`)
+      options.events.emit('auth-code-failed', new Error(`Authorization failed: ${authorizationError} - ${description}`))
+      return
+    }
     if (!code) {
       res.status(400).send('Error: No authorization code received')
       return
@@ -871,15 +879,24 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   })
 
   const waitForAuthCode = (): Promise<AuthCodeResult> => {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (authCode) {
         resolve(authCode)
         return
       }
 
-      options.events.once('auth-code-received', (code: string, state?: string) => {
+      const onFailure = (error: Error) => {
+        options.events.off('auth-code-received', onCode)
+        reject(error)
+      }
+      const onCode = (code: string, state?: string) => {
+        options.events.off('auth-code-failed', onFailure)
         resolve({ code, state })
-      })
+      }
+      options.events.once('auth-code-received', onCode)
+      // An authorization the user denied never produces a code, and waiting for one holds the
+      // callback port for the life of the process
+      options.events.once('auth-code-failed', onFailure)
     })
   }
 
@@ -1029,7 +1046,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     const value = args[callbackPathIndex + 1]
     if (!value.startsWith('/')) {
       log(`Warning: Ignoring invalid callback path: ${value}. It must start with '/'.`)
-    } else if (value === LONG_POLL_PATH) {
+    } else if (value === LONG_POLL_PATH || value === MCP_REMOTE_ID_PATH) {
       log(`Warning: Ignoring reserved callback path: ${value}. It is used to coordinate concurrent instances.`)
     } else {
       callbackPath = value
