@@ -31,6 +31,11 @@ export type RunOptions = {
   settleMs?: number
   /** Kills the instance that opened the first tab, this long after it opens. */
   killTabOwnerAfterMs?: number
+  /**
+   * Approves the first tab this long after the instance that opened it was killed, from the
+   * harness rather than from inside an instance - a browser outlives the process that opened it.
+   */
+  approveFirstTabAfterKillMs?: number
   /** Reuses an existing config dir, standing in for a restart after a successful sign-in. */
   configDir?: string
   /** Holds the port these instances would derive, standing in for an unrelated process. */
@@ -65,6 +70,7 @@ export async function runInstances(options: RunOptions): Promise<InstanceRun> {
         ...process.env,
         MCP_REMOTE_CONFIG_DIR: configDir,
         MCP_TEST_TAB_LOG: tabLog,
+        ...(options.approveFirstTabAfterKillMs === undefined ? {} : { MCP_TEST_TABS_APPROVED_EXTERNALLY: '1' }),
         NODE_OPTIONS: `--import ${pathToImport(path.join(here, 'browser-hook.mjs'))}`,
       },
     })
@@ -94,6 +100,13 @@ export async function runInstances(options: RunOptions): Promise<InstanceRun> {
     }
   }
 
+  if (options.approveFirstTabAfterKillMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, options.approveFirstTabAfterKillMs))
+    const [firstTab] = readTabUrls(tabLog)
+    // Following the redirect chain is what a browser does: authorize, then the callback
+    if (firstTab) await fetch(firstTab).catch(() => {})
+  }
+
   await new Promise((resolve) => setTimeout(resolve, settleMs))
   for (const child of children) child.kill('SIGKILL')
   if (squatter) await squatter.release()
@@ -114,6 +127,14 @@ export async function runInstances(options: RunOptions): Promise<InstanceRun> {
     killedPid,
     configDir,
   }
+}
+
+function readTabUrls(tabLog: string): string[] {
+  if (!existsSync(tabLog)) return []
+  return readFileSync(tabLog, 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split(' ').slice(2).join(' '))
 }
 
 function readTabPids(tabLog: string): number[] {

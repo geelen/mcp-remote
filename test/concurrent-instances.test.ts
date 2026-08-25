@@ -98,6 +98,27 @@ describe('concurrent instances against one server', () => {
     }
   }, 120_000)
 
+  it('completes the sign-in from the tab the killed instance opened', async () => {
+    // The tab is followed only after the instance that opened it is gone, which is the ordering a
+    // user produces: the host stops the instance seconds in, they approve a moment later.
+    const run = await runInstances({
+      count: 3,
+      serverUrl: `${auth.url}/mcp`,
+      settleMs: 25_000,
+      killTabOwnerAfterMs: 1500,
+      approveFirstTabAfterKillMs: 2000,
+    })
+
+    try {
+      expect(run.killedPid).toBeDefined()
+      expect(auth.counters.tokenFailures).toEqual([])
+      expect(auth.counters.tokensIssued).toBe(1)
+      expect(auth.counters.initializations).toBeGreaterThanOrEqual(1)
+    } finally {
+      cleanupRun(run)
+    }
+  }, 120_000)
+
   it('steps past a port held by an unrelated process', async () => {
     // The derived port is not reserved for us. Something else holding it must not make every
     // instance wait for a sign-in that is never coming.
