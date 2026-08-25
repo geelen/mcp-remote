@@ -1,6 +1,7 @@
 import { readJsonFile } from './mcp-auth-config'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthTokensWithExpiresAtSchema } from './node-oauth-client-provider'
+import { AuthCodeResult } from './types'
 import { EventEmitter } from 'events'
 import { Server } from 'http'
 import express from 'express'
@@ -11,7 +12,12 @@ const TOKEN_HANDOFF_TIMEOUT_MS = 30_000
 const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }>
+  initializeAuth: () => Promise<{
+    server: Server
+    waitForAuthCode: () => Promise<AuthCodeResult>
+    skipBrowserAuth: boolean
+    actualPort: number
+  }>
 }
 
 /**
@@ -37,7 +43,7 @@ export function createLazyAuthCoordinator(
   // process down with an unhandled EADDRINUSE (https://github.com/geelen/mcp-remote/issues/317).
   let authState: Promise<{
     server: Server
-    waitForAuthCode: () => Promise<string>
+    waitForAuthCode: () => Promise<AuthCodeResult>
     skipBrowserAuth: boolean
     actualPort: number
   }> | null = null
@@ -172,7 +178,7 @@ export async function coordinateAuth(
   events: EventEmitter,
   authTimeoutMs: number,
   strictPort = false,
-): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPath, callbackPort })
 
   // Pinned by --port or by static client info: that exact port or nothing, since the redirect_uri
@@ -251,7 +257,7 @@ async function followUntilTokensOrPort(
   port: number,
   events: EventEmitter,
   authTimeoutMs: number,
-): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean }> {
   // Bounded by how long a sign-in is allowed to take, not by a fixed handoff window: the person
   // at the browser may be going through SSO, MFA or a password manager.
   const deadline = Date.now() + Math.max(authTimeoutMs, TOKEN_HANDOFF_TIMEOUT_MS)

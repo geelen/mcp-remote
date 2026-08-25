@@ -59,6 +59,12 @@ export interface OAuthCallbackServerOptions {
   serverUrlHash: string
 }
 
+/** An authorization code, with the state identifying the flow it belongs to. */
+export type AuthCodeResult = {
+  code: string
+  state?: string
+}
+
 // optional tatic OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined

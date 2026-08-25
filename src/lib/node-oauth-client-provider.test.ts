@@ -173,7 +173,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   // concurrent mcp-remote processes for the same server used to share a single
   // code_verifier.txt file, so a second process starting mid-flow would silently
   // overwrite the first process's verifier and break its PKCE token exchange.
-  describe('PKCE code verifier isolation across processes', () => {
+  describe('PKCE code verifier isolation across flows', () => {
     let mockReadTextFile: any
     let mockWriteTextFile: any
 
@@ -184,22 +184,46 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       mockReadTextFile.mockResolvedValue('test-verifier')
     })
 
-    it('should save the code verifier to a filename scoped to the current process ID', async () => {
+    it('should save the code verifier to a filename scoped to the authorization state', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.saveCodeVerifier('test-verifier')
 
-      expect(mockWriteTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, 'test-verifier')
+      expect(mockWriteTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, 'test-verifier')
       // Two processes for the same server must never target the same filename
       expect(mockWriteTextFile).not.toHaveBeenCalledWith('test-hash', 'code_verifier.txt', 'test-verifier')
     })
 
-    it('should read the code verifier back from the same process-scoped filename', async () => {
+    it('should read the code verifier back from the same flow-scoped filename', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
 
       await provider.codeVerifier()
 
-      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`, expect.any(String))
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
+    })
+
+    it('should read the verifier of the flow a code came from, not its own', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      // A tab opened by an instance the host has since stopped
+      provider.useAuthorizationState('11111111-2222-3333-4444-555555555555')
+
+      await provider.codeVerifier()
+
+      expect(mockReadTextFile).toHaveBeenCalledWith(
+        'test-hash',
+        'code_verifier_11111111-2222-3333-4444-555555555555.txt',
+        expect.any(String),
+      )
+    })
+
+    it('should ignore a state it could not have issued', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      // A crafted state would otherwise be interpolated straight into a config file path
+      provider.useAuthorizationState('../../../../etc/passwd')
+      await provider.codeVerifier()
+
+      expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
     })
 
     it('should delete the process-scoped verifier file when invalidating the verifier scope', async () => {
@@ -207,7 +231,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       await provider.invalidateCredentials('verifier')
 
-      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
     })
 
     it('should delete the process-scoped verifier file when invalidating all credentials', async () => {
@@ -215,7 +239,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
 
       await provider.invalidateCredentials('all')
 
-      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${process.pid}.txt`)
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
     })
   })
 
