@@ -144,3 +144,20 @@ it('connects to new server', async () => {
   expect(result.hasTools).toBe(true)
 }, 30000)
 ```
+
+## Concurrent-instance tests
+
+`concurrent-instances.test.ts` runs several real `mcp-remote` processes against a local OAuth
+authorization server (`oauth-simulator/`) and asserts on what that server saw — how many clients
+were registered, how many authorization requests arrived, how many tokens were issued.
+
+Those counts are the point. An MCP host starts two to five instances per server, so the failures
+worth catching ("three browser tabs opened", "the shared client registration was overwritten") are
+properties of the group and are invisible from inside any one process. A unit test with a mocked
+config directory cannot see them.
+
+Instances are run from source under `tsx` rather than from `dist`, because the bundler inlines the
+`open` package and the suite needs to alias it away — otherwise a test run launches real browsers.
+See `oauth-simulator/browser-resolver.mjs`.
+
+Run with `pnpm test:concurrency`.

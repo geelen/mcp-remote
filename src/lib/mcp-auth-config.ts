@@ -28,60 +28,6 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
  */
 
 /**
- * Lockfile data structure
- */
-export interface LockfileData {
-  pid: number
-  port: number
-  timestamp: number
-}
-
-/**
- * Creates a lockfile for the given server
- * @param serverUrlHash The hash of the server URL
- * @param pid The process ID
- * @param port The port the server is running on
- */
-export async function createLockfile(serverUrlHash: string, pid: number, port: number): Promise<void> {
-  const lockData: LockfileData = {
-    pid,
-    port,
-    timestamp: Date.now(),
-  }
-  await writeJsonFile(serverUrlHash, 'lock.json', lockData)
-}
-
-/**
- * Checks if a lockfile exists for the given server
- * @param serverUrlHash The hash of the server URL
- * @returns The lockfile data or null if it doesn't exist
- */
-export async function checkLockfile(serverUrlHash: string): Promise<LockfileData | null> {
-  try {
-    const lockfile = await readJsonFile<LockfileData>(serverUrlHash, 'lock.json', {
-      async parseAsync(data: any) {
-        if (typeof data !== 'object' || data === null) return null
-        if (typeof data.pid !== 'number' || typeof data.port !== 'number' || typeof data.timestamp !== 'number') {
-          return null
-        }
-        return data as LockfileData
-      },
-    })
-    return lockfile || null
-  } catch {
-    return null
-  }
-}
-
-/**
- * Deletes the lockfile for the given server
- * @param serverUrlHash The hash of the server URL
- */
-export async function deleteLockfile(serverUrlHash: string): Promise<void> {
-  await deleteConfigFile(serverUrlHash, 'lock.json')
-}
-
-/**
  * Gets the configuration directory path
  * @returns The path to the configuration directory
  */

@@ -807,6 +807,12 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
       })
   })
 
+  // Lets an instance that lost the bind identify who holds the port. Without it, EADDRINUSE from
+  // an unrelated process is indistinguishable from a sibling and every instance waits forever.
+  app.get(MCP_REMOTE_ID_PATH, (_req, res) => {
+    res.json({ mcpRemote: true, serverUrlHash: options.serverUrlHash })
+  })
+
   // OAuth callback endpoint
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
@@ -834,35 +840,21 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     options.events.emit('auth-code-received', code)
   })
 
-  // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
+  // Bind the server. There is deliberately no random-port fallback: the deterministic port is
+  // what makes concurrent instances agree on an owner, and an instance that quietly moved
+  // elsewhere would advertise a redirect_uri no browser can deliver a code to. EADDRINUSE is a
+  // signal that somebody else owns this flow, and the caller decides what to do about it.
   const { server, actualPort } = await new Promise<{ server: Server; actualPort: number }>((resolve, reject) => {
     const httpServer = app.listen(options.port, '127.0.0.1')
 
     httpServer.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        if (options.strictPort) {
-          reject(
-            Object.assign(
-              new Error(
-                `Callback port ${options.port} is already in use. The port is mandatory (it was specified explicitly or is pinned by --static-oauth-client-info). Close the process holding that port or restart your machine.`,
-              ),
-              { code: 'EADDRINUSE', requestedPort: options.port },
-            ),
-          )
-          return
-        }
-        log(`Warning: callback port ${options.port} is already in use, falling back to a random port`)
-        // Retry with an OS-assigned port
-        const fallback = app.listen(0, '127.0.0.1')
-        fallback.once('error', reject)
-        fallback.once('listening', () => {
-          const addr = fallback.address() as AddressInfo
-          log(`OAuth callback server running at http://127.0.0.1:${addr.port} (fallback from ${options.port})`)
-          resolve({ server: fallback, actualPort: addr.port })
-        })
-      } else {
-        reject(err)
+        reject(
+          Object.assign(new Error(`Callback port ${options.port} is already in use`), { code: 'EADDRINUSE', requestedPort: options.port }),
+        )
+        return
       }
+      reject(err)
     })
 
     httpServer.once('listening', () => {
@@ -902,6 +894,7 @@ export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptio
 export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
 
 /** Endpoint secondary instances long-poll to await the auth flow the primary instance is running. */
+export const MCP_REMOTE_ID_PATH = '/.mcp-remote/id'
 export const LONG_POLL_PATH = '/wait-for-auth'
 
 /**
@@ -911,25 +904,6 @@ export const LONG_POLL_PATH = '/wait-for-auth'
  */
 export function buildRedirectUrl(host: string, port: number, callbackPath: string = DEFAULT_CALLBACK_PATH): string {
   return `http://${host}:${port}${callbackPath}`
-}
-
-async function findExistingClientPort(serverUrlHash: string): Promise<number | undefined> {
-  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
-  if (!clientInfo) {
-    return undefined
-  }
-
-  const localhostRedirectUri = clientInfo.redirect_uris
-    .map((uri) => new URL(uri))
-    .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
-  if (!localhostRedirectUri) {
-    // A registration that points somewhere we cannot listen (e.g. it was made behind a reverse
-    // proxy, or by an earlier `--host` run) yields no reusable port. Fall back to picking one;
-    // invalidateMismatchedClientRegistration then discards the unusable registration.
-    return undefined
-  }
-
-  return parseInt(localhostRedirectUri.port)
 }
 
 /**
@@ -949,41 +923,11 @@ async function invalidateMismatchedClientRegistration(serverUrlHash: string, red
   await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
 }
 
-function calculateDefaultPort(serverUrlHash: string): number {
+export function calculateDefaultPort(serverUrlHash: string): number {
   // Convert the first 4 bytes of the serverUrlHash into a port offset
   const offset = parseInt(serverUrlHash.substring(0, 4), 16)
   // Pick a consistent but random-seeming port from 3335 to 49151
   return 3335 + (offset % 45816)
-}
-
-/**
- * Finds an available port on the local machine
- * @param preferredPort Optional preferred port to try first
- * @returns A promise that resolves to an available port number
- */
-export async function findAvailablePort(preferredPort?: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        // If preferred port is in use, get a random port
-        server.listen(0)
-      } else {
-        reject(err)
-      }
-    })
-
-    server.on('listening', () => {
-      const { port } = server.address() as net.AddressInfo
-      server.close(() => {
-        resolve(port)
-      })
-    })
-
-    // Try preferred port first, or get a random port
-    server.listen(preferredPort || 0)
-  })
 }
 
 /**
@@ -1199,19 +1143,17 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
-  // Use the specified port, or the existing client port or fallback to find an available one
-  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrlHash), findAvailablePort(defaultPort)])
+  // Derived, never probed. `findAvailablePort` used to bind the port, close it, and hand back the
+  // number - so concurrent instances could each be told the same port was free, or be pushed onto
+  // random ones, before any coordination ran. Whether the port is actually free is settled by
+  // binding it for real, in coordinateAuth, where losing tells us somebody else owns the flow.
   let callbackPort: number
-
   if (specifiedPort) {
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
-  } else if (existingClientPort) {
-    log(`Using existing client port: ${existingClientPort}`)
-    callbackPort = existingClientPort
   } else {
-    log(`Using automatically selected callback port: ${availablePort}`)
-    callbackPort = availablePort
+    log(`Using callback port derived from the server URL: ${defaultPort}`)
+    callbackPort = defaultPort
   }
 
   // A cached dynamic client registration is only usable if it was registered with the exact
