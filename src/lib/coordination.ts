@@ -2,12 +2,16 @@ import { readJsonFile } from './mcp-auth-config'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthTokensWithExpiresAtSchema } from './node-oauth-client-provider'
 import { EventEmitter } from 'events'
+import { Agent } from 'undici'
 import { Server } from 'http'
 import express from 'express'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll, MCP_REMOTE_ID_PATH } from './utils'
 
 /** How long a secondary instance waits for the primary to persist the tokens it just obtained. */
 const TOKEN_HANDOFF_TIMEOUT_MS = 30_000
+
+/** How long to wait on another instance's sign-in before going it alone. Sign-ins involve a human. */
+const FOLLOWER_PATIENCE_MS = 3 * 60_000
 const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
@@ -87,11 +91,21 @@ const FOLLOWER_POLL_INTERVAL_MS = 250
  * A refused bind says the port is taken, not by what. Without this an unrelated process squatting
  * on the port would make every instance wait for a sign-in that is never coming.
  */
+/**
+ * Talks to loopback directly, whatever global dispatcher is installed.
+ *
+ * `--enable-proxy` sets a global EnvHttpProxyAgent, which does not exempt loopback - so without
+ * this the identity probe is sent to the corporate proxy, times out, and every sibling is
+ * mistaken for a stranger.
+ */
+const loopbackDispatcher = new Agent()
+
 async function portHeldBySiblingFor(port: number, serverUrlHash: string): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}${MCP_REMOTE_ID_PATH}`, {
       signal: AbortSignal.timeout(1000),
-    })
+      dispatcher: loopbackDispatcher,
+    } as RequestInit)
     if (!response.ok) return false
     const body = (await response.json()) as { mcpRemote?: boolean; serverUrlHash?: string }
     return body?.mcpRemote === true && body.serverUrlHash === serverUrlHash
@@ -147,11 +161,6 @@ export async function hasUsableTokens(serverUrlHash: string): Promise<boolean> {
 }
 
 /** Tokens another instance has already obtained, if they are on disk and usable. */
-async function tokensOnDisk(serverUrlHash: string): Promise<boolean> {
-  const tokens = await readJsonFile(serverUrlHash, 'tokens.json', OAuthTokensSchema)
-  return !!tokens
-}
-
 /** Treat a token about to expire as expired, matching the provider's own refresh margin. */
 const TOKEN_EXPIRY_MARGIN_MS = 60_000
 
@@ -172,10 +181,11 @@ export async function coordinateAuth(
   events: EventEmitter,
   authTimeoutMs: number,
   strictPort = false,
+  followerPatienceMs = FOLLOWER_PATIENCE_MS,
 ): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPath, callbackPort })
 
-  // Pinned by --port or by static client info: that exact port or nothing, since the redirect_uri
+  // Pinned by an explicit port argument or by static client info: that exact port or nothing, since the redirect_uri
   // it implies is not ours to move.
   const candidates = strictPort ? [callbackPort] : Array.from({ length: PORT_CANDIDATES }, (_, i) => callbackPort + i)
 
@@ -197,7 +207,7 @@ export async function coordinateAuth(
       if (established !== undefined) {
         debugLog('Yielding to a sibling established on an earlier candidate', { ours: actualPort, theirs: established })
         await new Promise<void>((resolve) => server.close(() => resolve()))
-        return followUntilTokensOrPort(serverUrlHash, callbackPath, established, events, authTimeoutMs)
+        return followUntilTokensOrPort(serverUrlHash, callbackPath, established, events, authTimeoutMs, followerPatienceMs)
       }
 
       log(`This instance is running the sign-in for this server (callback port ${actualPort})`)
@@ -215,7 +225,7 @@ export async function coordinateAuth(
 
       if (await portHeldBySiblingFor(port, serverUrlHash)) {
         log(`Another instance is running the sign-in for this server on port ${port}`)
-        return followUntilTokensOrPort(serverUrlHash, callbackPath, port, events, authTimeoutMs)
+        return followUntilTokensOrPort(serverUrlHash, callbackPath, port, events, authTimeoutMs, followerPatienceMs)
       }
 
       // Somebody else's process. Ours is not there to be waited for, so keep looking.
@@ -226,11 +236,18 @@ export async function coordinateAuth(
 
   throw new Error(
     `Could not find a free callback port for this server (tried ${candidates[0]}-${candidates[candidates.length - 1]}). ` +
-      `Close whatever is holding those ports, or pass --port to choose one.`,
+      `Close whatever is holding those ports, or pass a port as the second argument to choose one.`,
   )
 }
 
-/** The earliest candidate before `port` that a sibling has taken, if any. */
+/**
+ * The earliest candidate before `port` that a sibling has taken, if any.
+ *
+ * Deliberately one-directional. Binding only arbitrates between instances contending for the same
+ * port, so instances pushed past a squatted one can each think they won; yielding to the lowest
+ * bound candidate is a rule they can all evaluate identically. Yielding in both directions has no
+ * tie-break - two instances would each stand down for the other.
+ */
 async function firstSiblingBefore(candidates: number[], port: number, serverUrlHash: string): Promise<number | undefined> {
   for (const candidate of candidates) {
     if (candidate === port) return undefined
@@ -251,24 +268,18 @@ async function followUntilTokensOrPort(
   port: number,
   events: EventEmitter,
   authTimeoutMs: number,
+  followerPatienceMs: number,
 ): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
-  // Bounded by how long a sign-in is allowed to take, not by a fixed handoff window: the person
-  // at the browser may be going through SSO, MFA or a password manager.
-  const deadline = Date.now() + Math.max(authTimeoutMs, TOKEN_HANDOFF_TIMEOUT_MS)
+  // The person at the browser may be going through SSO, MFA or a password manager, so this is
+  // deliberately longer than the handoff window - and running out is no longer fatal.
+  const deadline = Date.now() + Math.max(authTimeoutMs, followerPatienceMs)
 
   while (Date.now() < deadline) {
-    if (await tokensOnDisk(serverUrlHash)) {
+    if (await hasUsableTokens(serverUrlHash)) {
       log('The sign-in was completed by another instance; using the tokens it wrote')
       // This instance never serves callbacks, so it reports the port it would have used rather
       // than a throwaway one - a port that looks changed makes callers re-register the client.
-      const idleServer = express().listen(0, '127.0.0.1')
-      return {
-        server: idleServer,
-        actualPort: port,
-        waitForAuthCode: () =>
-          Promise.reject(new Error('waitForAuthCode is not available in a follower; reconnect using the tokens on disk instead')),
-        skipBrowserAuth: true,
-      }
+      return unownedFlow(port)
     }
 
     try {
@@ -290,7 +301,31 @@ async function followUntilTokensOrPort(
     await new Promise((resolve) => setTimeout(resolve, FOLLOWER_POLL_INTERVAL_MS))
   }
 
-  throw new Error(
-    `Timed out waiting for another mcp-remote instance to finish signing in on port ${port}. ` + `Retry, or close the other instance.`,
-  )
+  // Whatever we were waiting for is not coming. Connecting unaided may still work - the server
+  // may not need OAuth at all, or may challenge us and let the 401 handler run - and it is always
+  // better than exiting, which is what a wrong guess used to cost.
+  log(`Gave up waiting for another instance on port ${port}; continuing without owning the sign-in`)
+  return unownedFlow(port)
+}
+
+/**
+ * A result for an instance that owns no callback server and will not run a browser flow.
+ *
+ * `waitForAuthCode` rejects rather than hanging, so a caller that reaches for a code it was never
+ * going to receive fails immediately and visibly instead of waiting out the host's patience.
+ */
+function unownedFlow(port: number): {
+  server: Server
+  actualPort: number
+  waitForAuthCode: () => Promise<string>
+  skipBrowserAuth: boolean
+} {
+  return {
+    server: express()
+      .listen(0, '127.0.0.1')
+      .on('error', () => {}),
+    actualPort: port,
+    waitForAuthCode: () => Promise.reject(new Error('This instance does not own the sign-in; it cannot receive an authorization code')),
+    skipBrowserAuth: true,
+  }
 }
