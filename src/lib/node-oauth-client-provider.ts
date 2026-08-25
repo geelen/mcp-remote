@@ -24,7 +24,7 @@ import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './pro
  * otherwise drop `expires_at` on read, so we parse and serialize tokens with
  * this extended schema instead.
  */
-const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
+export const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
   expires_at: z.coerce.number().optional(),
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
@@ -429,14 +429,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   /**
    * Saves the PKCE code verifier
    *
-   * The filename is scoped to the current process ID. Multiple mcp-remote
-   * processes can be started concurrently for the same server (e.g. an MCP
-   * host reconnecting or launching duplicate instances) - since coordination
-   * between those processes is currently disabled on Windows (see
-   * coordination.ts), each process must keep its own verifier so a second
-   * process can't overwrite the first one's file mid-flow and break the
-   * PKCE exchange for whichever process the browser callback actually
-   * reaches. See https://github.com/geelen/mcp-remote/issues/235.
+   * The filename is scoped to the current process ID. Only the instance that owns the callback
+   * port runs a flow now (see coordination.ts), so nothing should be contending for this file -
+   * the scoping is kept as a backstop for any path that reaches here without that ownership.
+   * See https://github.com/geelen/mcp-remote/issues/235.
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {

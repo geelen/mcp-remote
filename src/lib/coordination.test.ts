@@ -3,46 +3,10 @@ import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { writeJsonFile } from './mcp-auth-config'
-import { waitForTokensFromPrimary, createLazyAuthCoordinator } from './coordination'
+import { createLazyAuthCoordinator, hasUsableTokens } from './coordination'
 import { EventEmitter } from 'events'
 import net from 'net'
 import http from 'http'
-
-describe('Feature: Token handoff between concurrent instances', () => {
-  const hash = 'handoff-test'
-  let configDir: string
-
-  beforeEach(async () => {
-    configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-remote-handoff-'))
-    process.env.MCP_REMOTE_CONFIG_DIR = configDir
-    // coordinateAuth logs to stderr; keep the test output readable
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-  })
-
-  afterEach(async () => {
-    delete process.env.MCP_REMOTE_CONFIG_DIR
-    await fs.rm(configDir, { recursive: true, force: true })
-  })
-
-  it('Scenario: Resolves once the primary instance persists its tokens', async () => {
-    // Given tokens that are not on disk yet - the primary's callback fired, but the code has
-    // not been exchanged. This is the window a fixed sleep used to gamble on.
-    const waiting = waitForTokensFromPrimary(hash, 5000)
-
-    // When the primary finishes the exchange and writes them
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    await writeJsonFile(hash, 'tokens.json', { access_token: 'from-primary', token_type: 'Bearer' })
-
-    // Then the secondary stops waiting
-    await expect(waiting).resolves.toBe(true)
-  })
-
-  it('Scenario: Gives up when the primary never writes them', async () => {
-    // Given a primary that signalled completion but never persisted anything
-    // Then the secondary reports failure instead of blocking forever
-    await expect(waitForTokensFromPrimary(hash, 500)).resolves.toBe(false)
-  })
-})
 
 describe('Feature: Two 401s arriving in the same tick', () => {
   let configDir: string
@@ -93,4 +57,46 @@ describe('Feature: Two 401s arriving in the same tick', () => {
     expect(retried.actualPort).toBe(blockedPort)
     retried.server.close()
   }, 15_000)
+})
+
+describe('Feature: Deciding whether a browser sign-in is needed', () => {
+  let configDir: string
+
+  beforeEach(async () => {
+    configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-remote-usable-'))
+    process.env.MCP_REMOTE_CONFIG_DIR = configDir
+  })
+
+  afterEach(async () => {
+    delete process.env.MCP_REMOTE_CONFIG_DIR
+    await fs.rm(configDir, { recursive: true, force: true })
+  })
+
+  const store = (tokens: Record<string, unknown>) => writeJsonFile('usable-test', 'tokens.json', tokens)
+
+  it('Scenario: No tokens at all means a sign-in is needed', async () => {
+    await expect(hasUsableTokens('usable-test')).resolves.toBe(false)
+  })
+
+  it('Scenario: A live token needs nothing', async () => {
+    await store({ access_token: 'a', token_type: 'Bearer', expires_at: Date.now() + 3_600_000 })
+    await expect(hasUsableTokens('usable-test')).resolves.toBe(true)
+  })
+
+  it('Scenario: An expired token that can be refreshed needs no browser', async () => {
+    await store({ access_token: 'a', token_type: 'Bearer', expires_at: Date.now() - 1000, refresh_token: 'r' })
+    await expect(hasUsableTokens('usable-test')).resolves.toBe(true)
+  })
+
+  it('Scenario: An expired token with nothing to refresh from needs a sign-in', async () => {
+    // Treating this as usable is what let every instance skip coordination on re-authentication
+    // and open a tab of its own
+    await store({ access_token: 'a', token_type: 'Bearer', expires_at: Date.now() - 1000 })
+    await expect(hasUsableTokens('usable-test')).resolves.toBe(false)
+  })
+
+  it('Scenario: A token expiring within the refresh margin counts as expired', async () => {
+    await store({ access_token: 'a', token_type: 'Bearer', expires_at: Date.now() + 5_000 })
+    await expect(hasUsableTokens('usable-test')).resolves.toBe(false)
+  })
 })
