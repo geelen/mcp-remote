@@ -1677,7 +1677,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
 
     const response = await fetch(`http://127.0.0.1:${result.actualPort}/custom/callback?code=test-code`)
     expect(response.status).toBe(200)
-    await expect(result.waitForAuthCode()).resolves.toBe('test-code')
+    await expect(result.waitForAuthCode()).resolves.toEqual({ code: 'test-code', state: undefined })
 
     // The default path must not be served when it was overridden, otherwise the redirect URI
     // we advertise and the endpoint we listen on can silently disagree

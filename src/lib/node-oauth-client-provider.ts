@@ -29,6 +29,9 @@ export const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
+/** The shape of the state we issue, and the only shape accepted into a config filename. */
+const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
+
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
  * Handles OAuth flow and token storage for MCP clients.
@@ -51,6 +54,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   validateResourceURL?: (defaultResource: URL, discoveredResource?: string) => Promise<URL | undefined>
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
+  private incomingState: string | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
@@ -427,15 +431,37 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   /**
    * Saves the PKCE code verifier
    *
-   * The filename is scoped to the current process ID. Only the instance that owns the callback
-   * port runs a flow now (see coordination.ts), so nothing should be contending for this file -
-   * the scoping is kept as a backstop for any path that reaches here without that ownership.
-   * See https://github.com/geelen/mcp-remote/issues/235.
+   * The filename is scoped to this flow's authorization state rather than to the process, so a
+   * code can still be redeemed by an instance that took the callback port over from the one that
+   * started the flow. See https://github.com/geelen/mcp-remote/issues/235.
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, codeVerifier)
+    await writeTextFile(this.serverUrlHash, this.codeVerifierFile(this._state), codeVerifier)
+  }
+
+  /**
+   * Records the state a code came back with, so the flow that produced it decides which verifier
+   * redeems it
+   * @param state The state from the callback
+   */
+  useAuthorizationState(state: string): void {
+    if (!ISSUED_STATE.test(state)) {
+      log('Ignoring an authorization state this client could not have issued')
+      debugLog('Rejected authorization state', { state })
+      return
+    }
+    this.incomingState = state
+  }
+
+  /** The flow this instance is redeeming for: another instance's when a code names it. */
+  private get flowState(): string {
+    return this.incomingState ?? this._state
+  }
+
+  private codeVerifierFile(state: string): string {
+    return `code_verifier_${state}.txt`
   }
 
   /**
@@ -444,7 +470,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async codeVerifier(): Promise<string> {
     debugLog('Reading code verifier')
-    const verifier = await readTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, 'No code verifier saved for session')
+    const verifier = await readTextFile(this.serverUrlHash, this.codeVerifierFile(this.flowState), 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
   }
@@ -461,7 +487,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
-          deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`),
+          deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState)),
         ])
         this._clientInfo = undefined
         debugLog('All credentials invalidated')
@@ -479,7 +505,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`)
+        await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState))
         debugLog('Code verifier invalidated')
         break
 

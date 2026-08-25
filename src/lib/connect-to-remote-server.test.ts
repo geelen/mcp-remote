@@ -69,6 +69,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
 
 // Import after mocks are registered.
 import { connectToRemoteServer } from './utils'
+import type { AuthCodeResult } from './types'
 
 describe('connectToRemoteServer', () => {
   beforeEach(() => {
@@ -81,7 +82,7 @@ describe('connectToRemoteServer', () => {
 
   it('completes auth on the transport that received the 401 challenge in proxy mode (regression: #270)', async () => {
     const authInitializer = vi.fn().mockResolvedValue({
-      waitForAuthCode: async () => 'auth-code-123',
+      waitForAuthCode: async () => ({ code: 'auth-code-123' }),
       skipBrowserAuth: false,
     })
 
@@ -107,7 +108,7 @@ describe('connectToRemoteServer', () => {
 
   it('completes auth on the main transport in with-client mode (parity with the working standalone client path)', async () => {
     const authInitializer = vi.fn().mockResolvedValue({
-      waitForAuthCode: async () => 'auth-code-456',
+      waitForAuthCode: async () => ({ code: 'auth-code-456' }),
       skipBrowserAuth: false,
     })
 
@@ -134,7 +135,7 @@ describe('connectToRemoteServer', () => {
   // What `coordinateAuth` hands a secondary instance once a sibling has finished the browser flow:
   // there is no code to wait for, so awaiting one blocks until the MCP host times the server out.
   const secondaryInstanceAuth = () => ({
-    waitForAuthCode: vi.fn(() => new Promise<string>(() => {})),
+    waitForAuthCode: vi.fn(() => new Promise<AuthCodeResult>(() => {})),
     skipBrowserAuth: true,
   })
 
@@ -169,7 +170,7 @@ describe('connectToRemoteServer', () => {
   it('does not re-exchange a spent authorization code when the retry also fails (regression: #322)', async () => {
     // A real callback server retains the code it received, so a second call yields the same one
     const authInitializer = vi.fn().mockResolvedValue({
-      waitForAuthCode: async () => 'auth-code-789',
+      waitForAuthCode: async () => ({ code: 'auth-code-789' }),
       skipBrowserAuth: false,
     })
     mockState.connectFailuresRemaining = Number.MAX_SAFE_INTEGER

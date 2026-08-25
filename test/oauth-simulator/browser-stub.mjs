@@ -10,7 +10,8 @@ import { appendFileSync } from 'fs'
  */
 export default async function open(url) {
   appendFileSync(process.env.MCP_TEST_TAB_LOG, `${Date.now()} ${process.pid} ${url}\n`)
-  void followLikeABrowser(url)
+  // A scenario that approves the tab itself leaves it alone here
+  if (!process.env.MCP_TEST_TABS_APPROVED_EXTERNALLY) void followLikeABrowser(url)
   // `open` resolves with the helper's ChildProcess; callers may attach listeners or unref it
   return { on() {}, once() {}, unref() {}, stderr: null, kill() {} }
 }

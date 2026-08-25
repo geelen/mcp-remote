@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import { AuthCodeResult, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
@@ -522,7 +522,7 @@ export async function discoverOAuthServerInfo(
  * Type for the auth initialization function
  */
 export type AuthInitializer = () => Promise<{
-  waitForAuthCode: () => Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
   skipBrowserAuth: boolean
 }>
 
@@ -703,8 +703,13 @@ export async function connectToRemoteServer(
 
       // Wait for the authorization code from the callback
       debugLog('Waiting for auth code from callback server')
-      const code = await waitForAuthCode()
+      const { code, state } = await waitForAuthCode()
       debugLog('Received auth code from callback server')
+
+      // The code may belong to a flow another instance started, whose verifier is not this one's
+      if (state && 'useAuthorizationState' in authProvider && typeof authProvider.useAuthorizationState === 'function') {
+        authProvider.useAuthorizationState(state)
+      }
 
       // Checked before the exchange, not after: an authorization code is single-use (RFC 6749
       // 4.1.2) and the callback server hands back the same retained code on a second call, so
@@ -755,15 +760,15 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   server: Server
   actualPort: number
   authCode: string | null
-  waitForAuthCode: () => Promise<string>
-  authCompletedPromise: Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
+  authCompletedPromise: Promise<AuthCodeResult>
 }> {
-  let authCode: string | null = null
+  let authCode: AuthCodeResult | null = null
   const app = express()
 
   // Create a promise to track when auth is completed
-  let authCompletedResolve: (code: string) => void
-  const authCompletedPromise = new Promise<string>((resolve) => {
+  let authCompletedResolve: (result: AuthCodeResult) => void
+  const authCompletedPromise = new Promise<AuthCodeResult>((resolve) => {
     authCompletedResolve = resolve
   })
 
@@ -816,6 +821,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   // OAuth callback endpoint
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
+    const state = req.query.state as string | undefined
     const authorizationError = req.query.error as string | undefined
     if (authorizationError) {
       const description = (req.query.error_description as string | undefined) ?? authorizationError
@@ -829,9 +835,9 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
       return
     }
 
-    authCode = code
+    authCode = { code, state }
     log('Auth code received, resolving promise')
-    authCompletedResolve(code)
+    authCompletedResolve(authCode)
 
     res.send(`
       Authorization successful!
@@ -845,7 +851,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     `)
 
     // Notify main flow that auth code is available
-    options.events.emit('auth-code-received', code)
+    options.events.emit('auth-code-received', code, state)
   })
 
   // Bind the server. There is deliberately no random-port fallback: the deterministic port is
@@ -872,7 +878,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     })
   })
 
-  const waitForAuthCode = (): Promise<string> => {
+  const waitForAuthCode = (): Promise<AuthCodeResult> => {
     return new Promise((resolve, reject) => {
       if (authCode) {
         resolve(authCode)
@@ -883,9 +889,9 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
         options.events.off('auth-code-received', onCode)
         reject(error)
       }
-      const onCode = (code: string) => {
+      const onCode = (code: string, state?: string) => {
         options.events.off('auth-code-failed', onFailure)
-        resolve(code)
+        resolve({ code, state })
       }
       options.events.once('auth-code-received', onCode)
       // An authorization the user denied never produces a code, and waiting for one holds the

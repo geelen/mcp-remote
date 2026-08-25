@@ -1,6 +1,7 @@
 import { readJsonFile } from './mcp-auth-config'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthTokensWithExpiresAtSchema } from './node-oauth-client-provider'
+import { AuthCodeResult } from './types'
 import { EventEmitter } from 'events'
 import { Agent } from 'undici'
 import { Server } from 'http'
@@ -15,7 +16,12 @@ const FOLLOWER_PATIENCE_MS = 3 * 60_000
 const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
-  initializeAuth: () => Promise<{ server: Server; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean; actualPort: number }>
+  initializeAuth: () => Promise<{
+    server: Server
+    waitForAuthCode: () => Promise<AuthCodeResult>
+    skipBrowserAuth: boolean
+    actualPort: number
+  }>
 }
 
 /**
@@ -41,7 +47,7 @@ export function createLazyAuthCoordinator(
   // process down with an unhandled EADDRINUSE (https://github.com/geelen/mcp-remote/issues/317).
   let authState: Promise<{
     server: Server
-    waitForAuthCode: () => Promise<string>
+    waitForAuthCode: () => Promise<AuthCodeResult>
     skipBrowserAuth: boolean
     actualPort: number
   }> | null = null
@@ -182,7 +188,7 @@ export async function coordinateAuth(
   authTimeoutMs: number,
   strictPort = false,
   followerPatienceMs = FOLLOWER_PATIENCE_MS,
-): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPath, callbackPort })
 
   // Pinned by an explicit port argument or by static client info: that exact port or nothing, since the redirect_uri
@@ -269,7 +275,7 @@ async function followUntilTokensOrPort(
   events: EventEmitter,
   authTimeoutMs: number,
   followerPatienceMs: number,
-): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
+): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<AuthCodeResult>; skipBrowserAuth: boolean }> {
   // The person at the browser may be going through SSO, MFA or a password manager, so this is
   // deliberately longer than the handoff window - and running out is no longer fatal.
   const deadline = Date.now() + Math.max(authTimeoutMs, followerPatienceMs)
@@ -317,7 +323,7 @@ async function followUntilTokensOrPort(
 function unownedFlow(port: number): {
   server: Server
   actualPort: number
-  waitForAuthCode: () => Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
   skipBrowserAuth: boolean
 } {
   return {
