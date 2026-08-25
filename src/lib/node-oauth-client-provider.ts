@@ -1,4 +1,3 @@
-import open from 'open'
 import { z } from 'zod'
 import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
@@ -9,6 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
+import { openBrowser } from './open-browser'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -417,12 +417,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
-    try {
-      await open(sanitizeUrl(authorizationUrl.toString()))
+    if (await openBrowser(sanitizeUrl(authorizationUrl.toString()))) {
       log('Browser opened automatically.')
-    } catch (error) {
-      log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
-      debugLog('Failed to open browser', error)
+    } else {
+      log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
     }
   }
 
