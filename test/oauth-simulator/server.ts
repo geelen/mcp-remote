@@ -21,6 +21,8 @@ export type AuthServerCounters = {
   tokenFailures: Array<{ reason: string; clientId?: string }>
   /** Every distinct redirect_uri registered or authorized against. */
   redirectUris: string[]
+  /** Instances that authenticated and completed an MCP `initialize` — i.e. actually got working. */
+  initializations: number
 }
 
 export type OAuthSimulator = {
@@ -58,6 +60,7 @@ export async function startOAuthSimulator(): Promise<OAuthSimulator> {
     tokensIssued: 0,
     tokenFailures: [],
     redirectUris: [],
+    initializations: 0,
   }
   const tabs: OAuthSimulator['tabs'] = []
   const clients = new Map<string, Registration>()
@@ -159,6 +162,8 @@ export async function startOAuthSimulator(): Promise<OAuthSimulator> {
   })
 
   // The MCP resource server. Unauthenticated requests get the challenge that starts the flow.
+  // Counting `initialize` here is how the suite knows an instance did not merely obtain a token
+  // but actually reached the server with it - the outcome a user would call "it worked".
   app.all('/mcp', (req, res) => {
     const authorization = req.headers.authorization
     if (!authorization?.startsWith('Bearer ')) {
@@ -166,7 +171,26 @@ export async function startOAuthSimulator(): Promise<OAuthSimulator> {
       res.status(401).json({ error: 'unauthorized' })
       return
     }
-    res.json({ jsonrpc: '2.0', id: req.body?.id ?? null, result: {} })
+
+    const method = req.body?.method
+    if (method === 'initialize') {
+      counters.initializations++
+      res.json({
+        jsonrpc: '2.0',
+        id: req.body.id,
+        result: {
+          protocolVersion: req.body?.params?.protocolVersion ?? '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'oauth-simulator', version: '1.0.0' },
+        },
+      })
+      return
+    }
+    if (req.body?.id === undefined) {
+      res.status(202).end() // a notification
+      return
+    }
+    res.json({ jsonrpc: '2.0', id: req.body.id, result: {} })
   })
 
   const server: Server = await new Promise((resolve) => {

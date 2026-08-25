@@ -1,4 +1,8 @@
 import { spawn, type ChildProcess } from 'child_process'
+import net from 'net'
+// Imported rather than reimplemented: a test that derives the port its own way stops testing the
+// thing the instances actually do the moment either side changes.
+import { calculateDefaultPort, getServerUrlHash } from '../../src/lib/utils'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -9,11 +13,11 @@ const repoRoot = path.resolve(here, '../..')
 
 export type InstanceRun = {
   /** Authorization URLs opened across all instances, i.e. the tabs a user would have seen. */
-  tabs: Array<{ atMs: number; url: string }>
+  tabs: Array<{ atMs: number; pid: number; url: string }>
   /** Per-instance stderr, for asserting on what an instance decided. */
   logs: string[]
-  /** Instances that reported reaching the remote server. */
-  connected: number
+  /** The instance killed mid-flow, when a scenario asked for one. */
+  killedPid?: number
   configDir: string
 }
 
@@ -27,6 +31,10 @@ export type RunOptions = {
   settleMs?: number
   /** Kills the instance that opened the first tab, this long after it opens. */
   killTabOwnerAfterMs?: number
+  /** Reuses an existing config dir, standing in for a restart after a successful sign-in. */
+  configDir?: string
+  /** Holds the port these instances would derive, standing in for an unrelated process. */
+  squatDerivedPort?: boolean
 }
 
 /**
@@ -38,11 +46,14 @@ export type RunOptions = {
  */
 export async function runInstances(options: RunOptions): Promise<InstanceRun> {
   const { count, serverUrl, args = [], settleMs = 8000 } = options
-  const configDir = mkdtempSync(path.join(tmpdir(), 'mcp-remote-e2e-'))
+  const configDir = options.configDir ?? mkdtempSync(path.join(tmpdir(), 'mcp-remote-e2e-'))
   const tabLog = path.join(configDir, 'tabs.log')
   writeFileSync(tabLog, '')
 
+  const squatter = options.squatDerivedPort ? await squatPort(calculateDefaultPort(getServerUrlHash(serverUrl))) : undefined
+
   const startedAt = Date.now()
+  let killedPid: number | undefined
   const children: ChildProcess[] = []
   const logs: string[] = Array.from({ length: count }, () => '')
 
@@ -63,29 +74,83 @@ export async function runInstances(options: RunOptions): Promise<InstanceRun> {
     children.push(child)
   }
 
+  // Kills whichever instance opened the tab, as an MCP host restarting its servers does. The
+  // browser tab it opened stays open, pointing at the callback port it no longer holds.
+  if (options.killTabOwnerAfterMs !== undefined) {
+    const killedAt = Date.now() + options.killTabOwnerAfterMs
+    while (Date.now() < killedAt || !readTabPids(tabLog).length) {
+      if (Date.now() > killedAt + 10_000) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    const [ownerPid] = readTabPids(tabLog)
+    if (ownerPid) {
+      try {
+        process.kill(ownerPid, 'SIGKILL')
+        killedPid = ownerPid
+      } catch {
+        // Already gone
+      }
+      children.find((c) => c.pid === ownerPid)?.kill('SIGKILL')
+    }
+  }
+
   await new Promise((resolve) => setTimeout(resolve, settleMs))
   for (const child of children) child.kill('SIGKILL')
+  if (squatter) await squatter.release()
 
   const tabs = existsSync(tabLog)
     ? readFileSync(tabLog, 'utf-8')
         .split('\n')
         .filter(Boolean)
         .map((line) => {
-          const [at, ...rest] = line.split(' ')
-          return { atMs: Number(at) - startedAt, url: rest.join(' ') }
+          const [at, pid, ...rest] = line.split(' ')
+          return { atMs: Number(at) - startedAt, pid: Number(pid), url: rest.join(' ') }
         })
     : []
 
   return {
     tabs,
     logs,
-    connected: logs.filter((l) => /Connected to remote server|Proxy established successfully/.test(l)).length,
+    killedPid,
     configDir,
   }
 }
 
+function readTabPids(tabLog: string): number[] {
+  if (!existsSync(tabLog)) return []
+  return readFileSync(tabLog, 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => Number(line.split(' ')[1]))
+}
+
 export function cleanupRun(run: InstanceRun): void {
   rmSync(run.configDir, { recursive: true, force: true })
+}
+
+/**
+ * Holds a port the way an unrelated process would: accepting connections, answering nothing.
+ *
+ * Sockets are tracked so the port can be released afterwards - an identity probe leaves its
+ * connection open, and `close()` waits for every one of them.
+ */
+function squatPort(port: number): Promise<{ release: () => Promise<void> }> {
+  return new Promise((resolve, reject) => {
+    const sockets = new Set<net.Socket>()
+    const server = net.createServer((socket) => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+    })
+    server.once('error', reject)
+    server.listen(port, '127.0.0.1', () =>
+      resolve({
+        release: async () => {
+          for (const socket of sockets) socket.destroy()
+          await new Promise<void>((done) => server.close(() => done()))
+        },
+      }),
+    )
+  })
 }
 
 function pathToImport(p: string): string {

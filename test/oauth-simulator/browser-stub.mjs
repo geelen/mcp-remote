@@ -9,7 +9,7 @@ import { appendFileSync } from 'fs'
  * blocked would hide that ordering rather than exercise it.
  */
 export default async function open(url) {
-  appendFileSync(process.env.MCP_TEST_TAB_LOG, `${Date.now()} ${url}\n`)
+  appendFileSync(process.env.MCP_TEST_TAB_LOG, `${Date.now()} ${process.pid} ${url}\n`)
   void followLikeABrowser(url)
   // `open` resolves with the helper's ChildProcess; callers may attach listeners or unref it
   return { on() {}, once() {}, unref() {}, stderr: null, kill() {} }
