@@ -202,6 +202,15 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(mockReadTextFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`, expect.any(String))
     })
 
+    it('should not leave its verifier behind once the flow has produced tokens', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      await provider.saveTokens({ access_token: 'token', token_type: 'Bearer' } as any)
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', `code_verifier_${provider.state()}.txt`)
+      expect(vi.mocked(mcpAuthConfig.deleteStaleConfigFiles)).toHaveBeenCalledWith('test-hash', 'code_verifier_', expect.any(Number))
+    })
+
     it('should read the verifier of the flow a code came from, not its own', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
       // A tab opened by an instance the host has since stopped

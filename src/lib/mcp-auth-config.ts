@@ -78,6 +78,41 @@ export async function deleteConfigFile(serverUrlHash: string, filename: string):
 }
 
 /**
+ * Removes this server's config files with the given prefix that are older than maxAgeMs
+ *
+ * A filename carrying a one-off identifier is never written again, so abandoned ones would stay
+ * forever. The age check leaves alone any file a flow still in progress may need.
+ * @param serverUrlHash The hash of the server URL
+ * @param prefix The filename prefix to sweep
+ * @param maxAgeMs How old a file must be before it is removed
+ */
+export async function deleteStaleConfigFiles(serverUrlHash: string, prefix: string, maxAgeMs: number): Promise<void> {
+  try {
+    const configDir = getConfigDir()
+    const cutoff = Date.now() - maxAgeMs
+    const entries = await fs.readdir(configDir)
+
+    await Promise.all(
+      entries
+        .filter((entry) => entry.startsWith(`${serverUrlHash}_${prefix}`))
+        .map(async (entry) => {
+          const filePath = path.join(configDir, entry)
+          try {
+            if ((await fs.stat(filePath)).mtimeMs > cutoff) return
+            await fs.unlink(filePath)
+            debugLog(`Removed stale config file: ${entry}`)
+          } catch (error) {
+            // Another instance may be sweeping the same directory
+            debugLog(`Could not remove stale config file ${entry}`, error)
+          }
+        }),
+    )
+  } catch (error) {
+    debugLog('Could not sweep stale config files', error)
+  }
+}
+
+/**
  * Reads a JSON file and parses it with the provided schema
  * @param serverUrlHash The hash of the server URL
  * @param filename The name of the file to read
