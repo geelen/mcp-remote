@@ -185,7 +185,7 @@ export async function coordinateAuth(
 ): Promise<{ server: Server; actualPort: number; waitForAuthCode: () => Promise<string>; skipBrowserAuth: boolean }> {
   debugLog('Coordinating authentication', { serverUrlHash, callbackPath, callbackPort })
 
-  // Pinned by --port or by static client info: that exact port or nothing, since the redirect_uri
+  // Pinned by an explicit port argument or by static client info: that exact port or nothing, since the redirect_uri
   // it implies is not ours to move.
   const candidates = strictPort ? [callbackPort] : Array.from({ length: PORT_CANDIDATES }, (_, i) => callbackPort + i)
 
@@ -236,7 +236,7 @@ export async function coordinateAuth(
 
   throw new Error(
     `Could not find a free callback port for this server (tried ${candidates[0]}-${candidates[candidates.length - 1]}). ` +
-      `Close whatever is holding those ports, or pass --port to choose one.`,
+      `Close whatever is holding those ports, or pass a port as the second argument to choose one.`,
   )
 }
 
