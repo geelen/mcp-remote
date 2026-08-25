@@ -1637,13 +1637,18 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
       serverUrlHash: 'test-hash',
     })
     server = result.server
-    const waiting = result.waitForAuthCode()
+    // A handler is attached synchronously: the callback arrives during the await below, and a
+    // rejection with nothing attached yet is reported as unhandled even though it is asserted on
+    const settled = result.waitForAuthCode().then(
+      () => new Error('expected no authorization code'),
+      (error: Error) => error,
+    )
 
     const response = await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?error=access_denied&error_description=User%20denied`)
 
     expect(response.status).toBe(400)
     await expect(response.text()).resolves.toContain('User denied')
-    await expect(waiting).rejects.toThrow(/access_denied/)
+    expect((await settled).message).toMatch(/access_denied/)
   })
 
   it('answers an identity probe, so a losing instance can tell a sibling from a stranger', async () => {
