@@ -1,5 +1,6 @@
 import { readJsonFile } from './mcp-auth-config'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { OAuthTokensWithExpiresAtSchema } from './node-oauth-client-provider'
 import { EventEmitter } from 'events'
 import { Server } from 'http'
 import express from 'express'
@@ -66,36 +67,6 @@ export function createLazyAuthCoordinator(
 }
 
 /**
- * Waits for the primary instance to persist the tokens it obtained.
- *
- * The owner's callback server receives a code strictly before it has exchanged it for
- * authorization code, which is strictly earlier than the code being exchanged and the result
- * written to disk. Reconnecting in that window reads no tokens and 401s again, so poll for the
- * file rather than guessing at a fixed delay.
- *
- * @param serverUrlHash The hash of the server URL
- * @returns True if tokens showed up before the timeout
- */
-export async function waitForTokensFromPrimary(serverUrlHash: string, timeoutMs = TOKEN_HANDOFF_TIMEOUT_MS): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-
-  while (true) {
-    const tokens = await readJsonFile(serverUrlHash, 'tokens.json', OAuthTokensSchema)
-    if (tokens) {
-      debugLog('Tokens from the primary instance are on disk')
-      return true
-    }
-
-    if (Date.now() >= deadline) {
-      log(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for the other instance to write its tokens`)
-      return false
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, TOKEN_HANDOFF_POLL_INTERVAL_MS))
-  }
-}
-
-/**
  * Coordinates authentication between multiple instances of the client/proxy
  * @param serverUrlHash The hash of the server URL
  * @param callbackPath The path to serve the callback endpoint on
@@ -154,9 +125,25 @@ export async function serverIssuesAuthChallenge(serverUrl: string, headers: Reco
   }
 }
 
-/** Whether a usable access token is already on disk, so no sign-in is needed at all. */
+/**
+ * Whether the tokens on disk make a browser sign-in unnecessary.
+ *
+ * Not simply "a token exists": an expired one with a refresh token is renewed without the
+ * browser, while an expired one without is exactly the case that needs a flow - and treating it
+ * as usable is what let every instance skip coordination on re-authentication and open its own
+ * tab, which is the storm of login windows people report after a token lapses.
+ */
 export async function hasUsableTokens(serverUrlHash: string): Promise<boolean> {
-  return tokensOnDisk(serverUrlHash)
+  const tokens = await readJsonFile<{ expires_at?: number; refresh_token?: string }>(
+    serverUrlHash,
+    'tokens.json',
+    OAuthTokensWithExpiresAtSchema,
+  )
+  if (!tokens) return false
+  if (tokens.expires_at && Date.now() >= tokens.expires_at - TOKEN_EXPIRY_MARGIN_MS) {
+    return !!tokens.refresh_token
+  }
+  return true
 }
 
 /** Tokens another instance has already obtained, if they are on disk and usable. */
@@ -164,6 +151,9 @@ async function tokensOnDisk(serverUrlHash: string): Promise<boolean> {
   const tokens = await readJsonFile(serverUrlHash, 'tokens.json', OAuthTokensSchema)
   return !!tokens
 }
+
+/** Treat a token about to expire as expired, matching the provider's own refresh margin. */
+const TOKEN_EXPIRY_MARGIN_MS = 60_000
 
 /**
  * Takes ownership of a server's OAuth flow, or waits for whoever has it.
