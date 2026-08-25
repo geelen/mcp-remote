@@ -1023,7 +1023,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     const value = args[callbackPathIndex + 1]
     if (!value.startsWith('/')) {
       log(`Warning: Ignoring invalid callback path: ${value}. It must start with '/'.`)
-    } else if (value === LONG_POLL_PATH) {
+    } else if (value === LONG_POLL_PATH || value === MCP_REMOTE_ID_PATH) {
       log(`Warning: Ignoring reserved callback path: ${value}. It is used to coordinate concurrent instances.`)
     } else {
       callbackPath = value

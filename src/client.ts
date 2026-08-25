@@ -106,9 +106,10 @@ async function runClient(
     // Store server in outer scope for cleanup
     server = authState.server
 
-    // The owner may have settled on a later candidate port because strangers held earlier ones.
-    // Every instance for this server converges on the same one, so the cached registration still
-    // matches and there is nothing to invalidate.
+    // A stranger on an earlier candidate can push us onto a later port than the one the startup
+    // check compared the cached registration against, so a stale registration can still name the
+    // wrong redirect_uri here. Invalidating unconditionally is not the answer - this runs again on
+    // the post-auth reconnect, and deleting the registration then breaks the code exchange.
     if (authState.actualPort !== callbackPort) {
       log(`Using callback port ${authState.actualPort}`)
       authProvider.setCallbackPort(authState.actualPort)
