@@ -6,10 +6,10 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
+import { type OAuthProviderOptions, type StaticOAuthClientInformationFull, type StaticOAuthClientMetadata } from './types'
+import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
 import { openBrowser } from './open-browser'
-import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
@@ -37,6 +37,25 @@ const CODE_VERIFIER_PREFIX = 'code_verifier_'
 /** How long a flow may still be in progress, and its verifier still needed. */
 const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
 
+type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
+
+function staleClientRegistrationError(value: unknown): InvalidClientError | UnauthorizedClientError | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const response = value as Record<string, unknown>
+  const message =
+    typeof response.error_description === 'string' ? response.error_description : 'Cached OAuth client registration is no longer valid'
+  if (response.error === 'invalid_client') {
+    return new InvalidClientError(message)
+  }
+  if (response.error === 'unauthorized_client') {
+    return new UnauthorizedClientError(message)
+  }
+  return undefined
+}
+
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
  * Handles OAuth flow and token storage for MCP clients.
@@ -59,6 +78,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   validateResourceURL?: (defaultResource: URL, discoveredResource?: string) => Promise<URL | undefined>
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
+  private clientRegistrationSource: ClientRegistrationSource
   private incomingState: string | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
@@ -84,6 +104,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.skipResourceParameter = options.skipResourceParameter ?? false
     this._state = randomUUID()
     this._clientInfo = undefined
+    this.clientRegistrationSource = undefined
     this.authorizationServerMetadata = options.authorizationServerMetadata
     this.protectedResourceMetadata = options.protectedResourceMetadata
     this.wwwAuthenticateScope = options.wwwAuthenticateScope
@@ -221,6 +242,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
       this._clientInfo = this.staticOAuthClientInfo
+      this.clientRegistrationSource = 'static'
       return this.staticOAuthClientInfo
     }
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
@@ -231,6 +253,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     if (clientInfo) {
       this._clientInfo = clientInfo
+      if (this.clientRegistrationSource !== 'fresh-dynamic') {
+        this.clientRegistrationSource = 'cached-dynamic'
+      }
     }
 
     debugLog('Client info result:', clientInfo ? 'Found' : 'Not found')
@@ -244,6 +269,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
     debugLog('Saving client info', { client_id: clientInformation.client_id })
     this._clientInfo = clientInformation
+    this.clientRegistrationSource = 'fresh-dynamic'
     await writeJsonFile(this.serverUrlHash, 'client_info.json', clientInformation)
   }
 
@@ -430,11 +456,50 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
+    await this.preflightCachedDynamicClientRegistration(authorizationUrl)
+
     if (await openBrowser(sanitizeUrl(authorizationUrl.toString()))) {
       log('Browser opened automatically.')
     } else {
       log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
     }
+  }
+
+  private async preflightCachedDynamicClientRegistration(authorizationUrl: URL): Promise<void> {
+    if (this.clientRegistrationSource !== 'cached-dynamic') {
+      return
+    }
+
+    let response: Response
+    try {
+      response = await fetch(authorizationUrl.toString(), {
+        redirect: 'manual',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      })
+    } catch (error) {
+      debugLog('Authorization preflight failed; continuing to browser authorization', error)
+      return
+    }
+
+    if (response.status !== 400 && response.status !== 401) {
+      return
+    }
+
+    let errorResponse: unknown
+    try {
+      errorResponse = await response.json()
+    } catch (error) {
+      debugLog('Authorization preflight returned invalid JSON; continuing to browser authorization', error)
+      return
+    }
+
+    const registrationError = staleClientRegistrationError(errorResponse)
+    if (!registrationError) {
+      return
+    }
+
+    throw registrationError
   }
 
   /**
@@ -499,12 +564,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
           deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState)),
         ])
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
         debugLog('All credentials invalidated')
         break
 
       case 'client':
         await deleteConfigFile(this.serverUrlHash, 'client_info.json')
         this._clientInfo = undefined
+        this.clientRegistrationSource = undefined
         debugLog('Client information invalidated')
         break
 
