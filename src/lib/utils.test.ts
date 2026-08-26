@@ -198,6 +198,57 @@ describe('Feature: Command Line Arguments Parsing', () => {
     logSpy.mockRestore()
   })
 
+  it('Scenario: Read headers from a file', async () => {
+    // Given a header file, which is how you keep a credential out of the process arguments
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-remote-headers-'))
+    const file = path.join(dir, 'headers.txt')
+    fs.writeFileSync(
+      file,
+      ['# credentials for the example server', 'Authorization: Bearer secret-token', 'X-Tenant:acme', '', '  '].join('\n'),
+    )
+
+    const result = await parseCommandLineArgs(['https://example.remote/server', '--header-file', file], 'usage')
+
+    // Then comments and blank lines are skipped, and values are trimmed as --header trims them
+    expect(result.headers).toEqual({ Authorization: 'Bearer secret-token', 'X-Tenant': 'acme' })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('Scenario: A header file that cannot be read is fatal', async () => {
+    // Carrying on would send the request unauthenticated and surface far from the real mistake
+    await expect(parseCommandLineArgs(['https://example.remote/server', '--header-file', '/nope/missing.txt'], 'usage')).rejects.toThrow(
+      /Could not read the header file/,
+    )
+  })
+
+  it('Scenario: A malformed line in a header file is reported without its contents', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-remote-headers-'))
+    const file = path.join(dir, 'headers.txt')
+    fs.writeFileSync(file, ['Authorization Bearer super-secret', 'X-Ok: fine'].join('\n'))
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => void logged.push(a.join(' ')))
+
+    const result = await parseCommandLineArgs(['https://example.remote/server', '--header-file', file], 'usage')
+
+    // The good line still loads, and the bad one is named by line number - it is where a
+    // credential would be if someone forgot the colon
+    expect(result.headers).toEqual({ 'X-Ok': 'fine' })
+    expect(logged.join('\n')).toContain('line 1')
+    expect(logged.join('\n')).not.toContain('super-secret')
+    spy.mockRestore()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('Scenario: A malformed --header argument is reported without its value', async () => {
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => void logged.push(a.join(' ')))
+
+    await parseCommandLineArgs(['https://example.remote/server', '--header', 'Authorization Bearer super-secret'], 'usage')
+
+    expect(logged.join('\n')).not.toContain('super-secret')
+    spy.mockRestore()
+  })
+
   it('Scenario: Ignore invalid header format', async () => {
     // Given command line arguments with an invalid header format
     const args = ['https://example.com/sse', '--header', 'invalid-header-format']

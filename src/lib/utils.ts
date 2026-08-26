@@ -1181,6 +1181,49 @@ export function parseSecondsOption(args: string[], flag: string, { allowZero = f
   return Math.round(seconds * 1000)
 }
 
+/** Splits `Name: value` into its parts, or undefined if it is not that shape. */
+function parseHeaderLine(line: string): { name: string; value: string } | undefined {
+  const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
+  return match ? { name: match[1], value: match[2] } : undefined
+}
+
+/**
+ * Reads headers from a file, one `Name: value` per line, `#` for comments.
+ *
+ * A file exists to keep credentials out of the process arguments, where every other user on the
+ * machine can read them - so a file named but unreadable is fatal rather than a warning. Carrying
+ * on would send the request without its credentials and turn a typo in a path into an
+ * authorization error somewhere much less obvious.
+ *
+ * @param filePath The file to read
+ * @returns The headers it declares
+ */
+async function readHeaderFile(filePath: string): Promise<Record<string, string>> {
+  let contents: string
+  try {
+    contents = await readFile(filePath, 'utf8')
+  } catch (error) {
+    throw new Error(`Could not read the header file ${filePath}: ${(error as Error).message}`)
+  }
+
+  const headers: Record<string, string> = {}
+  contents.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) return
+
+    const parsed = parseHeaderLine(trimmed)
+    // By line number, never by content - these lines are exactly where the secrets are
+    if (!parsed) {
+      log(`Warning: ignoring line ${index + 1} of ${filePath}, which is not in Name:Value form`)
+      return
+    }
+    headers[parsed.name] = parsed.value
+  })
+
+  log(`Loaded ${Object.keys(headers).length} header(s) from ${filePath}`)
+  return headers
+}
+
 export async function parseCommandLineArgs(args: string[], usage: string) {
   if (args.includes('--help') || args.includes('-h')) {
     process.stdout.write(`${usage}\n`)
@@ -1200,14 +1243,18 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
   while (i < args.length) {
     if (args[i] === '--header' && i < args.length - 1) {
       const value = args[i + 1]
-      const match = value.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
-      if (match) {
-        headers[match[1]] = match[2]
-      } else {
-        log(`Warning: ignoring invalid header argument: ${value}`)
-      }
+      const parsed = parseHeaderLine(value)
+      // Never the argument itself: a header that failed to parse is usually one whose value
+      // contains something unexpected, and the value is a credential more often than not.
+      if (parsed) headers[parsed.name] = parsed.value
+      else log('Warning: ignoring a --header argument that is not in Name:Value form')
       args.splice(i, 2)
       // Do not increment i, as the array has shifted
+      continue
+    }
+    if (args[i] === '--header-file' && i < args.length - 1) {
+      Object.assign(headers, await readHeaderFile(args[i + 1]))
+      args.splice(i, 2)
       continue
     }
     i++
