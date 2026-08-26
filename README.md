@@ -430,3 +430,7 @@ npx -p mcp-remote@latest mcp-remote-client https://remote.mcp.server/sse
 ```
 
 This will run through the entire authorization flow and attempt to list the tools & resources at the remote URL. Try this after running `rm -rf ~/.mcp-auth` to see if stale credentials are your problem, otherwise hopefully the issue will be more obvious in these logs than those in your MCP client.
+
+## Acknowledgments
+
+[Glen Maddern](https://github.com/geelen) is the original author of `mcp-remote`. He built `mcp-remote` into one of the most popular building blocks in the MCP ecosystem.
