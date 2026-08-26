@@ -92,6 +92,7 @@ export function log(str: string, ...rest: unknown[]) {
 
 type Message = any
 const MESSAGE_BLOCKED = Symbol('MessageBlocked')
+
 const isMessageBlocked = (value: any): value is typeof MESSAGE_BLOCKED => value === MESSAGE_BLOCKED
 
 export function createMessageTransformer({
@@ -101,22 +102,50 @@ export function createMessageTransformer({
   transformRequestFunction?: null | ((request: Message) => Message | typeof MESSAGE_BLOCKED)
   transformResponseFunction?: null | ((request: Message, response: Message) => Message)
 } = {}) {
-  const pendingRequests = new Map<string, Message>()
+  const pendingRequests = new Map<string | number, Message>()
+
+  /**
+   * A request is the only thing worth remembering, and the only thing worth pairing a response to.
+   *
+   * Both directions carry messages with an `id` that are *not* requests - a response the client
+   * sends back to a server-initiated call, for one - and the two directions number their requests
+   * independently, so recording those would let one side's id collide with the other's and pair a
+   * response with a message that never asked for it.
+   */
+  const isRequest = (message: Message) => message?.id != null && message.method !== undefined
+  const isResponse = (message: Message) => message?.id != null && message.method === undefined
+
+  /**
+   * Runs a transform, falling back to the untouched message if it throws.
+   *
+   * A transform is a convenience; delivery is not. Letting one throw here would abort the
+   * `onmessage` handler that was about to forward the message, so a client would be left waiting
+   * on a request that was in fact answered (see https://github.com/geelen/mcp-remote/issues/310).
+   */
+  const applyTransform = (transform: () => Message, message: Message) => {
+    try {
+      return transform()
+    } catch (error) {
+      log('Error transforming message, forwarding it unchanged:', error)
+      debugLog('Message transform failed', { id: message?.id, method: message?.method, error })
+      return message
+    }
+  }
 
   const interceptRequest = (message: Message) => {
-    const messageId = message.id
-    if (!messageId) return message
-    pendingRequests.set(messageId, message)
-    return transformRequestFunction?.(message) ?? message
+    if (!isRequest(message)) return message
+    pendingRequests.set(message.id, message)
+    if (!transformRequestFunction) return message
+    return applyTransform(() => transformRequestFunction(message) ?? message, message)
   }
 
   const interceptResponse = (message: Message) => {
-    const messageId = message.id
-    if (!messageId) return message
-    const originalRequest = pendingRequests.get(messageId)
+    if (!isResponse(message)) return message
+    const originalRequest = pendingRequests.get(message.id)
     if (!originalRequest) return message
-    pendingRequests.delete(messageId)
-    return transformResponseFunction?.(originalRequest, message) ?? message
+    pendingRequests.delete(message.id)
+    if (!transformResponseFunction) return message
+    return applyTransform(() => transformResponseFunction(originalRequest, message) ?? message, message)
   }
 
   return {
@@ -168,16 +197,20 @@ export function mcpProxy({
       return request
     },
     transformResponseFunction: (req: Message, res: Message) => {
-      if (req.method === 'tools/list') {
-        return {
-          ...res,
-          result: {
-            ...res.result,
-            tools: res.result.tools.filter((tool: any) => shouldIncludeTool(ignoredTools, tool.name)),
-          },
-        }
+      if (req.method !== 'tools/list') return res
+      // Not every answer to tools/list carries a tool list: a JSON-RPC error response has no
+      // `result` at all, and a server may answer with one that omits `tools`. Filtering either
+      // used to throw, and the throw took the forward down with it, so the client was left with
+      // no answer rather than the error the server actually sent (see issues #164 and #310).
+      const tools = res.result?.tools
+      if (!Array.isArray(tools)) return res
+      return {
+        ...res,
+        result: {
+          ...res.result,
+          tools: tools.filter((tool: any) => shouldIncludeTool(ignoredTools, tool.name)),
+        },
       }
-      return res
     },
   })
 

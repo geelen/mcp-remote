@@ -656,6 +656,16 @@ describe('Feature: Tool Filtering with Ignore Patterns', () => {
 })
 
 describe('Feature: MCP Proxy', () => {
+  const mockTransport = () =>
+    ({
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    }) as unknown as Transport
+
   it('Scenario: Proxy initialize message from client to server', async () => {
     // Given mock transports for client and server
     const mockTransportToClient = {
@@ -1051,6 +1061,93 @@ describe('Feature: MCP Proxy', () => {
             { name: 'listTasks', description: 'List all tasks' },
           ],
         },
+      }),
+    )
+  })
+
+  it('Scenario: Forward an error response to tools/list instead of dropping it', async () => {
+    // Given a proxy between mock transports
+    const mockTransportToClient = mockTransport()
+    const mockTransportToServer = mockTransport()
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: ['delete*'],
+    })
+
+    // And a tools/list request from the client
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', id: 2, method: 'tools/list' } as any)
+
+    // When the server answers it with a JSON-RPC error rather than a result
+    mockTransportToServer.onmessage!({
+      jsonrpc: '2.0',
+      id: 2,
+      error: { code: -32600, message: 'Session not initialized' },
+    } as any)
+
+    // Then the error reaches the client, rather than the request going unanswered
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 2,
+        error: { code: -32600, message: 'Session not initialized' },
+      }),
+    )
+  })
+
+  it('Scenario: Forward a tools/list result that carries no tools', async () => {
+    // Given a proxy between mock transports
+    const mockTransportToClient = mockTransport()
+    const mockTransportToServer = mockTransport()
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: ['delete*'],
+    })
+
+    // And a tools/list request from the client
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', id: 3, method: 'tools/list' } as any)
+
+    // When the server answers with a result that omits the tools array
+    mockTransportToServer.onmessage!({ jsonrpc: '2.0', id: 3, result: {} } as any)
+
+    // Then the result is forwarded untouched
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: 3, result: {} }))
+  })
+
+  it('Scenario: A server-initiated request does not consume a pending request with the same id', async () => {
+    // Given a proxy between mock transports
+    const mockTransportToClient = mockTransport()
+    const mockTransportToServer = mockTransport()
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: ['delete*'],
+    })
+
+    // And an in-flight tools/list request from the client
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', id: 1, method: 'tools/list' } as any)
+
+    // When the server sends a request of its own that happens to reuse id 1, the two directions
+    // numbering their requests independently
+    mockTransportToServer.onmessage!({ jsonrpc: '2.0', id: 1, method: 'ping' } as any)
+
+    // Then the ping reaches the client untouched
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: 1, method: 'ping' }))
+
+    // And the client's request is still pending, so its real answer is filtered as configured
+    mockTransportToServer.onmessage!({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { tools: [{ name: 'deleteTask' }, { name: 'listTasks' }] },
+    } as any)
+
+    expect(mockTransportToClient.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 1,
+        result: { tools: [{ name: 'listTasks' }] },
       }),
     )
   })
