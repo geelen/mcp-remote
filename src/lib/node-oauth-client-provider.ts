@@ -418,13 +418,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       // Ignore errors, metadata is optional
     })
 
-    const effectiveScope = this.getEffectiveScope()
-    if (effectiveScope) {
-      authorizationUrl.searchParams.set('scope', effectiveScope)
-      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
-    } else {
-      debugLog('Omitting scope parameter from authorization URL (no effective scope)')
-    }
+    this.applyScope(authorizationUrl)
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
@@ -434,6 +428,46 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       log('Browser opened automatically.')
     } else {
       log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
+    }
+  }
+
+  /**
+   * Decides which scope the authorization request asks for.
+   *
+   * The SDK has already put one on the URL, picked - in its order - from a scope it parsed out of a
+   * live `WWW-Authenticate` challenge, the protected resource's `scopes_supported`, or the `scope`
+   * in our own client metadata. The last two originate here, and this client's priority order for
+   * them is not the SDK's, so they are replaced with what `getEffectiveScope` decided.
+   *
+   * A challenge scope does not originate here, and replacing it defeated the one thing it is for: a
+   * 403 `insufficient_scope` names the scopes the call actually needed, the SDK re-runs
+   * authorization asking for them, and overwriting them here re-requested exactly the scope that
+   * had just been refused - so it was refused again and the SDK gave up with "Server returned 403
+   * after trying upscoping" (see https://github.com/geelen/mcp-remote/issues/134).
+   *
+   * A scope the user pinned with `--static-oauth-client-metadata` still wins over both. They set it
+   * because the scopes the server advertises do not work for them, and a challenge is the server
+   * advertising them again.
+   *
+   * @param authorizationUrl The authorization URL to set the scope on, modified in place
+   */
+  private applyScope(authorizationUrl: URL): void {
+    const effectiveScope = this.getEffectiveScope()
+    const requestedScope = authorizationUrl.searchParams.get('scope')
+    const pinnedByUser = !!this.staticOAuthClientMetadata?.scope?.trim()
+    const couldBeOurs = [effectiveScope, this.protectedResourceMetadata?.scopes_supported?.join(' ')]
+
+    if (!pinnedByUser && requestedScope && !couldBeOurs.includes(requestedScope)) {
+      log(`Authorizing with the scope the server asked for: ${requestedScope}`)
+      debugLog('Keeping a scope this client did not supply', { scope: requestedScope, effectiveScope })
+      return
+    }
+
+    if (effectiveScope) {
+      authorizationUrl.searchParams.set('scope', effectiveScope)
+      debugLog('Added scope parameter to authorization URL', { scopes: effectiveScope })
+    } else {
+      debugLog('Omitting scope parameter from authorization URL (no effective scope)')
     }
   }
 
