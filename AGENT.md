@@ -3,9 +3,10 @@
 ## Commands
 
 - **Build**: `pnpm build` (or `pnpm build:watch` for development)
-- **Type check**: `pnpm check` (runs prettier and tsc)
-- **Lint/Format**: `pnpm lint-fix` (prettier with write)
-- **Test**: `pnpm test:unit` (or `pnpm test:unit:watch` for watch mode)
+- **Lint + type check**: `pnpm lint` (`prettier --check .` then `tsc`) - this is the check, and it is what CI runs
+- **Format**: `pnpm format` (`prettier --write .`) - this is the one that writes
+- **Test**: `pnpm test` (or `pnpm test:watch` for watch mode)
+- **E2E**: `cd test && pnpm install && pnpm test` - hits live third-party MCP servers, and gates merges in CI
 - **Run dev**: `npx tsx src/client.ts` or `npx tsx src/proxy.ts`
 
 ## Architecture
@@ -14,7 +15,7 @@
 - **Main Binaries**: `mcp-remote` (proxy.ts), `mcp-remote-client` (client.ts)
 - **Core Libraries**: `/src/lib/` contains auth coordination, OAuth client, utils, types
 - **Transport**: Supports both HTTP and SSE transports with OAuth authentication
-- **Config**: Uses `~/.mcp-auth/` directory for credential storage
+- **Config**: Credentials live in `~/.mcp-auth/mcp-remote-{version}/`, keyed by a hash of the server URL. `MCP_REMOTE_CONFIG_DIR` overrides the base directory, not the version subdirectory
 
 ## Code Style
 
