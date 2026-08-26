@@ -251,6 +251,33 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* To change the network timeouts, add `--connect-timeout`, `--headers-timeout` or `--body-timeout`, each with a value in seconds. These apply to every outbound request, including the OAuth ones.
+
+  * `--connect-timeout` bounds establishing the TCP connection (default `10`). Lower it to fail faster on an unreachable server.
+  * `--headers-timeout` bounds waiting for response headers (default `300`).
+  * `--body-timeout` bounds a gap between chunks of a response body (default `300`). This is the one that closes an idle SSE stream after five minutes; pass `0` to disable it for servers that push infrequently.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--connect-timeout",
+        "30",
+        "--body-timeout",
+        "0"
+      ]
+```
+
+* To connect over IPv4 only, add the `--ipv4` flag. Useful when a hostname resolves to both IPv4 and IPv6 addresses but the IPv6 routes silently black-hole rather than being refused — connection attempts then time out instead of failing over, and the request never completes.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--ipv4"
+      ]
+```
+
 ### Transport Strategies
 
 MCP Remote supports different transport strategies when connecting to an MCP server. This allows you to control whether it uses Server-Sent Events (SSE) or HTTP transport, and in what order it tries them.

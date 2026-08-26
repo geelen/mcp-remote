@@ -22,7 +22,7 @@ import fs from 'fs'
 import { readFile, rm } from 'fs/promises'
 import path from 'path'
 import { version as MCP_REMOTE_VERSION } from '../../package.json'
-import { EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
+import { Agent, EnvHttpProxyAgent, fetch, Headers, RequestInit, setGlobalDispatcher } from 'undici'
 
 // Global type declaration for typescript
 declare global {
@@ -1073,6 +1073,35 @@ export function calculateDefaultPort(serverUrlHash: string): number {
  * @param usage Usage message to show on error
  * @returns A promise that resolves to an object with parsed serverUrl, callbackPort and headers
  */
+/** The subset of undici dispatcher options this CLI exposes. Shared by both agent flavours. */
+type DispatcherOptions = {
+  connect?: { timeout?: number; family?: number }
+  bodyTimeout?: number
+  headersTimeout?: number
+}
+
+/**
+ * Reads a flag whose value is a duration in seconds, and returns it in milliseconds.
+ *
+ * @param args The command line arguments
+ * @param flag The flag to read
+ * @param options Whether zero is meaningful for this flag - for the timeouts it means "no timeout"
+ * @returns The duration in milliseconds, or undefined if the flag was absent or unusable
+ */
+export function parseSecondsOption(args: string[], flag: string, { allowZero = false } = {}): number | undefined {
+  const index = args.indexOf(flag)
+  if (index === -1 || index >= args.length - 1) return undefined
+
+  const raw = args[index + 1]
+  const seconds = Number(raw)
+  if (!Number.isFinite(seconds) || seconds < 0 || (seconds === 0 && !allowZero)) {
+    log(`Warning: Ignoring invalid ${flag} value: ${raw}. Must be a ${allowZero ? 'non-negative' : 'positive'} number of seconds.`)
+    return undefined
+  }
+
+  return Math.round(seconds * 1000)
+}
+
 export async function parseCommandLineArgs(args: string[], usage: string) {
   if (args.includes('--help') || args.includes('-h')) {
     process.stdout.write(`${usage}\n`)
@@ -1123,11 +1152,42 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log('Silent mode enabled - stderr output will be suppressed, except when --debug is also enabled')
   }
 
+  // Network tuning. These land on the global undici dispatcher, which both our own `fetch` and the
+  // SDK's `globalThis.fetch` resolve through - the slot is keyed by a registered symbol, so the two
+  // undici copies share it. Without a dispatcher there is no way to reach these settings at all,
+  // which is why people have been patching them in with NODE_OPTIONS (see issues #107 and #263).
+  const connectTimeoutMs = parseSecondsOption(args, '--connect-timeout')
+  const bodyTimeoutMs = parseSecondsOption(args, '--body-timeout', { allowZero: true })
+  const headersTimeoutMs = parseSecondsOption(args, '--headers-timeout', { allowZero: true })
+  const forceIpv4 = args.includes('--ipv4')
+
+  const dispatcherOptions: DispatcherOptions = {}
+  if (connectTimeoutMs !== undefined || forceIpv4) {
+    dispatcherOptions.connect = {
+      ...(connectTimeoutMs !== undefined ? { timeout: connectTimeoutMs } : {}),
+      // Happy-eyeballs tries every A and AAAA record it gets back. On a network where the IPv6
+      // routes are black holes rather than refusals, those attempts time out instead of failing
+      // fast and take the whole request with them, even though the IPv4 addresses are reachable.
+      ...(forceIpv4 ? { family: 4 } : {}),
+    }
+  }
+  if (bodyTimeoutMs !== undefined) dispatcherOptions.bodyTimeout = bodyTimeoutMs
+  if (headersTimeoutMs !== undefined) dispatcherOptions.headersTimeout = headersTimeoutMs
+
+  if (forceIpv4) log('Restricting connections to IPv4')
+  if (connectTimeoutMs !== undefined) log(`Using connect timeout: ${connectTimeoutMs / 1000} seconds`)
+  if (bodyTimeoutMs !== undefined) log(`Using body timeout: ${bodyTimeoutMs === 0 ? 'disabled' : `${bodyTimeoutMs / 1000} seconds`}`)
+  if (headersTimeoutMs !== undefined) {
+    log(`Using headers timeout: ${headersTimeoutMs === 0 ? 'disabled' : `${headersTimeoutMs / 1000} seconds`}`)
+  }
+
   const enableProxy = args.includes('--enable-proxy')
   if (enableProxy) {
     // Use env proxy
-    setGlobalDispatcher(new EnvHttpProxyAgent())
+    setGlobalDispatcher(new EnvHttpProxyAgent(dispatcherOptions))
     log('HTTP proxy support enabled - using system HTTP_PROXY/HTTPS_PROXY environment variables')
+  } else if (Object.keys(dispatcherOptions).length > 0) {
+    setGlobalDispatcher(new Agent(dispatcherOptions))
   }
 
   // Parse transport strategy
