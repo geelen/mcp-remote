@@ -6,8 +6,10 @@ import {
   setupOAuthCallbackServerWithLongPoll,
   getServerUrlHash,
   calculateDefaultPort,
+  mergeHeaders,
   MCP_REMOTE_VERSION,
 } from './utils'
+import { Headers as UndiciHeaders } from 'undici'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { EventEmitter } from 'events'
@@ -1841,6 +1843,52 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     } finally {
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
     }
+  })
+})
+
+describe('Feature: Merging headers for the SSE request', () => {
+  it('Scenario: Keep the headers the SDK set, whichever Headers class built them', () => {
+    // Given headers from the SDK, which builds them with the global class rather than undici's
+    const fromSdk = new globalThis.Headers({ 'mcp-protocol-version': '2025-06-18' })
+
+    // When they are merged
+    const merged = mergeHeaders(fromSdk, { Accept: 'text/event-stream' })
+
+    // Then they survive, rather than being spread away to nothing
+    expect(merged).toEqual({ 'mcp-protocol-version': '2025-06-18', Accept: 'text/event-stream' })
+  })
+
+  it('Scenario: Accept undici Headers just the same', () => {
+    const merged = mergeHeaders(new UndiciHeaders({ 'x-from-undici': 'yes' }))
+
+    expect(merged).toEqual({ 'x-from-undici': 'yes' })
+  })
+
+  it('Scenario: One header per name, however its writers spelled it', () => {
+    // Given the same header arriving in two cases, as it does when the SDK's lowercased
+    // `authorization` meets the `Authorization` added alongside it
+    const merged = mergeHeaders(new globalThis.Headers({ authorization: 'Bearer stale' }), { Authorization: 'Bearer fresh' })
+
+    // Then only the later one is sent. Emitting both would have fetch join them into
+    // "Bearer stale, Bearer fresh", which no server accepts.
+    expect(Object.keys(merged)).toEqual(['Authorization'])
+    expect(merged.Authorization).toBe('Bearer fresh')
+  })
+
+  it('Scenario: A custom header keeps the case it was written in', () => {
+    // Given a server that matches its header names case-sensitively
+    const merged = mergeHeaders(new globalThis.Headers({ accept: 'text/event-stream' }), { Company: 'ACME', TenantId: 'abc' })
+
+    // Then --header values are passed on spelled the way the user spelled them
+    expect(merged.Company).toBe('ACME')
+    expect(merged.TenantId).toBe('abc')
+  })
+
+  it('Scenario: Accept the other shapes fetch allows', () => {
+    expect(mergeHeaders(undefined)).toEqual({})
+    expect(mergeHeaders({ a: '1' }, undefined, { b: '2' })).toEqual({ a: '1', b: '2' })
+    // An array of pairs, whose own `entries()` would yield [index, pair] if it were treated as iterable
+    expect(mergeHeaders([['x-pair', 'value']])).toEqual({ 'x-pair': 'value' })
   })
 })
 
