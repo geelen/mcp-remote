@@ -72,6 +72,25 @@ To bypass authentication, or to emit custom headers on all requests to your remo
 },
 ```
 
+To keep a credential out of the process arguments — where any other user on the machine can read it from the process list — put the headers in a file instead and pass `--header-file`. One `Name: value` per line; `#` starts a comment.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--header-file",
+        "/path/to/headers.txt"
+      ]
+```
+
+```
+# credentials for the example server
+Authorization: Bearer my-token
+X-Custom-Header: custom-value
+```
+
+A file that cannot be read is an error rather than a warning, so a mistyped path fails immediately instead of sending the request unauthenticated.
+
 ### Multiple Instances
 
 To run multiple instances of the same remote server with different configurations (e.g., different Atlassian tenants), use the `--resource` flag to isolate OAuth sessions:
