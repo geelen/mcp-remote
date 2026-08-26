@@ -26,6 +26,8 @@ import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './pro
  */
 export const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
   expires_at: z.coerce.number().optional(),
+  /** The scope this client asked for when the token was obtained. See {@link scopeRequestChanged}. */
+  requested_scope: z.string().optional(),
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
@@ -296,6 +298,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     const tokens = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
 
+    if (tokens && this.scopeRequestChanged(tokens)) {
+      log('The scopes this client asks for have changed since it signed in; signing in again')
+      debugLog('Discarding a token obtained for a different scope request', {
+        obtainedFor: tokens.requested_scope,
+        nowRequesting: this.getEffectiveScope(),
+      })
+      await this.invalidateCredentials('tokens')
+      return undefined
+    }
+
     if (tokens) {
       const timeLeft = tokens.expires_in || 0
 
@@ -339,6 +351,26 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     return tokens
+  }
+
+  /**
+   * Whether this run is asking for something different from what the stored token was obtained for.
+   *
+   * Compares request against request, deliberately, not against what the server granted. An
+   * authorization server may grant *less* than it was asked for (RFC 6749 3.3), and treating that
+   * as a reason to sign in again is a loop with nothing to break it: the next sign-in returns the
+   * same narrower grant, which is rejected the same way. Comparing the two requests only fires
+   * when the configuration actually changed - a scope added to `--static-oauth-client-metadata`,
+   * say - and then only once, because the new token records the new request.
+   *
+   * A token stored before this was recorded has no request to compare, and is left alone.
+   *
+   * @param tokens The tokens read from disk
+   * @returns True if a fresh authorization is needed to cover what is being asked for now
+   */
+  private scopeRequestChanged(tokens: OAuthTokensWithExpiresAt): boolean {
+    if (tokens.requested_scope === undefined) return false
+    return tokens.requested_scope !== this.getEffectiveScope()
   }
 
   /**
@@ -481,6 +513,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const tokensToSave: OAuthTokensWithExpiresAt = {
       ...tokens,
       expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
+      requested_scope: this.getEffectiveScope(),
     }
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)

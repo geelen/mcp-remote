@@ -321,6 +321,63 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('a changed scope request', () => {
+    const storedWith = (requested_scope: string | undefined) => {
+      mockReadJsonFile.mockResolvedValue({
+        access_token: 'at',
+        refresh_token: 'rt',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        ...(requested_scope === undefined ? {} : { requested_scope }),
+      })
+    }
+
+    it('signs in again when a scope is added to the configuration', async () => {
+      // Given a token obtained when only read access was configured
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, staticOAuthClientMetadata: { scope: 'a.read a.write' } as any })
+      storedWith('a.read')
+
+      // Then it is discarded, so the next flow asks for both
+      await expect(provider.tokens()).resolves.toBeUndefined()
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+    })
+
+    it('keeps a token the server granted less scope than we asked for', async () => {
+      // Given a server that granted a subset, which RFC 6749 3.3 permits
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, staticOAuthClientMetadata: { scope: 'a.read a.write' } as any })
+      mockReadJsonFile.mockResolvedValue({
+        access_token: 'at',
+        refresh_token: 'rt',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: 'a.read',
+        requested_scope: 'a.read a.write',
+      })
+
+      // Then nothing is discarded. Signing in again would return the same narrower grant, so
+      // treating it as a reason to retry is a loop with nothing to end it.
+      await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'at' })
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('reuses a token when the configuration has not changed', async () => {
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, staticOAuthClientMetadata: { scope: 'a.read' } as any })
+      storedWith('a.read')
+
+      await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'at' })
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('leaves a token stored before this was recorded alone', async () => {
+      // Nobody should be signed out by upgrading
+      provider = new NodeOAuthClientProvider({ ...defaultOptions, staticOAuthClientMetadata: { scope: 'a.read' } as any })
+      storedWith(undefined)
+
+      await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'at' })
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+  })
+
   describe('token exchange loop protection', () => {
     const anAccessToken = { access_token: 'at', token_type: 'Bearer', expires_in: 3600 } as any
 
