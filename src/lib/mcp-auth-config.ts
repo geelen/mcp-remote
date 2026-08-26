@@ -17,69 +17,14 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
  *   - Format: OAuthClientInformation object with client_id and other registration details
  * - {server_hash}_tokens.json: Contains OAuth access and refresh tokens
  *   - Format: OAuthTokens object with access_token, refresh_token, and expiration information
- * - {server_hash}_code_verifier_{pid}.txt: Contains the PKCE code verifier for the current OAuth flow
+ * - {server_hash}_code_verifier_{state}.txt: Contains the PKCE code verifier for one OAuth flow
  *   - Format: Plain text string used for PKCE verification
- *   - Scoped per-process (by PID) rather than per-server: multiple mcp-remote processes can be
- *     started concurrently for the same server, and coordination between them is currently
- *     disabled on Windows (see coordination.ts), so a shared filename would let one process's
- *     verifier silently overwrite another's mid-flow (see issue #235)
+ *   - Scoped to the flow's authorization state rather than to a process, so whichever instance
+ *     holds the callback port when the user finishes can redeem a code from a flow another
+ *     instance started - including one the host has since stopped (see issue #235)
  *
  * All JSON files are stored with 2-space indentation for readability.
  */
-
-/**
- * Lockfile data structure
- */
-export interface LockfileData {
-  pid: number
-  port: number
-  timestamp: number
-}
-
-/**
- * Creates a lockfile for the given server
- * @param serverUrlHash The hash of the server URL
- * @param pid The process ID
- * @param port The port the server is running on
- */
-export async function createLockfile(serverUrlHash: string, pid: number, port: number): Promise<void> {
-  const lockData: LockfileData = {
-    pid,
-    port,
-    timestamp: Date.now(),
-  }
-  await writeJsonFile(serverUrlHash, 'lock.json', lockData)
-}
-
-/**
- * Checks if a lockfile exists for the given server
- * @param serverUrlHash The hash of the server URL
- * @returns The lockfile data or null if it doesn't exist
- */
-export async function checkLockfile(serverUrlHash: string): Promise<LockfileData | null> {
-  try {
-    const lockfile = await readJsonFile<LockfileData>(serverUrlHash, 'lock.json', {
-      async parseAsync(data: any) {
-        if (typeof data !== 'object' || data === null) return null
-        if (typeof data.pid !== 'number' || typeof data.port !== 'number' || typeof data.timestamp !== 'number') {
-          return null
-        }
-        return data as LockfileData
-      },
-    })
-    return lockfile || null
-  } catch {
-    return null
-  }
-}
-
-/**
- * Deletes the lockfile for the given server
- * @param serverUrlHash The hash of the server URL
- */
-export async function deleteLockfile(serverUrlHash: string): Promise<void> {
-  await deleteConfigFile(serverUrlHash, 'lock.json')
-}
 
 /**
  * Gets the configuration directory path
@@ -129,6 +74,41 @@ export async function deleteConfigFile(serverUrlHash: string, filename: string):
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       log(`Error deleting ${filename}:`, error)
     }
+  }
+}
+
+/**
+ * Removes this server's config files with the given prefix that are older than maxAgeMs
+ *
+ * A filename carrying a one-off identifier is never written again, so abandoned ones would stay
+ * forever. The age check leaves alone any file a flow still in progress may need.
+ * @param serverUrlHash The hash of the server URL
+ * @param prefix The filename prefix to sweep
+ * @param maxAgeMs How old a file must be before it is removed
+ */
+export async function deleteStaleConfigFiles(serverUrlHash: string, prefix: string, maxAgeMs: number): Promise<void> {
+  try {
+    const configDir = getConfigDir()
+    const cutoff = Date.now() - maxAgeMs
+    const entries = await fs.readdir(configDir)
+
+    await Promise.all(
+      entries
+        .filter((entry) => entry.startsWith(`${serverUrlHash}_${prefix}`))
+        .map(async (entry) => {
+          const filePath = path.join(configDir, entry)
+          try {
+            if ((await fs.stat(filePath)).mtimeMs > cutoff) return
+            await fs.unlink(filePath)
+            debugLog(`Removed stale config file: ${entry}`)
+          } catch (error) {
+            // Another instance may be sweeping the same directory
+            debugLog(`Could not remove stale config file ${entry}`, error)
+          }
+        }),
+    )
+  } catch (error) {
+    debugLog('Could not sweep stale config files', error)
   }
 }
 

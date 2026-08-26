@@ -1,4 +1,3 @@
-import open from 'open'
 import { z } from 'zod'
 import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
@@ -8,7 +7,8 @@ import {
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { OAuthProviderOptions, StaticOAuthClientMetadata } from './types'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile } from './mcp-auth-config'
+import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
+import { openBrowser } from './open-browser'
 import { StaticOAuthClientInformationFull } from './types'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -24,10 +24,18 @@ import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './pro
  * otherwise drop `expires_at` on read, so we parse and serialize tokens with
  * this extended schema instead.
  */
-const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
+export const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
   expires_at: z.coerce.number().optional(),
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
+
+/** The shape of the state we issue, and the only shape accepted into a config filename. */
+const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
+
+const CODE_VERIFIER_PREFIX = 'code_verifier_'
+
+/** How long a flow may still be in progress, and its verifier still needed. */
+const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
 
 /**
  * Implements the OAuthClientProvider interface for Node.js environments.
@@ -51,6 +59,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   validateResourceURL?: (defaultResource: URL, discoveredResource?: string) => Promise<URL | undefined>
   private _state: string
   private _clientInfo: OAuthClientInformationFull | undefined
+  private incomingState: string | undefined
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
@@ -393,6 +402,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     }
 
     await writeJsonFile(this.serverUrlHash, 'tokens.json', tokensToSave)
+
+    // The flow is over, and its verifier is named after a state nothing will use again
+    await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState))
+    await deleteStaleConfigFiles(this.serverUrlHash, CODE_VERIFIER_PREFIX, ABANDONED_FLOW_AGE_MS)
   }
 
   /**
@@ -417,31 +430,47 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
     debugLog('Redirecting to authorization URL', authorizationUrl.toString())
 
-    try {
-      await open(sanitizeUrl(authorizationUrl.toString()))
+    if (await openBrowser(sanitizeUrl(authorizationUrl.toString()))) {
       log('Browser opened automatically.')
-    } catch (error) {
-      log('Could not open browser automatically. Please copy and paste the URL above into your browser.')
-      debugLog('Failed to open browser', error)
+    } else {
+      log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
     }
   }
 
   /**
    * Saves the PKCE code verifier
    *
-   * The filename is scoped to the current process ID. Multiple mcp-remote
-   * processes can be started concurrently for the same server (e.g. an MCP
-   * host reconnecting or launching duplicate instances) - since coordination
-   * between those processes is currently disabled on Windows (see
-   * coordination.ts), each process must keep its own verifier so a second
-   * process can't overwrite the first one's file mid-flow and break the
-   * PKCE exchange for whichever process the browser callback actually
-   * reaches. See https://github.com/geelen/mcp-remote/issues/235.
+   * The filename is scoped to this flow's authorization state rather than to the process, so a
+   * code can still be redeemed by an instance that took the callback port over from the one that
+   * started the flow. See https://github.com/geelen/mcp-remote/issues/235.
    * @param codeVerifier The code verifier to save
    */
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     debugLog('Saving code verifier')
-    await writeTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, codeVerifier)
+    await writeTextFile(this.serverUrlHash, this.codeVerifierFile(this._state), codeVerifier)
+  }
+
+  /**
+   * Records the state a code came back with, so the flow that produced it decides which verifier
+   * redeems it
+   * @param state The state from the callback
+   */
+  useAuthorizationState(state: string): void {
+    if (!ISSUED_STATE.test(state)) {
+      log('Ignoring an authorization state this client could not have issued')
+      debugLog('Rejected authorization state', { state })
+      return
+    }
+    this.incomingState = state
+  }
+
+  /** The flow this instance is redeeming for: another instance's when a code names it. */
+  private get flowState(): string {
+    return this.incomingState ?? this._state
+  }
+
+  private codeVerifierFile(state: string): string {
+    return `${CODE_VERIFIER_PREFIX}${state}.txt`
   }
 
   /**
@@ -450,7 +479,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   async codeVerifier(): Promise<string> {
     debugLog('Reading code verifier')
-    const verifier = await readTextFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`, 'No code verifier saved for session')
+    const verifier = await readTextFile(this.serverUrlHash, this.codeVerifierFile(this.flowState), 'No code verifier saved for session')
     debugLog('Code verifier found:', !!verifier)
     return verifier
   }
@@ -467,7 +496,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         await Promise.all([
           deleteConfigFile(this.serverUrlHash, 'client_info.json'),
           deleteConfigFile(this.serverUrlHash, 'tokens.json'),
-          deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`),
+          deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState)),
         ])
         this._clientInfo = undefined
         debugLog('All credentials invalidated')
@@ -485,7 +514,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
         break
 
       case 'verifier':
-        await deleteConfigFile(this.serverUrlHash, `code_verifier_${process.pid}.txt`)
+        await deleteConfigFile(this.serverUrlHash, this.codeVerifierFile(this.flowState))
         debugLog('Code verifier invalidated')
         break
 

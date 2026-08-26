@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import { AuthCodeResult, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
@@ -522,7 +522,7 @@ export async function discoverOAuthServerInfo(
  * Type for the auth initialization function
  */
 export type AuthInitializer = () => Promise<{
-  waitForAuthCode: () => Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
   skipBrowserAuth: boolean
 }>
 
@@ -703,8 +703,13 @@ export async function connectToRemoteServer(
 
       // Wait for the authorization code from the callback
       debugLog('Waiting for auth code from callback server')
-      const code = await waitForAuthCode()
+      const { code, state } = await waitForAuthCode()
       debugLog('Received auth code from callback server')
+
+      // The code may belong to a flow another instance started, whose verifier is not this one's
+      if (state && 'useAuthorizationState' in authProvider && typeof authProvider.useAuthorizationState === 'function') {
+        authProvider.useAuthorizationState(state)
+      }
 
       // Checked before the exchange, not after: an authorization code is single-use (RFC 6749
       // 4.1.2) and the callback server hands back the same retained code on a second call, so
@@ -755,15 +760,15 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   server: Server
   actualPort: number
   authCode: string | null
-  waitForAuthCode: () => Promise<string>
-  authCompletedPromise: Promise<string>
+  waitForAuthCode: () => Promise<AuthCodeResult>
+  authCompletedPromise: Promise<AuthCodeResult>
 }> {
-  let authCode: string | null = null
+  let authCode: AuthCodeResult | null = null
   const app = express()
 
   // Create a promise to track when auth is completed
-  let authCompletedResolve: (code: string) => void
-  const authCompletedPromise = new Promise<string>((resolve) => {
+  let authCompletedResolve: (result: AuthCodeResult) => void
+  const authCompletedPromise = new Promise<AuthCodeResult>((resolve) => {
     authCompletedResolve = resolve
   })
 
@@ -807,17 +812,32 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
       })
   })
 
+  // Lets an instance that lost the bind identify who holds the port. Without it, EADDRINUSE from
+  // an unrelated process is indistinguishable from a sibling and every instance waits forever.
+  app.get(MCP_REMOTE_ID_PATH, (_req, res) => {
+    res.json({ mcpRemote: true, serverUrlHash: options.serverUrlHash })
+  })
+
   // OAuth callback endpoint
   app.get(options.path, (req, res) => {
     const code = req.query.code as string | undefined
+    const state = req.query.state as string | undefined
+    const authorizationError = req.query.error as string | undefined
+    if (authorizationError) {
+      const description = (req.query.error_description as string | undefined) ?? authorizationError
+      log(`Authorization failed: ${authorizationError} - ${description}`)
+      res.status(400).send(`Authorization failed: ${description}\n\nYou may close this window and return to the CLI.`)
+      options.events.emit('auth-code-failed', new Error(`Authorization failed: ${authorizationError} - ${description}`))
+      return
+    }
     if (!code) {
       res.status(400).send('Error: No authorization code received')
       return
     }
 
-    authCode = code
+    authCode = { code, state }
     log('Auth code received, resolving promise')
-    authCompletedResolve(code)
+    authCompletedResolve(authCode)
 
     res.send(`
       Authorization successful!
@@ -831,38 +851,24 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     `)
 
     // Notify main flow that auth code is available
-    options.events.emit('auth-code-received', code)
+    options.events.emit('auth-code-received', code, state)
   })
 
-  // Bind the server, falling back to a random port on EADDRINUSE (unless strictPort is set)
+  // Bind the server. There is deliberately no random-port fallback: the deterministic port is
+  // what makes concurrent instances agree on an owner, and an instance that quietly moved
+  // elsewhere would advertise a redirect_uri no browser can deliver a code to. EADDRINUSE is a
+  // signal that somebody else owns this flow, and the caller decides what to do about it.
   const { server, actualPort } = await new Promise<{ server: Server; actualPort: number }>((resolve, reject) => {
     const httpServer = app.listen(options.port, '127.0.0.1')
 
     httpServer.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        if (options.strictPort) {
-          reject(
-            Object.assign(
-              new Error(
-                `Callback port ${options.port} is already in use. The port is mandatory (it was specified explicitly or is pinned by --static-oauth-client-info). Close the process holding that port or restart your machine.`,
-              ),
-              { code: 'EADDRINUSE', requestedPort: options.port },
-            ),
-          )
-          return
-        }
-        log(`Warning: callback port ${options.port} is already in use, falling back to a random port`)
-        // Retry with an OS-assigned port
-        const fallback = app.listen(0, '127.0.0.1')
-        fallback.once('error', reject)
-        fallback.once('listening', () => {
-          const addr = fallback.address() as AddressInfo
-          log(`OAuth callback server running at http://127.0.0.1:${addr.port} (fallback from ${options.port})`)
-          resolve({ server: fallback, actualPort: addr.port })
-        })
-      } else {
-        reject(err)
+        reject(
+          Object.assign(new Error(`Callback port ${options.port} is already in use`), { code: 'EADDRINUSE', requestedPort: options.port }),
+        )
+        return
       }
+      reject(err)
     })
 
     httpServer.once('listening', () => {
@@ -872,16 +878,25 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     })
   })
 
-  const waitForAuthCode = (): Promise<string> => {
-    return new Promise((resolve) => {
+  const waitForAuthCode = (): Promise<AuthCodeResult> => {
+    return new Promise((resolve, reject) => {
       if (authCode) {
         resolve(authCode)
         return
       }
 
-      options.events.once('auth-code-received', (code) => {
-        resolve(code)
-      })
+      const onFailure = (error: Error) => {
+        options.events.off('auth-code-received', onCode)
+        reject(error)
+      }
+      const onCode = (code: string, state?: string) => {
+        options.events.off('auth-code-failed', onFailure)
+        resolve({ code, state })
+      }
+      options.events.once('auth-code-received', onCode)
+      // An authorization the user denied never produces a code, and waiting for one holds the
+      // callback port for the life of the process
+      options.events.once('auth-code-failed', onFailure)
     })
   }
 
@@ -902,6 +917,7 @@ export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptio
 export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
 
 /** Endpoint secondary instances long-poll to await the auth flow the primary instance is running. */
+export const MCP_REMOTE_ID_PATH = '/.mcp-remote/id'
 export const LONG_POLL_PATH = '/wait-for-auth'
 
 /**
@@ -911,25 +927,6 @@ export const LONG_POLL_PATH = '/wait-for-auth'
  */
 export function buildRedirectUrl(host: string, port: number, callbackPath: string = DEFAULT_CALLBACK_PATH): string {
   return `http://${host}:${port}${callbackPath}`
-}
-
-async function findExistingClientPort(serverUrlHash: string): Promise<number | undefined> {
-  const clientInfo = await readJsonFile<OAuthClientInformationFull>(serverUrlHash, 'client_info.json', OAuthClientInformationFullSchema)
-  if (!clientInfo) {
-    return undefined
-  }
-
-  const localhostRedirectUri = clientInfo.redirect_uris
-    .map((uri) => new URL(uri))
-    .find(({ hostname }) => hostname === 'localhost' || hostname === '127.0.0.1')
-  if (!localhostRedirectUri) {
-    // A registration that points somewhere we cannot listen (e.g. it was made behind a reverse
-    // proxy, or by an earlier `--host` run) yields no reusable port. Fall back to picking one;
-    // invalidateMismatchedClientRegistration then discards the unusable registration.
-    return undefined
-  }
-
-  return parseInt(localhostRedirectUri.port)
 }
 
 /**
@@ -949,41 +946,11 @@ async function invalidateMismatchedClientRegistration(serverUrlHash: string, red
   await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
 }
 
-function calculateDefaultPort(serverUrlHash: string): number {
+export function calculateDefaultPort(serverUrlHash: string): number {
   // Convert the first 4 bytes of the serverUrlHash into a port offset
   const offset = parseInt(serverUrlHash.substring(0, 4), 16)
   // Pick a consistent but random-seeming port from 3335 to 49151
   return 3335 + (offset % 45816)
-}
-
-/**
- * Finds an available port on the local machine
- * @param preferredPort Optional preferred port to try first
- * @returns A promise that resolves to an available port number
- */
-export async function findAvailablePort(preferredPort?: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        // If preferred port is in use, get a random port
-        server.listen(0)
-      } else {
-        reject(err)
-      }
-    })
-
-    server.on('listening', () => {
-      const { port } = server.address() as net.AddressInfo
-      server.close(() => {
-        resolve(port)
-      })
-    })
-
-    // Try preferred port first, or get a random port
-    server.listen(preferredPort || 0)
-  })
 }
 
 /**
@@ -1079,7 +1046,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     const value = args[callbackPathIndex + 1]
     if (!value.startsWith('/')) {
       log(`Warning: Ignoring invalid callback path: ${value}. It must start with '/'.`)
-    } else if (value === LONG_POLL_PATH) {
+    } else if (value === LONG_POLL_PATH || value === MCP_REMOTE_ID_PATH) {
       log(`Warning: Ignoring reserved callback path: ${value}. It is used to coordinate concurrent instances.`)
     } else {
       callbackPath = value
@@ -1199,19 +1166,17 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
 
   const defaultPort = calculateDefaultPort(serverUrlHash)
 
-  // Use the specified port, or the existing client port or fallback to find an available one
-  const [existingClientPort, availablePort] = await Promise.all([findExistingClientPort(serverUrlHash), findAvailablePort(defaultPort)])
+  // Derived, never probed. `findAvailablePort` used to bind the port, close it, and hand back the
+  // number - so concurrent instances could each be told the same port was free, or be pushed onto
+  // random ones, before any coordination ran. Whether the port is actually free is settled by
+  // binding it for real, in coordinateAuth, where losing tells us somebody else owns the flow.
   let callbackPort: number
-
   if (specifiedPort) {
     log(`Using specified callback port: ${specifiedPort}`)
     callbackPort = specifiedPort
-  } else if (existingClientPort) {
-    log(`Using existing client port: ${existingClientPort}`)
-    callbackPort = existingClientPort
   } else {
-    log(`Using automatically selected callback port: ${availablePort}`)
-    callbackPort = availablePort
+    log(`Using callback port derived from the server URL: ${defaultPort}`)
+    callbackPort = defaultPort
   }
 
   // A cached dynamic client registration is only usable if it was registered with the exact

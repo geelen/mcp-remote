@@ -24,7 +24,7 @@ import {
   discoverOAuthServerInfo,
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
-import { createLazyAuthCoordinator } from './lib/coordination'
+import { createLazyAuthCoordinator, hasUsableTokens, serverIssuesAuthChallenge } from './lib/coordination'
 
 /**
  * Main function to run the client
@@ -106,20 +106,28 @@ async function runClient(
     // Store server in outer scope for cleanup
     server = authState.server
 
-    // If the callback server bound to a different port (EADDRINUSE fallback), update the provider
+    // A stranger on an earlier candidate can push us onto a later port than the one the startup
+    // check compared the cached registration against, so a stale registration can still name the
+    // wrong redirect_uri here. Invalidating unconditionally is not the answer - this runs again on
+    // the post-auth reconnect, and deleting the registration then breaks the code exchange.
     if (authState.actualPort !== callbackPort) {
-      log(`Callback port changed from ${callbackPort} to ${authState.actualPort} (original port was unavailable)`)
+      log(`Using callback port ${authState.actualPort}`)
       authProvider.setCallbackPort(authState.actualPort)
-      if (!staticOAuthClientInfo) {
-        log('Invalidating cached client registration so it re-registers with the new redirect_uri')
-        await authProvider.invalidateCredentials('client')
-      }
     }
 
     return {
       waitForAuthCode: authState.waitForAuthCode,
       skipBrowserAuth: authState.skipBrowserAuth,
     }
+  }
+
+  // Ownership is settled before the first connection attempt, not after a 401. The SDK builds the
+  // authorize URL and registers a client from inside `transport.start()`, so an instance that only
+  // discovered it was a follower afterwards would already have registered its own client and
+  // issued its own PKCE challenge - which is what produced one registration and one tab per
+  // instance. Skipped when tokens are already on disk, so a warm start still binds nothing.
+  if (!(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
+    await authInitializer()
   }
 
   try {

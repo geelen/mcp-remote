@@ -5,6 +5,7 @@ import {
   mcpProxy,
   setupOAuthCallbackServerWithLongPoll,
   getServerUrlHash,
+  calculateDefaultPort,
   MCP_REMOTE_VERSION,
 } from './utils'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
@@ -1564,6 +1565,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
       path: '/oauth/callback',
       events,
       authTimeoutMs: customTimeout,
+      serverUrlHash: 'test-hash',
     })
 
     server = result.server
@@ -1578,6 +1580,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
       port: 0, // Use any available port
       path: '/oauth/callback',
       events,
+      serverUrlHash: 'test-hash',
     })
 
     server = result.server
@@ -1592,6 +1595,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
       port: 0,
       path: '/oauth/callback',
       events,
+      serverUrlHash: 'test-hash',
     })
 
     server = result.server
@@ -1600,26 +1604,65 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     expect(result.actualPort).toBeGreaterThan(0)
   })
 
-  it('should fall back to a random port when the requested port is already in use', async () => {
-    // Hold a port so the callback server cannot bind to it
+  it('surfaces EADDRINUSE instead of moving to a random port', async () => {
+    // The deterministic port is what lets concurrent instances agree on one owner. An instance
+    // that quietly moved elsewhere would advertise a redirect_uri no browser can deliver a code
+    // to, so a taken port has to be reported rather than worked around.
     const blocker = net.createServer()
     const blockedPort = await new Promise<number>((resolve) => {
       blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as net.AddressInfo).port))
     })
 
     try {
-      const result = await setupOAuthCallbackServerWithLongPoll({
-        port: blockedPort,
-        path: '/oauth/callback',
-        events,
-      })
-
-      server = result.server
-      expect(result.actualPort).toBeGreaterThan(0)
-      expect(result.actualPort).not.toBe(blockedPort)
+      await expect(
+        setupOAuthCallbackServerWithLongPoll({
+          port: blockedPort,
+          path: '/oauth/callback',
+          events,
+          serverUrlHash: 'test-hash',
+        }),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE', requestedPort: blockedPort })
     } finally {
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
     }
+  })
+
+  it('reports a denied authorization instead of waiting for a code that is not coming', async () => {
+    // ?error= is how "the user clicked Deny", an org policy block or invalid_scope arrives. Waiting
+    // for a code holds the callback port for the life of the process and tells the user nothing.
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      serverUrlHash: 'test-hash',
+    })
+    server = result.server
+    // A handler is attached synchronously: the callback arrives during the await below, and a
+    // rejection with nothing attached yet is reported as unhandled even though it is asserted on
+    const settled = result.waitForAuthCode().then(
+      () => new Error('expected no authorization code'),
+      (error: Error) => error,
+    )
+
+    const response = await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?error=access_denied&error_description=User%20denied`)
+
+    expect(response.status).toBe(400)
+    await expect(response.text()).resolves.toContain('User denied')
+    expect((await settled).message).toMatch(/access_denied/)
+  })
+
+  it('answers an identity probe, so a losing instance can tell a sibling from a stranger', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({
+      port: 0,
+      path: '/oauth/callback',
+      events,
+      serverUrlHash: 'a-particular-server',
+    })
+    server = result.server
+
+    const response = await fetch(`http://127.0.0.1:${result.actualPort}/.mcp-remote/id`)
+
+    await expect(response.json()).resolves.toEqual({ mcpRemote: true, serverUrlHash: 'a-particular-server' })
   })
 
   it('should serve the callback on the configured path', async () => {
@@ -1627,13 +1670,14 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
       port: 0,
       path: '/custom/callback',
       events,
+      serverUrlHash: 'test-hash',
     })
 
     server = result.server
 
     const response = await fetch(`http://127.0.0.1:${result.actualPort}/custom/callback?code=test-code`)
     expect(response.status).toBe(200)
-    await expect(result.waitForAuthCode()).resolves.toBe('test-code')
+    await expect(result.waitForAuthCode()).resolves.toEqual({ code: 'test-code', state: undefined })
 
     // The default path must not be served when it was overridden, otherwise the redirect URI
     // we advertise and the endpoint we listen on can silently disagree
@@ -1653,7 +1697,7 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
           port: blockedPort,
           path: '/oauth/callback',
           events,
-          strictPort: true,
+          serverUrlHash: 'test-hash',
         }),
       ).rejects.toMatchObject({
         code: 'EADDRINUSE',
@@ -1729,16 +1773,31 @@ describe('Feature: Stale Client Registration Invalidation', () => {
   })
 
   it('Scenario: Reuse a registration whose redirect_uri still matches', async () => {
-    // Given a registration made for a localhost port
+    // Given a registration made against the port this server derives
     const serverUrl = 'https://reuse.example.com/mcp'
-    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+    const derivedPort = calculateDefaultPort(getServerUrlHash(serverUrl))
+    writeRegistration(serverUrl, [`http://localhost:${derivedPort}/oauth/callback`])
 
     // When starting with no port override
     const result = await parseCommandLineArgs([serverUrl], 'test usage')
 
-    // Then that port is reused and the registration is kept
-    expect(result.callbackPort).toBe(5599)
+    // Then the derived port is used and the registration is kept
+    expect(result.callbackPort).toBe(derivedPort)
     expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(true)
+  })
+
+  it('Scenario: Every instance derives the same port, so none is taken from a cached registration', async () => {
+    // A registration left behind on some other port must not pull this instance off the port its
+    // siblings will derive - agreeing on one port is what lets them agree on one owner.
+    const serverUrl = 'https://derived.example.com/mcp'
+    writeRegistration(serverUrl, ['http://localhost:5599/oauth/callback'])
+
+    const result = await parseCommandLineArgs([serverUrl], 'test usage')
+
+    expect(result.callbackPort).toBe(calculateDefaultPort(getServerUrlHash(serverUrl)))
+    expect(result.callbackPort).not.toBe(5599)
+    // and the registration that named the other port is discarded rather than reused
+    expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
   })
 
   it('Scenario: Discard a registration whose redirect_uri is not reachable locally', async () => {
@@ -1765,7 +1824,7 @@ describe('Feature: Stale Client Registration Invalidation', () => {
     const result = await parseCommandLineArgs([serverUrl, '--host', '127.0.0.1'], 'test usage')
 
     // Then the registration is discarded - 127.0.0.1 and localhost are distinct redirect_uris
-    expect(result.callbackPort).toBe(5599)
+    expect(result.callbackPort).toBe(calculateDefaultPort(getServerUrlHash(serverUrl)))
     expect(fs.existsSync(clientInfoPath(serverUrl))).toBe(false)
   })
 
