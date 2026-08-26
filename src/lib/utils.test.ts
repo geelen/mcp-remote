@@ -1824,6 +1824,45 @@ describe('setupOAuthCallbackServerWithLongPoll', () => {
     expect(defaultPath.status).toBe(404)
   })
 
+  it('hands each sign-in its own code, so a used one is never replayed', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({ port: 0, path: '/oauth/callback', events, serverUrlHash: 'h' })
+    server = result.server
+    const base = `http://127.0.0.1:${result.actualPort}/oauth/callback`
+
+    // Given a first sign-in, redeemed by whoever asked for it
+    await fetch(`${base}?code=first&state=s1`)
+    expect(await result.waitForAuthCode()).toEqual({ code: 'first', state: 's1' })
+
+    // When the user signs in again later, because the tokens were revoked
+    await fetch(`${base}?code=second&state=s2`)
+
+    // Then the second code is handed over. Returning `first` again would be replaying a
+    // single-use code, which the authorization server refuses with invalid_grant.
+    expect(await result.waitForAuthCode()).toEqual({ code: 'second', state: 's2' })
+  })
+
+  it('holds a code that arrives before anyone is waiting for it', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({ port: 0, path: '/oauth/callback', events, serverUrlHash: 'h' })
+    server = result.server
+
+    // The browser reaches the callback before the flow gets round to asking; both orders happen
+    await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?code=early`)
+
+    expect(await result.waitForAuthCode()).toEqual({ code: 'early', state: undefined })
+  })
+
+  it('still tells a sibling the sign-in finished after the code has been taken', async () => {
+    const result = await setupOAuthCallbackServerWithLongPoll({ port: 0, path: '/oauth/callback', events, serverUrlHash: 'h' })
+    server = result.server
+
+    await fetch(`http://127.0.0.1:${result.actualPort}/oauth/callback?code=taken`)
+    await result.waitForAuthCode()
+
+    // Draining the queue must not make "has the user finished?" go back to no
+    const poll = await fetch(`http://127.0.0.1:${result.actualPort}/wait-for-auth?poll=false`)
+    expect(poll.status).toBe(200)
+  })
+
   it('should reject with EADDRINUSE error when strictPort is true and port is already in use', async () => {
     const blocker = net.createServer()
     const blockedPort = await new Promise<number>((resolve) => {
@@ -1928,6 +1967,91 @@ describe('Feature: Network Tuning Options', () => {
 
     // Then they are consumed as options rather than mistaken for the URL or the callback port
     expect(result.serverUrl).toBe('https://example.remote/server')
+  })
+})
+
+describe('Feature: Completing a sign-in the server asked for mid-session', () => {
+  const mockTransport = () =>
+    ({
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    }) as unknown as Transport
+
+  /** A server transport that refuses the first `refusals` sends as unauthorized. */
+  const refusingTransport = (refusals: number) => {
+    const transport = mockTransport()
+    let refused = 0
+    ;(transport.send as any).mockImplementation(async () => {
+      if (refused++ < refusals) throw new Error('Error POSTing to endpoint (HTTP 401): Unauthorized')
+    })
+    return transport
+  }
+
+  it('Scenario: A refused request is retried once the sign-in completes', async () => {
+    // Given a server that refuses until somebody signs in
+    const client = mockTransport()
+    const server = refusingTransport(1)
+    const reauthorize = vi.fn().mockResolvedValue(undefined)
+    mcpProxy({ transportToClient: client, transportToServer: server, reauthorize })
+
+    // When a request is refused
+    client.onmessage!({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } } as any)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // Then the sign-in runs and the request is delivered, rather than answered with an error
+    expect(reauthorize).toHaveBeenCalledTimes(1)
+    expect(server.send).toHaveBeenCalledTimes(2)
+    expect(client.send).not.toHaveBeenCalled()
+  })
+
+  it('Scenario: Requests refused together share one sign-in', async () => {
+    const client = mockTransport()
+    const server = refusingTransport(3)
+    let signIns = 0
+    const reauthorize = vi.fn().mockImplementation(async () => {
+      signIns++
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    })
+    mcpProxy({ transportToClient: client, transportToServer: server, reauthorize })
+
+    // When three requests are refused at once
+    for (const id of [1, 2, 3]) {
+      client.onmessage!({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'x' } } as any)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    // Then the user is asked to sign in once, not three times
+    expect(signIns).toBe(1)
+  })
+
+  it('Scenario: Still refused after signing in, the client is told', async () => {
+    // Given a server that refuses even the token just obtained
+    const client = mockTransport()
+    const server = refusingTransport(Number.MAX_SAFE_INTEGER)
+    const reauthorize = vi.fn().mockResolvedValue(undefined)
+    mcpProxy({ transportToClient: client, transportToServer: server, reauthorize })
+
+    client.onmessage!({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } } as any)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    // Then it stops after one attempt and answers, rather than signing in forever
+    expect(reauthorize).toHaveBeenCalledTimes(1)
+    expect(client.send).toHaveBeenCalledWith(expect.objectContaining({ id: 1, error: expect.anything() }))
+  })
+
+  it('Scenario: Without a way to sign in, the refusal is answered as before', async () => {
+    const client = mockTransport()
+    const server = refusingTransport(1)
+    mcpProxy({ transportToClient: client, transportToServer: server })
+
+    client.onmessage!({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } } as any)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(client.send).toHaveBeenCalledWith(expect.objectContaining({ id: 1, error: expect.anything() }))
   })
 })
 

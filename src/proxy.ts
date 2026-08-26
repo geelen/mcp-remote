@@ -11,6 +11,7 @@
 
 import { EventEmitter } from 'events'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import {
   connectToRemoteServer,
   log,
@@ -24,6 +25,12 @@ import {
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator, hasUsableTokens, serverIssuesAuthChallenge } from './lib/coordination'
+
+/** A transport that can redeem an authorization code, which the `Transport` interface does not promise. */
+type AuthCompletable = Transport & { finishAuth: (code: string) => Promise<void> }
+
+const canFinishAuth = (transport: Transport): transport is AuthCompletable =>
+  typeof (transport as Partial<AuthCompletable>).finishAuth === 'function'
 
 /**
  * Main function to run the proxy
@@ -131,6 +138,35 @@ async function runProxy(
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      /**
+       * Finishes a sign-in the remote server asked for mid-session.
+       *
+       * Startup is not the only time a server can demand one: tokens get revoked, refresh tokens
+       * lapse, and a server may leave `initialize` public while protecting a tool. Until now those
+       * all ended the same way - the SDK opened a browser, nothing was listening on the callback
+       * port, and the code was dropped on the floor.
+       */
+      reauthorize: async () => {
+        const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
+
+        // Another instance is running the flow; it will write the tokens and the retry will pick
+        // them up. Waiting for a code of our own here would wait for one nobody will deliver.
+        if (skipBrowserAuth) {
+          log('Another instance is completing the sign-in; retrying with the tokens it writes')
+          return
+        }
+
+        const { code, state } = await waitForAuthCode()
+        // The code may belong to a flow another instance started, whose verifier is not this one's
+        if (state) authProvider.useAuthorizationState(state)
+
+        // Both transports this proxy can be given have it; the interface they share does not
+        if (!canFinishAuth(remoteTransport)) {
+          throw new Error(`${remoteTransport.constructor.name} cannot complete an authorization`)
+        }
+        await remoteTransport.finishAuth(code)
+        log('Re-authorized with the remote server')
+      },
     })
 
     // Start the local STDIO server

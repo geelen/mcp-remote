@@ -171,10 +171,19 @@ export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  reauthorize,
 }: {
   transportToClient: Transport
   transportToServer: Transport
   ignoredTools?: string[]
+  /**
+   * Completes a sign-in for a request the server refused, or undefined to answer with the error.
+   *
+   * Supplied by the caller rather than built here, because finishing a flow needs the auth
+   * provider and the callback server, neither of which a proxy between two transports should know
+   * about.
+   */
+  reauthorize?: () => Promise<void>
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
@@ -183,6 +192,7 @@ export function mcpProxy({
   let reinitSeq = 0
   const pendingReinit = new Map<string, (message: Message) => void>()
   let initializedDelivered: Promise<unknown> | null = null
+  let reauthorizeInFlight: Promise<void> | null = null
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -429,11 +439,49 @@ export function mcpProxy({
     void sendToServer(message)
   }
 
-  async function sendToServer(message: Message) {
+  /**
+   * Whether the server refused this because nobody is signed in.
+   *
+   * The SDK has already opened a browser by the time this surfaces: its transport answers a 401 by
+   * running `auth()`, which reaches `redirectToAuthorization` and then throws because the flow has
+   * not finished. So the user is looking at a consent screen whose redirect is on its way to the
+   * callback port - all that is missing is somebody to receive the code and redeem it.
+   */
+  function isUnauthorized(error: Error) {
+    return error instanceof UnauthorizedError || error.message.includes('Unauthorized')
+  }
+
+  /** Coalesces concurrent callers, so several refused requests produce one sign-in, not one each */
+  function reauthorizeOnce(): Promise<void> {
+    if (!reauthorizeInFlight) {
+      reauthorizeInFlight = reauthorize!().finally(() => {
+        reauthorizeInFlight = null
+      })
+    }
+    return reauthorizeInFlight
+  }
+
+  async function sendToServer(message: Message, alreadyReauthorized = false) {
     try {
       await transportToServer.send(message)
       return
     } catch (error) {
+      // The sign-in the SDK started can still be completed, but only by someone holding the
+      // callback port. Retried once: a second refusal is the server rejecting a token we just
+      // obtained, which another flow will not fix (see issues #133, #179, #248, #256, #286).
+      if (reauthorize && !alreadyReauthorized && isUnauthorized(error as Error)) {
+        log('Remote server requires authorization, completing sign-in')
+        debugLog('Unauthorized send, re-authorizing', { id: message.id, method: message.method })
+        try {
+          await reauthorizeOnce()
+          await sendToServer(message, true)
+        } catch (authError) {
+          onServerError(authError as Error)
+          replyWithError(message, authError as Error)
+        }
+        return
+      }
+
       // Re-initializing in response to a failed initialize would loop
       if (!isSessionExpired(error as Error) || message.method === 'initialize') {
         onServerError(error as Error)
@@ -877,7 +925,28 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   waitForAuthCode: () => Promise<AuthCodeResult>
   authCompletedPromise: Promise<AuthCodeResult>
 }> {
-  let authCode: AuthCodeResult | null = null
+  /**
+   * Codes that have arrived and nobody has redeemed yet, oldest first.
+   *
+   * A queue rather than one retained code, because a process signs in more than once: tokens are
+   * revoked, refresh tokens lapse, a server starts asking for a scope it did not before. The old
+   * single slot handed every later caller the *first* code it ever saw, and an authorization code
+   * is single-use (RFC 6749 4.1.2), so redeeming it a second time fails with `invalid_grant`.
+   */
+  const unclaimedCodes: AuthCodeResult[] = []
+
+  /** Callers waiting for a code that has not arrived yet, in the order they asked. */
+  const waitingForCode: Array<{ resolve: (result: AuthCodeResult) => void; reject: (error: Error) => void }> = []
+
+  /**
+   * Whether any sign-in has ever completed here.
+   *
+   * Kept separate from the queue: a sibling polling the long-poll endpoint is asking "has the
+   * user finished, so are there tokens on disk for me to read", which stays true once it is true.
+   * Draining the queue must not make that answer go backwards.
+   */
+  let authEverCompleted = false
+
   const app = express()
 
   // Create a promise to track when auth is completed
@@ -888,7 +957,7 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
 
   // Long-polling endpoint
   app.get(LONG_POLL_PATH, (req, res) => {
-    if (authCode) {
+    if (authEverCompleted) {
       // Auth already completed - just return 200 without the actual code
       // Secondary instances will read tokens from disk
       log('Auth already completed, returning 200')
@@ -949,9 +1018,16 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
       return
     }
 
-    authCode = { code, state }
+    const received: AuthCodeResult = { code, state }
+    authEverCompleted = true
     log('Auth code received, resolving promise')
-    authCompletedResolve(authCode)
+    authCompletedResolve(received)
+
+    // Hand it straight to whoever is waiting; hold it only if nobody is yet. The startup flow
+    // reaches `waitForAuthCode` after the browser has already been sent here, so both orders happen.
+    const waiter = waitingForCode.shift()
+    if (waiter) waiter.resolve(received)
+    else unclaimedCodes.push(received)
 
     res.send(`
       Authorization successful!
@@ -992,29 +1068,32 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
     })
   })
 
+  /** Takes the next unredeemed code, waiting for one if none has arrived. */
   const waitForAuthCode = (): Promise<AuthCodeResult> => {
-    return new Promise((resolve, reject) => {
-      if (authCode) {
-        resolve(authCode)
-        return
-      }
+    const alreadyHere = unclaimedCodes.shift()
+    if (alreadyHere) return Promise.resolve(alreadyHere)
 
+    return new Promise((resolve, reject) => {
+      const entry = {
+        resolve,
+        // An authorization the user denied never produces a code, and waiting for one holds the
+        // callback port for the life of the process
+        reject: (error: Error) => {
+          options.events.off('auth-code-failed', onFailure)
+          reject(error)
+        },
+      }
       const onFailure = (error: Error) => {
-        options.events.off('auth-code-received', onCode)
-        reject(error)
+        const index = waitingForCode.indexOf(entry)
+        if (index !== -1) waitingForCode.splice(index, 1)
+        entry.reject(error)
       }
-      const onCode = (code: string, state?: string) => {
-        options.events.off('auth-code-failed', onFailure)
-        resolve({ code, state })
-      }
-      options.events.once('auth-code-received', onCode)
-      // An authorization the user denied never produces a code, and waiting for one holds the
-      // callback port for the life of the process
+      waitingForCode.push(entry)
       options.events.once('auth-code-failed', onFailure)
     })
   }
 
-  return { server, actualPort, authCode, waitForAuthCode, authCompletedPromise }
+  return { server, actualPort, authCode: null, waitForAuthCode, authCompletedPromise }
 }
 
 /**
