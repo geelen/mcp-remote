@@ -1152,6 +1152,44 @@ describe('Feature: MCP Proxy', () => {
     )
   })
 
+  it('Scenario: Requests wait for the initialized notification to be delivered', async () => {
+    // Given a server that takes a moment to accept the initialized notification
+    const mockTransportToClient = mockTransport()
+    const sent: string[] = []
+    let releaseInitialized: () => void = () => {}
+    const mockTransportToServer = {
+      ...mockTransport(),
+      send: vi.fn().mockImplementation(async (message: any) => {
+        if (message.method === 'notifications/initialized') {
+          await new Promise<void>((resolve) => {
+            releaseInitialized = resolve
+          })
+        }
+        sent.push(message.method ?? String(message.id))
+      }),
+    } as unknown as Transport
+
+    mcpProxy({
+      transportToClient: mockTransportToClient,
+      transportToServer: mockTransportToServer,
+      ignoredTools: [],
+    })
+
+    // When the client sends the notification and its first requests back to back
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', method: 'notifications/initialized' } as any)
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', id: 1, method: 'tools/list' } as any)
+    mockTransportToClient.onmessage!({ jsonrpc: '2.0', id: 2, method: 'resources/list' } as any)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // Then neither request has been sent yet
+    expect(sent).toEqual([])
+
+    // And once the notification lands, they follow in the order the client sent them
+    releaseInitialized()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(sent).toEqual(['notifications/initialized', 'tools/list', 'resources/list'])
+  })
+
   it('Scenario: Block tools/call for ignored tools with delete* filter', async () => {
     // Given mock transports for client and server
     const mockTransportToClient = {

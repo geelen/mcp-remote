@@ -93,6 +93,15 @@ export function log(str: string, ...rest: unknown[]) {
 type Message = any
 const MESSAGE_BLOCKED = Symbol('MessageBlocked')
 
+/** How long the client's first requests wait on `notifications/initialized` before going anyway. */
+const LIFECYCLE_BARRIER_TIMEOUT_MS = 10_000
+
+/** A timer that never keeps the process alive on its own. */
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms).unref?.()
+  })
+
 const isMessageBlocked = (value: any): value is typeof MESSAGE_BLOCKED => value === MESSAGE_BLOCKED
 
 export function createMessageTransformer({
@@ -173,6 +182,7 @@ export function mcpProxy({
   let lastInitialize: Message | null = null
   let reinitSeq = 0
   const pendingReinit = new Map<string, (message: Message) => void>()
+  let initializedDelivered: Promise<unknown> | null = null
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -242,7 +252,7 @@ export function mcpProxy({
       lastInitialize = message
     }
 
-    sendToServer(message)
+    forwardInOrder(message)
   }
 
   transportToServer.onmessage = (_message) => {
@@ -386,6 +396,37 @@ export function mcpProxy({
     // per session - subscriptions, roots, progress tokens - is quietly gone. The
     // spec mandates the new session anyway; there is no way to replay that state.
     log(`Re-established session ${transportToServer.sessionId ?? '(none)'} after server expiry`)
+  }
+
+  /**
+   * Forwards a message, keeping the client's requests behind `notifications/initialized`.
+   *
+   * Every forward here is an independent POST, and a client sends the notification and its first
+   * requests back to back, so without this they race - and a server that enforces the lifecycle
+   * answers whichever request wins with "Session not initialized". The spec puts the same rule on
+   * the client, which it honours over stdio; only the proxy was re-ordering it on the wire (see
+   * https://github.com/geelen/mcp-remote/issues/310).
+   *
+   * Nothing else is serialized. `send` for a JSON-answering server does not resolve until that
+   * request's response has been read, so ordering every message this way would turn concurrent
+   * requests into sequential ones.
+   */
+  function forwardInOrder(message: Message) {
+    if (message.method === 'notifications/initialized') {
+      // Bounded, because a server that never answers the notification must not leave every later
+      // request queued behind it forever - racing ahead is the lesser failure.
+      initializedDelivered = Promise.race([sendToServer(message), sleep(LIFECYCLE_BARRIER_TIMEOUT_MS)])
+      return
+    }
+
+    if (initializedDelivered) {
+      // Continuations resume in the order they were queued, so this preserves the client's order
+      // among the messages waiting on it, not just their order relative to the notification.
+      void initializedDelivered.then(() => sendToServer(message))
+      return
+    }
+
+    void sendToServer(message)
   }
 
   async function sendToServer(message: Message) {
