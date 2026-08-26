@@ -34,6 +34,17 @@ const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
 
 const CODE_VERIFIER_PREFIX = 'code_verifier_'
 
+/**
+ * How many access tokens may be issued inside {@link TOKEN_STORM_WINDOW_MS} before this client
+ * stops going back for more.
+ *
+ * Set well above any legitimate cadence. A token lives minutes at least, and the handful of
+ * refreshes a burst of concurrent requests can trigger is nowhere near this. Reaching it means
+ * something is exchanging tokens in a loop rather than because one expired.
+ */
+const TOKEN_STORM_LIMIT = 20
+const TOKEN_STORM_WINDOW_MS = 30_000
+
 /** How long a flow may still be in progress, and its verifier still needed. */
 const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
 
@@ -63,6 +74,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private authorizationServerMetadata: AuthorizationServerMetadata | undefined
   private protectedResourceMetadata: ProtectedResourceMetadata | undefined
   private wwwAuthenticateScope: string | undefined
+  /** When tokens were last written, for spotting an exchange loop. See {@link TOKEN_STORM_LIMIT}. */
+  private recentTokenWrites: number[] = []
   /** In-flight proactive refresh, so concurrent requests share one refresh_token use */
   private refreshInFlight: Promise<OAuthTokensWithExpiresAt | undefined> | null = null
 
@@ -374,7 +387,50 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * Saves OAuth tokens
    * @param tokens The tokens to save
    */
+  /**
+   * Stops this client taking part in a token exchange loop.
+   *
+   * An authorization server that keeps honouring a refresh token, for a resource server that keeps
+   * rejecting the access tokens it returns, is a loop with nothing to end it: every rejection looks
+   * to the SDK like a token worth refreshing. The SDK breaks that cycle for the request path, but
+   * not for the standalone SSE stream, whose 401 handler re-enters authorization and reopens the
+   * stream with no circuit breaker and no backoff - measured at several hundred exchanges a second,
+   * indefinitely, which is what gets people rate-limited by their own identity provider.
+   *
+   * Every one of those exchanges ends here, so this is the one place the loop can be seen from and
+   * the one place it can be stopped. Throwing fails the authorization that asked for the write,
+   * which is what unwinds the stream's retry.
+   *
+   * The window is a sliding one, so a client that stops hammering is trusted again shortly after.
+   */
+  private inTokenStorm(): boolean {
+    const now = Date.now()
+    this.recentTokenWrites = this.recentTokenWrites.filter((at) => now - at < TOKEN_STORM_WINDOW_MS)
+    return this.recentTokenWrites.length >= TOKEN_STORM_LIMIT
+  }
+
+  /** The error both halves of the brake raise, so the cause reads the same wherever it surfaces. */
+  private tokenStormError(): Error {
+    const seconds = TOKEN_STORM_WINDOW_MS / 1000
+    log(
+      `Stopping: ${TOKEN_STORM_LIMIT} access tokens were issued in the last ${seconds}s and the MCP server ` +
+        `rejected them all. Asking for another would only repeat the exchange.`,
+    )
+    debugLog('Token exchange loop detected', { writes: this.recentTokenWrites.length, windowMs: TOKEN_STORM_WINDOW_MS })
+    return new Error(
+      `Stopped after ${TOKEN_STORM_LIMIT} token exchanges in ${seconds}s. The tokens being issued are not accepted ` +
+        `by the MCP server - check that its audience and scopes match, or sign in again.`,
+    )
+  }
+
+  private guardAgainstTokenStorm(): void {
+    if (this.inTokenStorm()) throw this.tokenStormError()
+    this.recentTokenWrites.push(Date.now())
+  }
+
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    this.guardAgainstTokenStorm()
+
     const timeLeft = tokens.expires_in || 0
 
     // Alert if expires_in is invalid
@@ -413,6 +469,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * @param authorizationUrl The URL to redirect to
    */
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    // A refused refresh sends the SDK down the full authorization path, so without this the brake
+    // would turn an exchange loop into a browser-tab loop - the same storm, more visible.
+    if (this.inTokenStorm()) throw this.tokenStormError()
+
     // Optionally fetch metadata for debugging/informational purposes (non-blocking)
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
