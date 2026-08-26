@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   connectToRemoteServer,
+  encodeMcpHeaderValue,
   parseCommandLineArgs,
   shouldIncludeTool,
   mcpProxy,
@@ -575,74 +576,226 @@ describe('Feature: Command Line Arguments Parsing', () => {
   })
 })
 
-describe('Feature: Method-aware MCP HTTP gateways', () => {
-  it('mirrors the JSON-RPC method in the Mcp-Method header', async () => {
-    const requests: Array<{ method: string; header: string | undefined }> = []
-    const server = createServer((request, response) => {
-      if (request.method !== 'POST') {
-        response.writeHead(405)
+/**
+ * A minimal MCP endpoint that records the standard request headers it is sent.
+ *
+ * Only enough of the protocol is implemented to get a client through `initialize`
+ * and a single `tools/call`.
+ */
+function createHeaderRecordingServer() {
+  const seen: Array<{ method: string; mcpMethod?: string; mcpName?: string }> = []
+
+  const first = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value)
+
+  const server = createServer((request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(405)
+      response.end()
+      return
+    }
+
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      const message = JSON.parse(body) as { id?: string | number; method: string; params?: { name?: string } }
+      seen.push({
+        method: message.method,
+        mcpMethod: first(request.headers['mcp-method']),
+        mcpName: first(request.headers['mcp-name']),
+      })
+
+      // Notifications get an empty 202, per the Streamable HTTP transport.
+      if (message.id === undefined) {
+        response.writeHead(202)
         response.end()
         return
       }
 
-      let body = ''
-      request.setEncoding('utf8')
-      request.on('data', (chunk: string) => {
-        body += chunk
-      })
-      request.on('end', () => {
-        const message = JSON.parse(body) as { id?: string | number; method: string }
-        const header = request.headers['mcp-method']
-        requests.push({ method: message.method, header: Array.isArray(header) ? header[0] : header })
-
-        if (message.id === undefined) {
-          response.writeHead(202)
-          response.end()
-          return
-        }
-
-        response.writeHead(200, { 'content-type': 'application/json' })
-        response.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: message.id,
-            result: {
+      const result =
+        message.method === 'initialize'
+          ? {
               protocolVersion: '2025-03-26',
-              capabilities: {},
+              capabilities: { tools: {} },
               serverInfo: { name: 'test-server', version: '1.0.0' },
-            },
-          }),
-        )
+            }
+          : { content: [{ type: 'text', text: 'ok' }] }
+
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }))
+    })
+  })
+
+  return {
+    seen,
+    async start() {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', resolve)
       })
-    })
-
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', resolve)
-    })
-
-    try {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('test server did not expose a port')
+      return `http://127.0.0.1:${address.port}/mcp`
+    },
+    async stop() {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    },
+  }
+}
 
+const noAuth = async () => {
+  throw new Error('the test server should not request OAuth')
+}
+
+describe('Feature: Method-aware MCP HTTP gateways', () => {
+  it('Scenario: The JSON-RPC method is mirrored into Mcp-Method', async () => {
+    // Given a server that records the headers it receives
+    const gateway = createHeaderRecordingServer()
+    const url = await gateway.start()
+
+    try {
+      // When a client connects and sends a further message
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(client, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'http-only')
+
+      await transport.send({ jsonrpc: '2.0', method: 'server/discover', params: {} })
+
+      // Then every POST carries the method it is actually sending
+      expect(gateway.seen[0]).toMatchObject({ method: 'initialize', mcpMethod: 'initialize' })
+      expect(gateway.seen).toContainEqual(expect.objectContaining({ method: 'server/discover', mcpMethod: 'server/discover' }))
+      await transport.close()
+    } finally {
+      await gateway.stop()
+    }
+  })
+
+  it('Scenario: tools/call also carries the tool name in Mcp-Name', async () => {
+    // Given a server that records the headers it receives
+    const gateway = createHeaderRecordingServer()
+    const url = await gateway.start()
+
+    try {
+      // When the client calls a tool
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(client, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'http-only')
+      await client.callTool({ name: 'get_weather', arguments: { location: 'Seattle, WA' } })
+
+      // Then the call is routable on both headers without parsing the body.
+      // Sending Mcp-Method alone here would itself be a -32020 HeaderMismatch.
+      expect(gateway.seen).toContainEqual({ method: 'tools/call', mcpMethod: 'tools/call', mcpName: 'get_weather' })
+
+      // And a method that has no Mcp-Name source does not invent one
+      expect(gateway.seen[0]).toEqual({ method: 'initialize', mcpMethod: 'initialize', mcpName: undefined })
+      await transport.close()
+    } finally {
+      await gateway.stop()
+    }
+  })
+
+  it('Scenario: resources/read sources Mcp-Name from params.uri', async () => {
+    // Given a server that records the headers it receives
+    const gateway = createHeaderRecordingServer()
+    const url = await gateway.start()
+
+    try {
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(client, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'http-only')
+
+      // When a resources/read and a prompts/get go out
+      await transport.send({ jsonrpc: '2.0', method: 'resources/read', params: { uri: 'file:///app/config.json' } })
+      await transport.send({ jsonrpc: '2.0', method: 'prompts/get', params: { name: 'summarize' } })
+      // A URI RFC 9110 cannot carry verbatim has to survive the trip encoded
+      await transport.send({ jsonrpc: '2.0', method: 'resources/read', params: { uri: 'file:///projects/世界.json' } })
+
+      // Then each takes its name from the field SEP-2243 assigns it
+      expect(gateway.seen).toContainEqual({
+        method: 'resources/read',
+        mcpMethod: 'resources/read',
+        mcpName: 'file:///app/config.json',
+      })
+      expect(gateway.seen).toContainEqual({ method: 'prompts/get', mcpMethod: 'prompts/get', mcpName: 'summarize' })
+      expect(gateway.seen).toContainEqual({
+        method: 'resources/read',
+        mcpMethod: 'resources/read',
+        mcpName: encodeMcpHeaderValue('file:///projects/世界.json'),
+      })
+      await transport.close()
+    } finally {
+      await gateway.stop()
+    }
+  })
+
+  it('Scenario: An explicitly passed header is not overwritten', async () => {
+    // Given a server that records the headers it receives
+    const gateway = createHeaderRecordingServer()
+    const url = await gateway.start()
+
+    try {
+      // When the user pins Mcp-Method themselves via --header
       const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
       const transport = await connectToRemoteServer(
         client,
-        `http://127.0.0.1:${address.port}/mcp`,
+        url,
         undefined as unknown as OAuthClientProvider,
-        {},
-        async () => {
-          throw new Error('the test server should not request OAuth')
-        },
+        { 'Mcp-Method': 'pinned-by-user' },
+        noAuth,
         'http-only',
       )
 
-      expect(requests[0]).toEqual({ method: 'initialize', header: 'initialize' })
-      await transport.send({ jsonrpc: '2.0', method: 'server/discover', params: {} })
-      expect(requests).toContainEqual({ method: 'server/discover', header: 'server/discover' })
+      // Then their value survives
+      expect(gateway.seen[0]).toMatchObject({ method: 'initialize', mcpMethod: 'pinned-by-user' })
       await transport.close()
     } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+      await gateway.stop()
+    }
+  })
+
+  it('Scenario: The http-first probe carries the headers too', async () => {
+    // Given a server that records the headers it receives
+    const gateway = createHeaderRecordingServer()
+    const url = await gateway.start()
+
+    try {
+      // When connecting in proxy mode (client=null), where a one-off probe transport
+      // sends the first initialize
+      const transport = await connectToRemoteServer(null, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'http-first')
+
+      // Then the probe - the very request a method-aware gateway routes on - is labelled
+      expect(gateway.seen[0]).toMatchObject({ method: 'initialize', mcpMethod: 'initialize' })
+      await transport.close()
+    } finally {
+      await gateway.stop()
+    }
+  })
+})
+
+describe('Feature: Encoding MCP header values', () => {
+  it('Scenario: Plain ASCII values are sent as-is', () => {
+    expect(encodeMcpHeaderValue('get_weather')).toBe('get_weather')
+    expect(encodeMcpHeaderValue('file:///projects/myapp/config.json')).toBe('file:///projects/myapp/config.json')
+  })
+
+  it('Scenario: Values RFC 9110 cannot carry are Base64 encoded', () => {
+    // Non-ASCII
+    expect(encodeMcpHeaderValue('Hello, 世界')).toBe('=?base64?SGVsbG8sIOS4lueVjA==?=')
+    // Leading/trailing whitespace
+    expect(encodeMcpHeaderValue(' padded ')).toBe('=?base64?IHBhZGRlZCA=?=')
+    // Embedded newline - the header-injection case
+    expect(encodeMcpHeaderValue('line1\nline2')).toBe('=?base64?bGluZTEKbGluZTI=?=')
+  })
+
+  it('Scenario: A literal that looks like the sentinel is itself encoded', () => {
+    // Otherwise a server would decode a value that was never encoded
+    expect(encodeMcpHeaderValue('=?base64?literal?=')).toBe('=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=')
+  })
+
+  it('Scenario: Encoded values round-trip back to the body value', () => {
+    for (const original of ['Hello, 世界', ' padded ', 'line1\nline2', '=?base64?literal?=']) {
+      const encoded = encodeMcpHeaderValue(original)
+      const decoded = Buffer.from(encoded.slice('=?base64?'.length, -'?='.length), 'base64').toString('utf8')
+      expect(decoded).toBe(original)
     }
   })
 })
