@@ -15,7 +15,7 @@
 - **Main Binaries**: `mcp-remote` (proxy.ts), `mcp-remote-client` (client.ts)
 - **Core Libraries**: `/src/lib/` contains auth coordination, OAuth client, utils, types
 - **Transport**: Supports both HTTP and SSE transports with OAuth authentication
-- **Config**: Credentials live in `~/.mcp-auth/mcp-remote-{version}/`, keyed by a hash of the server URL. `MCP_REMOTE_CONFIG_DIR` overrides the base directory, not the version subdirectory
+- **Config**: Credentials live in `~/.mcp-auth/mcp-remote-v{store}/`, keyed by a hash of the server URL. The subdirectory names the _store layout_, not the package version, so releases do not discard anyone's sign-ins - raise `CONFIG_STORE_VERSION` only when something already on disk would be misread. `MCP_REMOTE_CONFIG_DIR` relocates the base directory
 
 ## Code Style
 

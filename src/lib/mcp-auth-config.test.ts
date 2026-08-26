@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { writeJsonFile, readJsonFile, getConfigFilePath, deleteStaleConfigFiles } from './mcp-auth-config'
+import { writeJsonFile, readJsonFile, getConfigFilePath, deleteStaleConfigFiles, getConfigDir } from './mcp-auth-config'
 
 vi.mock('./utils', () => ({
   log: vi.fn(),
@@ -21,6 +21,35 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.MCP_REMOTE_CONFIG_DIR
   await fs.rm(configDir, { recursive: true, force: true })
+})
+
+describe('Feature: Where credentials are stored', () => {
+  const configDirEnv = process.env.MCP_REMOTE_CONFIG_DIR
+
+  afterEach(() => {
+    if (configDirEnv === undefined) delete process.env.MCP_REMOTE_CONFIG_DIR
+    else process.env.MCP_REMOTE_CONFIG_DIR = configDirEnv
+  })
+
+  it('Scenario: The path does not move when the package version does', () => {
+    // Given the package version the rest of the code reports
+    delete process.env.MCP_REMOTE_CONFIG_DIR
+    const before = getConfigDir()
+
+    // When a release ships - the mocked version above stands in for it
+    // Then the credentials are still looked for in the same place, so nobody has to sign in again
+    expect(before).not.toContain('1.0.0')
+    expect(before).toBe(path.join(os.homedir(), '.mcp-auth', 'mcp-remote-v1'))
+  })
+
+  it('Scenario: MCP_REMOTE_CONFIG_DIR relocates the store and keeps it stable', () => {
+    // The documented workaround for this used to relocate the base and then append the package
+    // version underneath it anyway, so it never actually stopped the re-authentication
+    process.env.MCP_REMOTE_CONFIG_DIR = '/tmp/somewhere-else'
+
+    expect(getConfigDir()).toBe(path.join('/tmp/somewhere-else', 'mcp-remote-v1'))
+    expect(getConfigDir()).not.toContain('1.0.0')
+  })
 })
 
 describe('Feature: Config file writes', () => {
