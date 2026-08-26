@@ -600,6 +600,48 @@ export type AuthInitializer = () => Promise<{
   skipBrowserAuth: boolean
 }>
 
+/** The header shapes `fetch` accepts, plus the `Headers` the SDK actually hands over. */
+type HeaderSource = RequestInit['headers'] | Headers | globalThis.Headers | undefined
+
+function headerEntries(source: HeaderSource): Array<[string, string]> {
+  if (!source) return []
+  // Arrays have `entries` too, so this order matters - theirs yields [index, pair], not [name, value]
+  if (Array.isArray(source)) return source as Array<[string, string]>
+  const iterable = source as { entries?: () => Iterable<[string, string]> }
+  if (typeof iterable.entries === 'function') return [...iterable.entries()]
+  return Object.entries(source as Record<string, string>)
+}
+
+/**
+ * Merges header sources into one plain object, with later sources winning.
+ *
+ * Two things make this less trivial than a spread.
+ *
+ * The sources are different shapes. The SDK hands over a `Headers` built from the *global* class,
+ * while the check here used to be `instanceof Headers` against the one imported from undici - a
+ * different class, so it never matched, and the fallback spread of a `Headers` yields no own
+ * properties at all. Every header the SDK had set was dropped (see
+ * https://github.com/geelen/mcp-remote/issues/157). Duck-typing on `entries` accepts either.
+ *
+ * And the sources disagree about case. `Headers.entries()` lowercases, while `--header` values and
+ * the ones added here keep the case they were written in, so a plain merge emits `authorization`
+ * *and* `Authorization` as separate keys - which `fetch` then joins into a single comma-separated
+ * value that no server will accept. Merging case-insensitively keeps one entry per header, spelled
+ * the way its last writer spelled it, so a server matching on `Company` still sees `Company`.
+ *
+ * @param sources Header collections in precedence order, lowest first
+ * @returns The merged headers
+ */
+export function mergeHeaders(...sources: HeaderSource[]): Record<string, string> {
+  const merged = new Map<string, [string, string]>()
+  for (const source of sources) {
+    for (const [name, value] of headerEntries(source)) {
+      merged.set(name.toLowerCase(), [name, value])
+    }
+  }
+  return Object.fromEntries(merged.values())
+}
+
 /**
  * Creates and connects to a remote server with OAuth authentication
  * @param client The client to connect with
@@ -629,14 +671,12 @@ export async function connectToRemoteServer(
       return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
         fetch(url, {
           ...init,
-          headers: {
-            ...(init?.headers instanceof Headers
-              ? Object.fromEntries(init?.headers.entries())
-              : (init?.headers as Record<string, string>) || {}),
-            ...headers,
-            ...(tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
-            Accept: 'text/event-stream',
-          } as Record<string, string>,
+          headers: mergeHeaders(
+            init?.headers,
+            headers,
+            tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : undefined,
+            { Accept: 'text/event-stream' },
+          ),
         }),
       )
     },
