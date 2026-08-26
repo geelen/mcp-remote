@@ -25,6 +25,7 @@ import {
 } from './lib/utils'
 import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { createLazyAuthCoordinator, hasUsableTokens, serverIssuesAuthChallenge } from './lib/coordination'
+import { attachClientDiagnostics } from './lib/client-diagnostics'
 
 /**
  * Main function to run the client
@@ -134,19 +135,8 @@ async function runClient(
     // Connect to remote server with lazy authentication
     const transport = await connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy)
 
-    // Set up message and error handlers
-    transport.onmessage = (message) => {
-      log('Received message:', JSON.stringify(message, null, 2))
-    }
-
-    transport.onerror = (error) => {
-      log('Transport error:', error)
-    }
-
-    transport.onclose = () => {
-      log('Connection closed.')
-      process.exit(0)
-    }
+    // Log what arrives without displacing the dispatcher client.connect() installed
+    attachClientDiagnostics(client, transport, () => process.exit(0))
 
     // Set up cleanup handler
     const cleanup = async () => {
