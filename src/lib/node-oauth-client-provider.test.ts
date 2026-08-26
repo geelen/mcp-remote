@@ -3,7 +3,8 @@ import { NodeOAuthClientProvider } from './node-oauth-client-provider'
 import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
-import { refreshAuthorization } from '@modelcontextprotocol/sdk/client/auth.js'
+import { auth, refreshAuthorization } from '@modelcontextprotocol/sdk/client/auth.js'
+import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 
 vi.mock('./mcp-auth-config')
 vi.mock('./authorization-server-metadata', () => ({
@@ -49,6 +50,7 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
   })
 
   afterEach(() => {
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -111,6 +113,135 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       await provider.redirectToAuthorization(authUrl)
 
       expect(authUrl.searchParams.get('scope')).toBe('openid email profile')
+    })
+
+    it.each(['invalid_client', 'unauthorized_client'])('reports a cached dynamic registration rejected with %s', async (errorCode) => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'stale-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      await provider.clientInformation()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          status: 400,
+          json: async () => ({ error: errorCode }),
+        }),
+      )
+
+      await expect(
+        provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=stale-client')),
+      ).rejects.toBeInstanceOf(errorCode === 'invalid_client' ? InvalidClientError : UnauthorizedClientError)
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('lets the SDK clear and re-register a cached dynamic client once', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'stale-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      const requests: string[] = []
+      const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = input.toString()
+        requests.push(`${init?.method ?? 'GET'} ${url}`)
+
+        if (url === 'https://example.com/.well-known/oauth-protected-resource') {
+          return new Response(null, { status: 404 })
+        }
+        if (url === 'https://example.com/.well-known/oauth-authorization-server') {
+          return Response.json({
+            issuer: 'https://example.com',
+            authorization_endpoint: 'https://example.com/authorize',
+            token_endpoint: 'https://example.com/token',
+            registration_endpoint: 'https://example.com/register',
+            response_types_supported: ['code'],
+          })
+        }
+        if (url === 'https://example.com/register') {
+          return Response.json(
+            {
+              client_id: 'fresh-client',
+              redirect_uris: ['http://localhost:8080/oauth/callback'],
+            },
+            { status: 201 },
+          )
+        }
+        if (url.startsWith('https://example.com/authorize?')) {
+          return Response.json({ error: 'invalid_client' }, { status: 400 })
+        }
+
+        throw new Error(`Unexpected request: ${url}`)
+      })
+      vi.stubGlobal('fetch', fetchFn)
+
+      await expect(
+        auth(provider, {
+          serverUrl: new URL(defaultOptions.serverUrl),
+          fetchFn,
+        }),
+      ).resolves.toBe('REDIRECT')
+
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'client_info.json')
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+      expect(requests.filter((request) => request === 'POST https://example.com/register')).toHaveLength(1)
+      expect(requests.filter((request) => request.startsWith('GET https://example.com/authorize?'))).toHaveLength(1)
+    })
+
+    it('does not infer a stale registration from error_description text', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      mockReadJsonFile.mockResolvedValueOnce({
+        client_id: 'cached-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      await provider.clientInformation()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          status: 400,
+          json: async () => ({
+            error: 'invalid_request',
+            error_description: "Client ID 'cached-client' is not registered with this server",
+          }),
+        }),
+      )
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=cached-client'))
+
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('does not preflight a freshly registered dynamic client', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      await provider.saveClientInformation({
+        client_id: 'fresh-client',
+        redirect_uris: ['http://localhost:8080/oauth/callback'],
+      })
+      const preflight = vi.fn()
+      vi.stubGlobal('fetch', preflight)
+
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=fresh-client'))
+
+      expect(preflight).not.toHaveBeenCalled()
+    })
+
+    it('does not preflight a static client registration', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientInfo: {
+          client_id: 'static-client',
+          redirect_uris: ['http://localhost:8080/oauth/callback'],
+        },
+      })
+      const preflight = vi.fn()
+      vi.stubGlobal('fetch', preflight)
+
+      await provider.clientInformation()
+      await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=static-client'))
+
+      expect(preflight).not.toHaveBeenCalled()
     })
   })
 
