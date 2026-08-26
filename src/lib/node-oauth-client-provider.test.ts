@@ -190,6 +190,64 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('token exchange loop protection', () => {
+    const anAccessToken = { access_token: 'at', token_type: 'Bearer', expires_in: 3600 } as any
+
+    /** Saves repeatedly until the brake bites, returning how many got through. */
+    const saveUntilRefused = async (limit = 60) => {
+      for (let attempt = 1; attempt <= limit; attempt++) {
+        try {
+          await provider.saveTokens({ ...anAccessToken })
+        } catch {
+          return attempt
+        }
+      }
+      return undefined
+    }
+
+    it('allows the few refreshes a burst of concurrent requests can legitimately cause', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      for (let i = 0; i < 10; i++) {
+        await expect(provider.saveTokens({ ...anAccessToken })).resolves.toBeUndefined()
+      }
+    })
+
+    it('stops once tokens are issued faster than any token lifetime could explain', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      // A server rejecting every token it is handed makes this unbounded without the brake
+      const refusedAt = await saveUntilRefused()
+
+      expect(refusedAt).toBeDefined()
+      expect(refusedAt).toBeLessThanOrEqual(25)
+    })
+
+    it('does not send the user to a browser while it is refusing to exchange', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      await saveUntilRefused()
+
+      // Otherwise a refused refresh just becomes a full sign-in, and the storm reappears as tabs
+      await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(/token exchanges/)
+    })
+
+    it('exchanges again once the burst has aged out', async () => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+        provider = new NodeOAuthClientProvider(defaultOptions)
+        await saveUntilRefused()
+
+        // The window slides, so a client that stopped hammering is not punished forever
+        vi.setSystemTime(new Date('2026-01-01T00:01:00Z'))
+
+        await expect(provider.saveTokens({ ...anAccessToken })).resolves.toBeUndefined()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   describe('credential invalidation', () => {
     it('should reset to default scopes after client invalidation', async () => {
       provider = new NodeOAuthClientProvider(defaultOptions)
