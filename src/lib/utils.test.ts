@@ -7,6 +7,7 @@ import {
   getServerUrlHash,
   calculateDefaultPort,
   mergeHeaders,
+  parseSecondsOption,
   MCP_REMOTE_VERSION,
 } from './utils'
 import { Headers as UndiciHeaders } from 'undici'
@@ -1889,6 +1890,43 @@ describe('Feature: Merging headers for the SSE request', () => {
     expect(mergeHeaders({ a: '1' }, undefined, { b: '2' })).toEqual({ a: '1', b: '2' })
     // An array of pairs, whose own `entries()` would yield [index, pair] if it were treated as iterable
     expect(mergeHeaders([['x-pair', 'value']])).toEqual({ 'x-pair': 'value' })
+  })
+})
+
+describe('Feature: Network Tuning Options', () => {
+  it('Scenario: Read a duration in seconds as milliseconds', () => {
+    expect(parseSecondsOption(['--connect-timeout', '30'], '--connect-timeout')).toBe(30000)
+    expect(parseSecondsOption(['--connect-timeout', '2.5'], '--connect-timeout')).toBe(2500)
+  })
+
+  it('Scenario: Absent flag leaves the setting alone', () => {
+    // Undefined rather than a default, so an unset flag never installs a dispatcher of its own
+    expect(parseSecondsOption(['--transport', 'sse-only'], '--connect-timeout')).toBeUndefined()
+    expect(parseSecondsOption(['--connect-timeout'], '--connect-timeout')).toBeUndefined()
+  })
+
+  it('Scenario: Zero disables a timeout, but only where that is meaningful', () => {
+    // `--body-timeout 0` is how you keep undici from tearing down an idle SSE stream
+    expect(parseSecondsOption(['--body-timeout', '0'], '--body-timeout', { allowZero: true })).toBe(0)
+    // A zero connect timeout would just mean "never connect", so it is rejected
+    expect(parseSecondsOption(['--connect-timeout', '0'], '--connect-timeout')).toBeUndefined()
+  })
+
+  it('Scenario: Reject values that are not durations', () => {
+    expect(parseSecondsOption(['--connect-timeout', 'soon'], '--connect-timeout')).toBeUndefined()
+    expect(parseSecondsOption(['--connect-timeout', '-5'], '--connect-timeout')).toBeUndefined()
+    expect(parseSecondsOption(['--body-timeout', 'Infinity'], '--body-timeout', { allowZero: true })).toBeUndefined()
+  })
+
+  it('Scenario: Accept the network flags alongside the server URL', async () => {
+    // Given every network flag set at once
+    const result = await parseCommandLineArgs(
+      ['https://example.remote/server', '--connect-timeout', '20', '--body-timeout', '0', '--headers-timeout', '90', '--ipv4'],
+      'Usage: mcp-remote <url>',
+    )
+
+    // Then they are consumed as options rather than mistaken for the URL or the callback port
+    expect(result.serverUrl).toBe('https://example.remote/server')
   })
 })
 
