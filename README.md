@@ -146,7 +146,7 @@ Some authorization servers reject the resource parameter outright — Microsoft 
       ]
 ```
 
-* To change which port `mcp-remote` listens for an OAuth redirect, add an additional argument after the server URL. By default the port is derived from the server URL, so every server gets a stable port of its own somewhere in `3335`-`49150`. Note that whatever port you specify, if it is unavailable an open port will be chosen at random.
+* To change which port `mcp-remote` listens for an OAuth redirect, add an additional argument after the server URL. By default the port is derived from the server URL, so every server gets a stable port of its own somewhere in `3335`-`49150`, and `mcp-remote` walks up to 8 ports from there if it finds one taken. A port you pass explicitly is used as-is: it implies a `redirect_uri` the authorization server has already been given, so `mcp-remote` fails rather than quietly moving to a different one. `--static-oauth-client-info` pins the port the same way, for the same reason.
 
 ```json
       "args": [
