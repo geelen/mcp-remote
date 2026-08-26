@@ -114,6 +114,57 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('scope from a live WWW-Authenticate challenge', () => {
+    it('should keep the scopes a 403 insufficient_scope asked for', async () => {
+      // Given a resource advertising only "read", and a call that turned out to need more
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        protectedResourceMetadata: { resource: 'https://example.com', scopes_supported: ['read'] } as any,
+      })
+
+      // When the SDK re-runs authorization with the scopes the challenge named
+      const authUrl = new URL('https://auth.example.com/authorize')
+      authUrl.searchParams.set('scope', 'read write admin')
+      await provider.redirectToAuthorization(authUrl)
+
+      // Then they survive. Re-requesting "read" would just be refused again.
+      expect(authUrl.searchParams.get('scope')).toBe('read write admin')
+    })
+
+    it('should still impose its own order on the scopes it supplied itself', async () => {
+      // Given a client whose own priority puts the WWW-Authenticate scope above the resource's
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        wwwAuthenticateScope: 'mcp:full',
+        protectedResourceMetadata: { resource: 'https://example.com', scopes_supported: ['read'] } as any,
+      })
+
+      // When the SDK offers the resource metadata scopes, which it prefers and this client does not
+      const authUrl = new URL('https://auth.example.com/authorize')
+      authUrl.searchParams.set('scope', 'read')
+      await provider.redirectToAuthorization(authUrl)
+
+      // Then this client's choice still wins
+      expect(authUrl.searchParams.get('scope')).toBe('mcp:full')
+    })
+
+    it('should let a user-pinned scope override the challenge', async () => {
+      // Given a scope the user pinned because the advertised ones do not work for them
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        staticOAuthClientMetadata: { scope: 'custom:only' } as any,
+        protectedResourceMetadata: { resource: 'https://example.com', scopes_supported: ['read'] } as any,
+      })
+
+      const authUrl = new URL('https://auth.example.com/authorize')
+      authUrl.searchParams.set('scope', 'read write admin')
+      await provider.redirectToAuthorization(authUrl)
+
+      // Then a challenge does not talk them out of it
+      expect(authUrl.searchParams.get('scope')).toBe('custom:only')
+    })
+  })
+
   describe('backward compatibility', () => {
     it('should preserve existing custom scope behavior', () => {
       provider = new NodeOAuthClientProvider({
