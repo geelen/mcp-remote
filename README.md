@@ -380,6 +380,11 @@ rm -rf ~/.mcp-auth
 
 Then restarting your MCP client.
 
+Credentials are stored under `mcp-remote-v1`, which names the layout of the store rather than the
+version of the package, so upgrading `mcp-remote` no longer signs you out. Releases before this
+change kept a separate directory per version — if you have `~/.mcp-auth/mcp-remote-0.x.y`
+directories left over, they hold old tokens and can be deleted.
+
 ### Check your Node version
 
 Make sure that the version of Node you have installed is [18 or

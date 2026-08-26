@@ -10,6 +10,7 @@ import {
   parseSecondsOption,
   MCP_REMOTE_VERSION,
 } from './utils'
+import { getConfigDir } from './mcp-auth-config'
 import { Headers as UndiciHeaders } from 'undici'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -1984,7 +1985,8 @@ describe('Feature: Stale Client Registration Invalidation', () => {
   beforeEach(() => {
     baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-remote-test-'))
     process.env.MCP_REMOTE_CONFIG_DIR = baseDir
-    versionDir = path.join(baseDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+    // Asked for rather than rebuilt here, so the store layout can be renamed without these lying
+    versionDir = getConfigDir()
   })
 
   afterEach(() => {

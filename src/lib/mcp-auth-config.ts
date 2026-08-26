@@ -1,7 +1,7 @@
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
-import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
+import { log, debugLog } from './utils'
 
 /**
  * MCP Remote Authentication Configuration
@@ -9,7 +9,8 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
  * This module handles the storage and retrieval of authentication-related data for MCP Remote.
  *
  * Configuration directory structure:
- * - The config directory is determined by MCP_REMOTE_CONFIG_DIR env var or defaults to ~/.mcp-auth
+ * - The config directory is determined by MCP_REMOTE_CONFIG_DIR env var or defaults to ~/.mcp-auth,
+ *   with a subdirectory naming the store layout - stable across releases, see CONFIG_STORE_VERSION
  * - Each file is prefixed with a hash of the server URL to separate configurations for different servers
  *
  * Files stored in the config directory:
@@ -27,13 +28,27 @@ import { log, debugLog, MCP_REMOTE_VERSION } from './utils'
  */
 
 /**
+ * The layout of the stored credentials, not the version of this package.
+ *
+ * Raise it by hand, and only when something already on disk would be misread by the code reading
+ * it - a renamed file, a changed shape, a credential that has to be reissued. Everyone's stored
+ * sign-ins are discarded when it changes, so that is the whole point of it and also the reason it
+ * should almost never move.
+ *
+ * It used to be the package version, which meant every release discarded them: a token store is
+ * keyed by this directory, so a new version always found an empty one and every server asked the
+ * user to sign in again. At ten releases in three days, that was a sign-in per release per server
+ * (see https://github.com/geelen/mcp-remote/issues/200).
+ */
+const CONFIG_STORE_VERSION = 1
+
+/**
  * Gets the configuration directory path
  * @returns The path to the configuration directory
  */
 export function getConfigDir(): string {
   const baseConfigDir = process.env.MCP_REMOTE_CONFIG_DIR || path.join(os.homedir(), '.mcp-auth')
-  // Add a version subdirectory so we don't need to worry about backwards/forwards compatibility yet
-  return path.join(baseConfigDir, `mcp-remote-${MCP_REMOTE_VERSION}`)
+  return path.join(baseConfigDir, `mcp-remote-v${CONFIG_STORE_VERSION}`)
 }
 
 /**
