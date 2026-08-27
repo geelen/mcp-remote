@@ -2261,6 +2261,65 @@ describe('Feature: MCP Proxy', () => {
       expect(sent.filter((m) => m.method === 'notifications/initialized')).toHaveLength(1)
     })
 
+    it('Scenario: Answer requests the vanished session can no longer answer', async () => {
+      // Given a request the server accepted and never answered, because the stream carrying its
+      // answer went away
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'ping' } } as any)
+      await vi.waitFor(() => expect(sent.some((m) => m.method === 'tools/call')).toBe(true))
+
+      // When the stream comes back on a new session
+      transportToServer.onStreamReconnect()
+      setTimeout(() => (transportToServer._endpoint = new URL(NEW_ENDPOINT)), 10)
+
+      // Then the client is told, rather than holding the request open for the life of the process
+      await vi.waitFor(() =>
+        expect(transportToClient.send).toHaveBeenCalledWith(
+          expect.objectContaining({ id: '2', error: expect.objectContaining({ code: -32001 }) }),
+        ),
+      )
+    })
+
+    it('Scenario: Leave answered requests, and requests still queued, alone', async () => {
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      await vi.waitFor(() => expect(sent).toHaveLength(1))
+      transportToServer.onmessage?.({ jsonrpc: '2.0', id: '1', result: { protocolVersion: '2025-11-25' } } as any)
+
+      // Given one request already answered
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'done' } } as any)
+      await vi.waitFor(() => expect(sent.some((m) => m.id === '2')).toBe(true))
+      transportToServer.onmessage?.({ jsonrpc: '2.0', id: '2', result: {} } as any)
+
+      // And one arriving while the stream is still coming back, so it was never sent
+      transportToServer.onStreamReconnect()
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '3', params: { name: 'queued' } } as any)
+      setTimeout(() => (transportToServer._endpoint = new URL(NEW_ENDPOINT)), 10)
+
+      // Then neither is failed: one is settled, and the other is waiting to go to the new session
+      await vi.waitFor(() => expect(sent.some((m) => m.id === '3' && m.sentTo === NEW_ENDPOINT)).toBe(true))
+      expect(transportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ error: expect.anything() }))
+    })
+
     it('Scenario: Leave a stream that has never dropped alone', async () => {
       // Given a proxy nobody has told about a reconnect
       const sent: any[] = []
@@ -2278,6 +2337,103 @@ describe('Feature: MCP Proxy', () => {
 
       await vi.waitFor(() => expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(1))
       expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(0)
+    })
+  })
+
+  describe('Feature: A token the server refuses after issuing it', () => {
+    const clientTransport = () =>
+      ({
+        send: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+      }) as unknown as Transport
+
+    /** The SDK's own circuit breaker: it refuses to authorize again once it already has. */
+    const rejectedAfterAuthorizing = () => new StreamableHTTPError(401, 'Server returned 401 after successful authentication')
+
+    it('Scenario: Discard it and retry, rather than presenting it again', async () => {
+      // Given a server that refuses the token it just issued, until it is thrown away
+      const sent: any[] = []
+      let credentialIsDead = true
+      const transportToClient = clientTransport()
+      const transportToServer = {
+        send: vi.fn(async (message: any) => {
+          sent.push(message)
+          if (credentialIsDead) throw rejectedAfterAuthorizing()
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+      } as unknown as Transport
+
+      const forgetRejectedAuthorization = vi.fn(async () => {
+        credentialIsDead = false
+      })
+
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [], forgetRejectedAuthorization })
+
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '1', params: { name: 'ping' } } as any)
+
+      // Then the dead credential is dropped and the request goes again, instead of the client
+      // being handed an error it can do nothing about
+      await vi.waitFor(() => expect(sent).toHaveLength(2))
+      expect(forgetRejectedAuthorization).toHaveBeenCalledTimes(1)
+      expect(transportToClient.send).not.toHaveBeenCalled()
+    })
+
+    it('Scenario: Give up after one discard rather than churning credentials', async () => {
+      // Given a server that refuses every token, however fresh
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = {
+        send: vi.fn(async (message: any) => {
+          sent.push(message)
+          throw rejectedAfterAuthorizing()
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+      } as unknown as Transport
+
+      const forgetRejectedAuthorization = vi.fn().mockResolvedValue(undefined)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [], forgetRejectedAuthorization })
+
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '1', params: { name: 'ping' } } as any)
+
+      // Then the client is told, once, and no third token is asked for
+      await vi.waitFor(() => expect(transportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: '1' })))
+      expect(forgetRejectedAuthorization).toHaveBeenCalledTimes(1)
+      expect(sent).toHaveLength(2)
+    })
+
+    it('Scenario: An ordinary 401 is left to the SDK', async () => {
+      // Given a challenge the SDK has not already tried to authorize past
+      const transportToClient = clientTransport()
+      const transportToServer = {
+        send: vi.fn().mockRejectedValue(new StreamableHTTPError(401, 'Unauthorized')),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+      } as unknown as Transport
+
+      const forgetRejectedAuthorization = vi.fn().mockResolvedValue(undefined)
+      const reauthorize = vi.fn().mockResolvedValue(undefined)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [], forgetRejectedAuthorization, reauthorize })
+
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '1', params: { name: 'ping' } } as any)
+
+      // Then a sign-in is what answers it, and no credential is thrown away
+      await vi.waitFor(() => expect(reauthorize).toHaveBeenCalled())
+      expect(forgetRejectedAuthorization).not.toHaveBeenCalled()
     })
   })
 

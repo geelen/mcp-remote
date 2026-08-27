@@ -21,6 +21,7 @@ import {
   setupSignalHandlers,
   TransportStrategy,
   discoverOAuthServerInfo,
+  forgetRejectedAuthorization,
 } from './lib/utils'
 import { KeepAliveConfig, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
@@ -151,6 +152,15 @@ async function runProxy(
       transportToServer: remoteTransport,
       ignoredTools,
       keepAlive,
+      /**
+       * Discards a token the server refused straight after issuing it.
+       *
+       * Clearing it is what turns the next attempt back into an ordinary 401, which `reauthorize`
+       * below can actually answer. Left alone, the SDK keeps presenting the same dead credential
+       * and refuses to ask for another, so the failure repeats on every run.
+       */
+      forgetRejectedAuthorization: () => forgetRejectedAuthorization(authProvider, remoteTransport),
+
       /**
        * Finishes a sign-in the remote server asked for mid-session.
        *

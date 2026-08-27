@@ -39,6 +39,7 @@ declare global {
 // Connection constants
 const REASON_AUTH_NEEDED = 'authentication-needed'
 const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+const REASON_REJECTED_TOKEN = 'server-rejected-a-freshly-issued-token'
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000
 
 /**
@@ -186,6 +187,48 @@ const RECONNECT_ENDPOINT_TIMEOUT_MS = 10_000
 /** How often to look, while waiting for it. */
 const RECONNECT_ENDPOINT_POLL_MS = 25
 
+/**
+ * Whether the server refused a token the SDK had only just obtained.
+ *
+ * The SDK carries a circuit breaker for this: once an authorization succeeds it sets a private
+ * flag, and answers any later 401 by throwing rather than authorizing again, so a server that
+ * refuses every token cannot spin it forever. What the SDK does not do is clear the token it was
+ * refused - so the same dead credential is read back from disk on the next run, and the next, and
+ * the connection fails the same way every time with nothing to explain it.
+ *
+ * This is deliberately narrow. It is not `error.code === 401`: a 401 the SDK has not already tried
+ * to authorize past is an ordinary challenge, and the SDK's own handling is what should see it.
+ */
+function isRejectedAfterAuthorizing(error: unknown): boolean {
+  return error instanceof StreamableHTTPError && error.code === 401 && error.message.includes('401 after successful authentication')
+}
+
+/**
+ * Discards the refused token, and the flag that stops the SDK asking for another.
+ *
+ * With both cleared, the next attempt finds no token, so the SDK runs a full sign-in through the
+ * ordinary path rather than anything special-cased here.
+ */
+export async function forgetRejectedAuthorization(
+  authProvider: OAuthClientProvider,
+  ...transports: Array<Transport | undefined>
+): Promise<void> {
+  try {
+    await authProvider.invalidateCredentials?.('tokens')
+  } catch (error) {
+    debugLog('Could not discard the refused token', error)
+  }
+
+  for (const transport of transports) {
+    // The SDK exposes the breaker only as a private field, and leaving it set would have the
+    // retry throw on the first 401 instead of signing in
+    const breaker = transport as (Transport & { _hasCompletedAuthFlow?: boolean }) | undefined
+    if (breaker && '_hasCompletedAuthFlow' in breaker) {
+      breaker._hasCompletedAuthFlow = false
+    }
+  }
+}
+
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
 export { MCP_REMOTE_VERSION }
@@ -326,6 +369,7 @@ export function mcpProxy({
   ignoredTools = [],
   keepAlive,
   reauthorize,
+  forgetRejectedAuthorization: forgetRejectedTokens,
 }: {
   transportToClient: Transport
   transportToServer: Transport
@@ -340,6 +384,13 @@ export function mcpProxy({
    * about.
    */
   reauthorize?: () => Promise<void>
+  /**
+   * Discards a token the server refused after the SDK had just obtained it.
+   *
+   * Supplied by the caller for the same reason `reauthorize` is: clearing it needs the auth
+   * provider and the transport's own state, neither of which a proxy between two transports has.
+   */
+  forgetRejectedAuthorization?: () => Promise<void>
 }) {
   let transportToClientClosed = false
   let transportToServerClosed = false
@@ -354,6 +405,13 @@ export function mcpProxy({
   let reauthorizeInFlight: Promise<void> | null = null
   /** In-flight recovery from a reconnected stream. See `onStreamReconnect` below. */
   let sessionResumption: Promise<void> | null = null
+  /**
+   * Client requests that have gone to the server and are still waiting on an answer.
+   *
+   * Recorded at the point of sending rather than of receiving, so a request still queued behind a
+   * reconnect is not counted as one the vanished session owes an answer for.
+   */
+  const pendingRequests = new Set<string | number>()
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -443,6 +501,10 @@ export function mcpProxy({
       return
     }
 
+    if (incomingId !== undefined && incomingId !== null) {
+      pendingRequests.delete(incomingId)
+    }
+
     // TODO: fix types
     const message = messageTransformer.interceptResponse(_message as any)
     log('[Remote→Local]', message.method || message.id)
@@ -496,6 +558,11 @@ export function mcpProxy({
   // and requests keep going out against a lifecycle that never started.
   ;(transportToServer as StreamReconnectAware).onStreamReconnect = () => {
     const droppedEndpoint = postEndpoint()
+
+    // Whatever was in flight went to a session that no longer exists, and its answer was going to
+    // arrive on a stream that no longer exists either. Nothing will ever complete these, so the
+    // client is told now rather than waiting on them for the life of the process.
+    failPendingRequests('the connection to the remote server dropped before this could be answered')
 
     // Assigned before anything is awaited. The gap between the stream coming back and the
     // handshake going out is exactly when a client request is most likely to arrive, and one
@@ -721,7 +788,7 @@ export function mcpProxy({
     return reauthorizeInFlight
   }
 
-  async function sendToServer(message: Message, alreadyReauthorized = false) {
+  async function sendToServer(message: Message, alreadyReauthorized = false, alreadyDiscardedToken = false) {
     // The stream came back on a session that has not been handshaked yet. Sending now would race
     // the recovery onto the session the server dropped, and that failure is indistinguishable from
     // a real one. The recovery's own messages go out through `transportToServer.send`, so it never
@@ -730,10 +797,33 @@ export function mcpProxy({
       await sessionResumption
     }
 
+    const awaitsAnswer = message.method !== undefined && message.id !== undefined && message.id !== null
+    if (awaitsAnswer) pendingRequests.add(message.id!)
+
     try {
       await transportToServer.send(message)
       return
     } catch (error) {
+      if (awaitsAnswer) pendingRequests.delete(message.id!)
+
+      // A token the server refused straight after issuing it is not a sign-in problem yet - it is
+      // a dead credential the SDK will keep presenting, because it will not ask for another while
+      // it holds one. Discarding it turns the next attempt into an ordinary 401, which the branch
+      // below then answers with a real sign-in. Once only: a second refusal is the server refusing
+      // tokens on principle, and repeating this would just churn credentials.
+      if (forgetRejectedTokens && !alreadyDiscardedToken && isRejectedAfterAuthorizing(error)) {
+        log('The server rejected a token it had just issued - discarding it and asking for another')
+        debugLog('Rejected token mid-session', { id: message.id, method: message.method })
+        try {
+          await forgetRejectedTokens()
+          await sendToServer(message, alreadyReauthorized, true)
+        } catch (discardError) {
+          onServerError(discardError as Error)
+          replyWithError(message, discardError as Error)
+        }
+        return
+      }
+
       // The sign-in the SDK started can still be completed, but only by someone holding the
       // callback port. Retried once: a second refusal is the server rejecting a token we just
       // obtained, which another flow will not fix (see issues #133, #179, #248, #256, #286).
@@ -742,7 +832,7 @@ export function mcpProxy({
         debugLog('Unauthorized send, re-authorizing', { id: message.id, method: message.method })
         try {
           await reauthorizeOnce()
-          await sendToServer(message, true)
+          await sendToServer(message, true, alreadyDiscardedToken)
         } catch (authError) {
           onServerError(authError as Error)
           replyWithError(message, authError as Error)
@@ -768,6 +858,23 @@ export function mcpProxy({
         replyWithError(message, retryError as Error)
       }
     }
+  }
+
+  /**
+   * Answers every request the remote server can no longer answer.
+   *
+   * A failed send is reported to the client by `replyWithError`, but a request that was accepted
+   * and then lost - because the stream carrying its answer went away - has nobody to report it.
+   * The client holds it open forever, which is what a wedged bridge looks like from the outside.
+   */
+  function failPendingRequests(reason: string) {
+    if (pendingRequests.size === 0) return
+
+    debugLog('Failing requests the dropped session can no longer answer', { ids: [...pendingRequests] })
+    for (const id of pendingRequests) {
+      transportToClient.send({ jsonrpc: '2.0', id, error: { code: -32001, message: `mcp-remote: ${reason}` } }).catch(onClientError)
+    }
+    pendingRequests.clear()
   }
 
   /**
@@ -1122,6 +1229,22 @@ export async function connectToRemoteServer(
         sseTransport ? 'http-only' : 'sse-only',
         recursionReasons,
       )
+    } else if (isRejectedAfterAuthorizing(error)) {
+      // Nothing else clears this. The token is on disk, the SDK will not ask for another while it
+      // holds one, and the server will not take the one it has - so every run fails here until the
+      // credential is deleted by hand. Discarding it puts the next attempt back on the ordinary
+      // sign-in path rather than repeating any of it here.
+      if (recursionReasons.has(REASON_REJECTED_TOKEN)) {
+        log('The server rejected a freshly issued token as well. Giving up.')
+        throw error
+      }
+
+      log('The server rejected a token it had just issued - discarding it and signing in again')
+      debugLog('Rejected token after a successful authorization', { message: error.message })
+      await forgetRejectedAuthorization(authProvider, transport, authChallengeTransport)
+
+      recursionReasons.add(REASON_REJECTED_TOKEN)
+      return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
     } else if (error instanceof UnauthorizedError || (error instanceof Error && error.message.includes('Unauthorized'))) {
       log('Authentication required. Initializing auth...')
       debugLog('Authentication error detected', {
