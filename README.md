@@ -369,6 +369,16 @@ npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "
 npx mcp-remote https://example.remote/server --static-oauth-client-metadata '@/Users/username/Library/Application Support/Claude/oauth_client_metadata.json'
 ```
 
+What you provide is merged over the defaults, so this is also how you pin a value mcp-remote would
+otherwise negotiate. `token_endpoint_auth_method` is picked from the authorization server's
+`token_endpoint_auth_methods_supported`: `none` when the server accepts public clients, otherwise
+`client_secret_post`, otherwise `client_secret_basic`. Override it when the server needs something
+else:
+
+```bash
+npx mcp-remote https://example.remote/server --static-oauth-client-metadata '{ "token_endpoint_auth_method": "client_secret_post" }'
+```
+
 ### Static OAuth Client Information
 
 Per the [spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization#2-4-dynamic-client-registration),

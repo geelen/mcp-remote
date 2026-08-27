@@ -321,6 +321,69 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('token endpoint authentication method', () => {
+    const methodFor = (token_endpoint_auth_methods_supported?: string[]) =>
+      new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: {
+          issuer: 'https://auth.example.com',
+          ...(token_endpoint_auth_methods_supported ? { token_endpoint_auth_methods_supported } : {}),
+        } as AuthorizationServerMetadata,
+      }).clientMetadata.token_endpoint_auth_method
+
+    it('registers as a public client when there is no metadata to read', () => {
+      // Given a server we discovered nothing about
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      // Then PKCE alone, which is what every server working today already gets
+      expect(provider.clientMetadata.token_endpoint_auth_method).toBe('none')
+    })
+
+    it('registers as a public client when the metadata omits the list', () => {
+      expect(methodFor(undefined)).toBe('none')
+    })
+
+    it('registers as a public client when the server accepts one', () => {
+      // Given a server that takes public clients, we stay one rather than
+      // accept a secret we have nowhere safe to keep
+      expect(methodFor(['client_secret_basic', 'none'])).toBe('none')
+    })
+
+    it('takes a client secret when the server will not accept public clients', () => {
+      // Given the metadata from issue #184, which offers no public-client method
+      // Then registration asks for one the server will actually honour
+      expect(methodFor(['client_secret_post', 'private_key_jwt'])).toBe('client_secret_post')
+    })
+
+    it('falls back to basic auth when the server does not offer post', () => {
+      expect(methodFor(['client_secret_basic'])).toBe('client_secret_basic')
+    })
+
+    it('prefers post to basic when the server offers both', () => {
+      expect(methodFor(['client_secret_basic', 'client_secret_post'])).toBe('client_secret_post')
+    })
+
+    it('stays a public client when it can perform none of the methods offered', () => {
+      // Given a server wanting a signed assertion, which this client has no key to produce.
+      // Registering as something we cannot carry out would only move the failure to the
+      // token request, so we register the one way we can and let the server object.
+      expect(methodFor(['private_key_jwt', 'tls_client_auth'])).toBe('none')
+    })
+
+    it('lets a user-pinned method override what the server advertises', () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        authorizationServerMetadata: {
+          issuer: 'https://auth.example.com',
+          token_endpoint_auth_methods_supported: ['client_secret_post'],
+        } as AuthorizationServerMetadata,
+        staticOAuthClientMetadata: { token_endpoint_auth_method: 'client_secret_basic' } as any,
+      })
+
+      expect(provider.clientMetadata.token_endpoint_auth_method).toBe('client_secret_basic')
+    })
+  })
+
   describe('a changed scope request', () => {
     const storedWith = (requested_scope: string | undefined) => {
       mockReadJsonFile.mockResolvedValue({

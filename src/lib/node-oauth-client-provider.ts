@@ -50,6 +50,12 @@ const TOKEN_STORM_WINDOW_MS = 30_000
 /** How long a flow may still be in progress, and its verifier still needed. */
 const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
 
+/**
+ * The token endpoint authentication methods this client can actually perform, best first.
+ * See {@link NodeOAuthClientProvider.getTokenEndpointAuthMethod}.
+ */
+const TOKEN_ENDPOINT_AUTH_METHOD_PREFERENCE = ['none', 'client_secret_post', 'client_secret_basic']
+
 type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
 
 function staleClientRegistrationError(value: unknown): InvalidClientError | UnauthorizedClientError | undefined {
@@ -154,7 +160,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const effectiveScope = this.getEffectiveScope()
     return {
       redirect_uris: [this.redirectUrl],
-      token_endpoint_auth_method: 'none',
+      token_endpoint_auth_method: this.getTokenEndpointAuthMethod(),
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       client_name: this.clientName,
@@ -194,6 +200,49 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       debugLog('Failed to fetch authorization server metadata', error)
       return undefined
     }
+  }
+
+  /**
+   * Picks how this client will authenticate at the token endpoint, from what the server offers.
+   *
+   * `none` comes first because that is what this client honestly is: a public client on someone's
+   * laptop, holding no secret worth the name and relying on PKCE. Registering as anything else,
+   * only to be handed a secret that npx writes to disk, buys nothing.
+   *
+   * But an authorization server that leaves `none` out of `token_endpoint_auth_methods_supported`
+   * has said it will not accept public clients, and registering as one anyway produced a client
+   * whose token requests it then refused (see issue #184). So when `none` is not on offer we take
+   * the best of the secret-based methods we can actually perform and let dynamic registration hand
+   * us the secret; the SDK reads the method back off the registration and sends it that way.
+   *
+   * `private_key_jwt` and its relatives are left out deliberately - they need a key pair and a
+   * signed assertion, neither of which this client has any way to produce.
+   *
+   * With no metadata to read we stay on `none`, which is what every server working today already
+   * gets. RFC 8414's `client_secret_basic` default describes servers that publish metadata; one
+   * that publishes none has told us nothing to act on.
+   */
+  private getTokenEndpointAuthMethod(): string {
+    const supported = this.authorizationServerMetadata?.token_endpoint_auth_methods_supported
+    if (!Array.isArray(supported) || supported.length === 0) {
+      return 'none'
+    }
+
+    const method = TOKEN_ENDPOINT_AUTH_METHOD_PREFERENCE.find((candidate) => supported.includes(candidate))
+    if (!method) {
+      debugLog('Authorization server advertises no token endpoint auth method this client can perform', {
+        token_endpoint_auth_methods_supported: supported,
+      })
+      return 'none'
+    }
+
+    if (method !== 'none') {
+      debugLog('Registering with the token endpoint auth method the authorization server advertises', {
+        token_endpoint_auth_method: method,
+        token_endpoint_auth_methods_supported: supported,
+      })
+    }
+    return method
   }
 
   private getEffectiveScope(): string {
