@@ -3,6 +3,7 @@ import { NodeOAuthClientProvider } from './node-oauth-client-provider'
 import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
+import { log } from './utils'
 import { auth, refreshAuthorization } from '@modelcontextprotocol/sdk/client/auth.js'
 import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 
@@ -1060,6 +1061,95 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
 
     expect(mockRefresh).not.toHaveBeenCalled()
     expect(result?.access_token).toBe('stale-token')
+  })
+
+  describe('the ID token as the bearer credential', () => {
+    /** An unsigned JWT: nothing here verifies one, it only reads `exp` to decide when to renew. */
+    const idToken = (expiresAt: number, label = 'id') =>
+      [
+        Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'),
+        Buffer.from(JSON.stringify({ sub: label, exp: Math.floor(expiresAt / 1000) })).toString('base64url'),
+        '',
+      ].join('.')
+
+    it('Scenario: the access token is still what gets sent by default', async () => {
+      // Given a server that issued both, and no flag asking for the ID token
+      const token = idToken(Date.now() + 10 * 60 * 1000)
+      withStoredTokens(storedTokens({ id_token: token, expires_at: Date.now() + 10 * 60 * 1000 }))
+
+      const result = await new NodeOAuthClientProvider(options).tokens()
+
+      expect(result?.access_token).toBe('stale-token')
+    })
+
+    it('Scenario: the ID token is presented when the server verifies identity', async () => {
+      // Given a server reading claims off an ID token rather than checking scopes (issue #219)
+      const token = idToken(Date.now() + 10 * 60 * 1000)
+      withStoredTokens(storedTokens({ id_token: token, expires_at: Date.now() + 10 * 60 * 1000 }))
+
+      const result = await new NodeOAuthClientProvider({ ...options, useIdToken: true }).tokens()
+
+      // Then it is the credential on the wire, while the refresh token is untouched
+      expect(result?.access_token).toBe(token)
+      expect(result?.refresh_token).toBe('r1')
+    })
+
+    it('Scenario: renewal follows the ID token, not the access token beside it', async () => {
+      // Given an ID token about to expire and an access token good for another ten minutes
+      withStoredTokens(storedTokens({ id_token: idToken(Date.now() + 10_000, 'old'), expires_at: Date.now() + 10 * 60 * 1000 }))
+      const fresh = idToken(Date.now() + 60 * 60 * 1000, 'new')
+      mockRefresh.mockResolvedValue({
+        access_token: 'fresh-token',
+        id_token: fresh,
+        refresh_token: 'r2',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      })
+
+      const result = await new NodeOAuthClientProvider({ ...options, useIdToken: true }).tokens()
+
+      // Then the credential is renewed before it is sent, which reading expires_in alone would miss
+      expect(mockRefresh).toHaveBeenCalledTimes(1)
+      expect(result?.access_token).toBe(fresh)
+    })
+
+    it('Scenario: an expired access token beside a good ID token is not worth a refresh', async () => {
+      // Given the reverse: the access token has lapsed but the ID token has an hour left
+      const token = idToken(Date.now() + 60 * 60 * 1000)
+      withStoredTokens(storedTokens({ id_token: token, expires_at: Date.now() - 1000 }))
+
+      const result = await new NodeOAuthClientProvider({ ...options, useIdToken: true }).tokens()
+
+      // Then nothing is renewed: the lapsed token is not the one being sent, and spending a
+      // refresh token on it risks the rotation chain for a credential nobody will see
+      expect(mockRefresh).not.toHaveBeenCalled()
+      expect(result?.access_token).toBe(token)
+    })
+
+    it('Scenario: an ID token whose expiry cannot be read falls back to the access token expiry', async () => {
+      withStoredTokens(storedTokens({ id_token: 'not-a-jwt', expires_at: Date.now() + 10 * 60 * 1000 }))
+
+      const result = await new NodeOAuthClientProvider({ ...options, useIdToken: true }).tokens()
+
+      // Not refreshed on the strength of an expiry we could not read
+      expect(mockRefresh).not.toHaveBeenCalled()
+      expect(result?.access_token).toBe('not-a-jwt')
+    })
+
+    it('Scenario: a server that issues no ID token is reported once, not on every request', async () => {
+      withStoredTokens(storedTokens({ expires_at: Date.now() + 10 * 60 * 1000 }))
+      const provider = new NodeOAuthClientProvider({ ...options, useIdToken: true })
+      const warnings = () => vi.mocked(log).mock.calls.filter(([message]) => String(message).includes('--use-id-token'))
+
+      const first = await provider.tokens()
+      await provider.tokens()
+      await provider.tokens()
+
+      // One clean rejection from the server beats a sign-in loop that returns the same tokens,
+      // and tokens() runs on every outgoing request, so the warning cannot repeat
+      expect(first?.access_token).toBe('stale-token')
+      expect(warnings()).toHaveLength(1)
+    })
   })
 })
 

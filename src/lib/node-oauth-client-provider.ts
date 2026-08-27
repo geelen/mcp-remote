@@ -60,6 +60,24 @@ const TOKEN_ENDPOINT_AUTH_METHOD_PREFERENCE = ['none', 'client_secret_post', 'cl
 
 type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | 'client-id-metadata-document' | undefined
 
+/**
+ * Reads the `exp` claim off a JWT, as a millisecond timestamp.
+ *
+ * Deliberately no signature check: this decides when to renew a credential we already hold, not
+ * whether to trust one that arrived. Verifying is the resource server's job.
+ */
+function jwtExpiresAt(token: string): number | undefined {
+  const payload = token.split('.')[1]
+  if (!payload) return undefined
+
+  try {
+    const { exp } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    return typeof exp === 'number' ? exp * 1000 : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function staleClientRegistrationError(value: unknown): InvalidClientError | UnauthorizedClientError | undefined {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -95,6 +113,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * registered client id. Read by the SDK, hence a public field rather than a private one.
    */
   clientMetadataUrl?: string
+  private useIdToken: boolean
+  /** So a server that never issues an ID token is reported once, not on every outgoing request. */
+  private warnedAboutMissingIdToken = false
   private authorizeResource: string | undefined
   private authorizeParams: Record<string, string>
   private skipResourceParameter: boolean
@@ -129,6 +150,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this.clientMetadataUrl = options.clientMetadataUrl
+    this.useIdToken = options.useIdToken ?? false
     const trimmedAuthorizeResource = options.authorizeResource?.trim()
     this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
     this.skipResourceParameter = options.skipResourceParameter ?? false
@@ -427,14 +449,16 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
 
       // Use the persisted absolute expiry timestamp to detect imminent expiry,
       // refreshing ~60s early to avoid sending a token that is about to 401.
-      const isExpired = tokens.expires_at ? Date.now() >= tokens.expires_at - 60_000 : false
+      const expiresAt = this.bearerExpiresAt(tokens)
+      const isExpired = expiresAt ? Date.now() >= expiresAt - 60_000 : false
 
       debugLog('Token result:', {
         found: true,
         hasAccessToken: !!tokens.access_token,
+        hasIdToken: !!tokens.id_token,
         hasRefreshToken: !!tokens.refresh_token,
         expiresIn: `${timeLeft} seconds`,
-        expiresAt: tokens.expires_at ? new Date(tokens.expires_at).toISOString() : 'unknown',
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : 'unknown',
         isExpired,
       })
 
@@ -445,7 +469,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       if (isExpired && tokens.refresh_token) {
         const refreshed = await this.refreshTokens(tokens.refresh_token)
         if (refreshed) {
-          return refreshed
+          return this.asBearerTokens(refreshed)
         }
         // Refresh failed: hand back what we have and let the SDK's own 401
         // handling take it from here, exactly as it did before.
@@ -455,7 +479,55 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       debugLog('Token result: Not found')
     }
 
-    return tokens
+    return this.asBearerTokens(tokens)
+  }
+
+  /**
+   * The token to present as the Bearer credential.
+   *
+   * An access token says what the caller may do; an ID token says who they are. A server that
+   * verifies identity against an OIDC JWKS endpoint and reads claims like `sub` and `email` wants
+   * the second and rejects the first outright - AWS Cognito in front of Bedrock AgentCore being
+   * the deployment this was reported for (issue #219).
+   *
+   * Only the credential presented is swapped. The refresh token, and everything the SDK does with
+   * it, is left alone, so renewal still happens the way the authorization server expects.
+   */
+  private asBearerTokens<T extends OAuthTokens>(tokens: T | undefined): T | undefined {
+    if (!tokens || !this.useIdToken) {
+      return tokens
+    }
+
+    if (!tokens.id_token) {
+      // Sending the access token instead will almost certainly be refused - a server asked for an
+      // ID token because it will not take the other one - but it fails once, with the server's own
+      // message, rather than looping through a sign-in that returns the same tokens again.
+      if (!this.warnedAboutMissingIdToken) {
+        this.warnedAboutMissingIdToken = true
+        log(
+          'Warning: --use-id-token was passed but the authorization server issued no ID token, so the access token ' +
+            'is being sent instead. An ID token is only returned when `openid` is among the requested scopes.',
+        )
+      }
+      return tokens
+    }
+
+    debugLog('Presenting the ID token as the bearer credential')
+    return { ...tokens, access_token: tokens.id_token }
+  }
+
+  /**
+   * When the credential this client actually sends stops being accepted.
+   *
+   * `expires_in` describes the access token, which under `--use-id-token` is not what goes on the
+   * wire. An ID token is issued alongside it with a lifetime of its own, so reading `exp` off the
+   * JWT is what keeps the proactive refresh honest about the credential in use.
+   */
+  private bearerExpiresAt(tokens: OAuthTokensWithExpiresAt): number | undefined {
+    if (!this.useIdToken || !tokens.id_token) {
+      return tokens.expires_at
+    }
+    return jwtExpiresAt(tokens.id_token) ?? tokens.expires_at
   }
 
   /**

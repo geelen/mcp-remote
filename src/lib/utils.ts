@@ -1630,6 +1630,12 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  // An MCP server that verifies who the caller is, rather than what they may do, wants the ID token
+  const useIdToken = args.includes('--use-id-token')
+  if (useIdToken) {
+    log('Using the ID token as the bearer credential')
+  }
+
   // Parse the RFC 8707 resource indicator, and whether to omit it entirely
   let authorizeResource: string | undefined
   let skipResourceParameter = args.includes('--disable-resource-parameter')
@@ -1775,6 +1781,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
     clientMetadataUrl,
+    useIdToken,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,

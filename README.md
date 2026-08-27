@@ -424,6 +424,30 @@ yourself:
 npx mcp-remote https://example.remote/server 3334 --client-metadata-url https://client.example.com/.well-known/oauth-client-metadata
 ```
 
+### Using the ID Token as the Bearer Credential
+
+By default mcp-remote sends the OAuth **access token**, which says what the caller is allowed to
+do. Some servers instead verify **who** the caller is: they validate an OIDC **ID token** against a
+JWKS endpoint and read identity claims such as `sub` and `email` from it. AWS Cognito in front of
+Bedrock AgentCore works this way, and rejects the access token outright.
+
+Pass `--use-id-token` to send the ID token instead:
+
+```bash
+npx mcp-remote https://example.remote/server --use-id-token
+```
+
+Only the credential presented to the MCP server changes — the refresh token and the renewal flow
+are untouched. Renewal follows the ID token's own `exp` claim rather than the access token's
+lifetime, since the ID token is what actually goes on the wire.
+
+An ID token is only issued when `openid` is among the requested scopes. If your server does not
+advertise it, ask for it explicitly:
+
+```bash
+npx mcp-remote https://example.remote/server --use-id-token --static-oauth-client-metadata '{ "scope": "openid email" }'
+```
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)

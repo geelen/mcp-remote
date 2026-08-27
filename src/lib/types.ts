@@ -31,6 +31,8 @@ export interface OAuthProviderOptions {
   staticOAuthClientInfo?: StaticOAuthClientInformationFull
   /** URL of a Client ID Metadata Document (SEP-991), used as the client_id instead of registering */
   clientMetadataUrl?: string
+  /** Present the OIDC ID token as the Bearer credential instead of the access token */
+  useIdToken?: boolean
   /** Resource parameter to send to the authorization server */
   authorizeResource?: string
   /** Omit the RFC 8707 resource parameter entirely (some servers reject it, e.g. Entra ID v2) */

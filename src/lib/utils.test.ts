@@ -139,6 +139,18 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.clientMetadataUrl).toBeUndefined()
   })
 
+  it('Scenario: Ask for the ID token to be sent as the bearer credential', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/sse', '--use-id-token'], 'test usage')
+
+    expect(result.useIdToken).toBe(true)
+  })
+
+  it('Scenario: Send the access token when nothing asks otherwise', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+
+    expect(result.useIdToken).toBe(false)
+  })
+
   it('Scenario: Keep credentials for a metadata document client apart from registered ones', async () => {
     // Given the same server reached once by registration and once by metadata document
     const registered = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
