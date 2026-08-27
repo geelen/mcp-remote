@@ -10,6 +10,7 @@ import {
   calculateDefaultPort,
   mergeHeaders,
   parseSecondsOption,
+  parseAuthorizeParams,
   MCP_REMOTE_VERSION,
 } from './utils'
 import { getConfigDir } from './mcp-auth-config'
@@ -2670,5 +2671,73 @@ describe('Feature: Keep-alive command line flags', () => {
   it('Scenario: An unusable interval falls back to the default rather than disabling the flag', async () => {
     const result = await parseCommandLineArgs(['https://example.com/mcp', '--keep-alive', '--ping-interval', 'soon'], 'usage')
     expect(result.keepAlive).toEqual({ enabled: true, intervalMs: 30_000 })
+  })
+})
+
+describe('Feature: Extra authorization parameters', () => {
+  it('Scenario: Collects repeated key=value flags', async () => {
+    // Given a server that wants Google's offline-access parameters
+    const args = ['https://example.com/mcp', '--authorize-param', 'access_type=offline', '--authorize-param', 'prompt=consent']
+
+    // When the arguments are parsed
+    const result = await parseCommandLineArgs(args, 'usage')
+
+    // Then both are collected
+    expect(result.authorizeParams).toEqual({ access_type: 'offline', prompt: 'consent' })
+  })
+
+  it('Scenario: Only the first = separates key from value', () => {
+    // Given a value that itself contains '=', as a JWT or base64 padding does
+    const params = parseAuthorizeParams(['--authorize-param', 'audience=https://api.example.com/?a=b'])
+
+    // Then the value survives intact
+    expect(params).toEqual({ audience: 'https://api.example.com/?a=b' })
+  })
+
+  it('Scenario: Refuses parameters the flow derives per request', () => {
+    // Given an attempt to pin the PKCE challenge
+    // Then it is refused, rather than surfacing later as an opaque server error
+    expect(() => parseAuthorizeParams(['--authorize-param', 'code_challenge=abc'])).toThrow(/part of the authorization flow itself/)
+    expect(() => parseAuthorizeParams(['--authorize-param', 'state=abc'])).toThrow(/part of the authorization flow itself/)
+    expect(() => parseAuthorizeParams(['--authorize-param', 'client_id=abc'])).toThrow(/part of the authorization flow itself/)
+  })
+
+  it('Scenario: Rejects a value that is not key=value', () => {
+    expect(() => parseAuthorizeParams(['--authorize-param', 'audience'])).toThrow(/Expected key=value/)
+    expect(() => parseAuthorizeParams(['--authorize-param', '=orphaned'])).toThrow(/Expected key=value/)
+  })
+
+  it('Scenario: No flags means no parameters', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp'], 'usage')
+    expect(result.authorizeParams).toEqual({})
+  })
+
+  it('Scenario: Differing parameters do not share stored credentials', () => {
+    // Given the same server authorized for two different APIs
+    const a = getServerUrlHash('https://example.com/mcp', undefined, undefined, { audience: 'https://api-a.example.com' })
+    const b = getServerUrlHash('https://example.com/mcp', undefined, undefined, { audience: 'https://api-b.example.com' })
+
+    // Then a token issued for one is never reused for the other
+    expect(a).not.toBe(b)
+  })
+
+  it('Scenario: Parameter order does not change the credential key', () => {
+    // Given the same parameters supplied in either order
+    const a = getServerUrlHash('https://example.com/mcp', undefined, undefined, { access_type: 'offline', prompt: 'consent' })
+    const b = getServerUrlHash('https://example.com/mcp', undefined, undefined, { prompt: 'consent', access_type: 'offline' })
+
+    // Then the sign-in is reused rather than silently repeated
+    expect(a).toBe(b)
+  })
+
+  it('Scenario: Adding no parameters leaves existing credentials addressable', () => {
+    // Given the hash a previous release computed for this server
+    const before = getServerUrlHash('https://example.com/mcp')
+
+    // When the new argument is threaded through empty
+    const after = getServerUrlHash('https://example.com/mcp', undefined, undefined, {})
+
+    // Then nobody is signed out by the upgrade
+    expect(after).toBe(before)
   })
 })

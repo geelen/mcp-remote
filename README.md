@@ -120,10 +120,38 @@ To run multiple instances of the same remote server with different configuration
 }
 ```
 
-Each unique combination of server URL, resource, and custom headers will maintain separate OAuth sessions and token storage.
+Each unique combination of server URL, resource, custom headers, and `--authorize-param` values will maintain separate OAuth sessions and token storage.
 
 The `--resource` value is sent as the RFC 8707 resource indicator on the authorization, token and
 refresh requests alike, so they always agree.
+
+### Extra authorization parameters
+
+Some authorization servers require parameters of their own on the authorize call. Pass each as
+`--authorize-param key=value`, repeating the flag as needed:
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/mcp",
+        "--authorize-param",
+        "access_type=offline",
+        "--authorize-param",
+        "prompt=consent"
+      ]
+```
+
+Those two are what Google wants before it will part with a refresh token — it does not recognise the
+`offline_access` scope. Auth0 wants `audience=https://your-api` to issue a JWT rather than an opaque
+token. `login_hint=user@example.com` is also common.
+
+These apply to the authorization request only. `resource` is the exception: RFC 8707 wants the same
+value on the token and refresh requests too, and only `--resource` puts it there. Parameters the flow
+derives per request — `state`, `code_challenge`, `client_id`, `redirect_uri`, `response_type` — are
+refused, because a value that disagrees with the real one surfaces as an opaque server error.
+
+Changing these starts a new sign-in, since a parameter like `audience` decides which API the token is
+for and a token issued for one is not valid for another.
 
 Some authorization servers reject the resource parameter outright — Microsoft Entra ID v2 answers
 `AADSTS9010010`, for example. Pass `--disable-resource-parameter` to omit it entirely:

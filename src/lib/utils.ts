@@ -1327,6 +1327,64 @@ type DispatcherOptions = {
  * @param options Whether zero is meaningful for this flag - for the timeouts it means "no timeout"
  * @returns The duration in milliseconds, or undefined if the flag was absent or unusable
  */
+/**
+ * Parameters the flow owns, which `--authorize-param` must not overwrite.
+ *
+ * Setting any of these does not customise the request so much as break it: the SDK derives them
+ * from the PKCE challenge and the registered client, and a value that disagrees surfaces as an
+ * opaque error from the authorization server rather than as a bad flag.
+ */
+const RESERVED_AUTHORIZE_PARAMS = new Set([
+  'client_id',
+  'redirect_uri',
+  'response_type',
+  'state',
+  'code_challenge',
+  'code_challenge_method',
+])
+
+/**
+ * Collects repeated `--authorize-param key=value` flags.
+ *
+ * Authorization servers keep asking for parameters that are theirs alone - Google wants
+ * `access_type=offline` and `prompt=consent` to part with a refresh token, Auth0 wants an
+ * `audience` to issue a JWT rather than an opaque token - and hardcoding a hostname check per
+ * vendor does not scale. This is the escape hatch for all of them.
+ */
+export function parseAuthorizeParams(args: string[]): Record<string, string> {
+  const params: Record<string, string> = {}
+
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '--authorize-param') continue
+
+    const raw = args[i + 1]
+    const separator = raw.indexOf('=')
+    if (separator < 1) {
+      throw new Error(
+        `Invalid --authorize-param value: "${raw}". Expected key=value, e.g. --authorize-param audience=https://api.example.com`,
+      )
+    }
+
+    // Split on the first `=` only, because values legitimately contain them - base64 padding,
+    // nested query strings, JWTs
+    const key = raw.slice(0, separator).trim()
+    const value = raw.slice(separator + 1)
+
+    if (RESERVED_AUTHORIZE_PARAMS.has(key)) {
+      throw new Error(`--authorize-param cannot set "${key}": it is part of the authorization flow itself and is derived per request.`)
+    }
+    if (key === 'resource') {
+      // Accepted rather than refused, but it only reaches the authorize call - RFC 8707 wants the
+      // same value on the token and refresh requests, and only --resource puts it there
+      log('Warning: --authorize-param resource=... only applies to the authorization request. Use --resource so the token request agrees.')
+    }
+
+    params[key] = value
+  }
+
+  return params
+}
+
 export function parseSecondsOption(args: string[], flag: string, { allowZero = false } = {}): number | undefined {
   const index = args.indexOf(flag)
   if (index === -1 || index >= args.length - 1) return undefined
@@ -1583,6 +1641,11 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log(`Using authorize resource: ${authorizeResource}`)
   }
 
+  const authorizeParams = parseAuthorizeParams(args)
+  if (Object.keys(authorizeParams).length > 0) {
+    log(`Using extra authorization parameters: ${Object.keys(authorizeParams).join(', ')}`)
+  }
+
   // Parse ignored tools
   const ignoredTools: string[] = []
   let j = 0
@@ -1625,7 +1688,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     process.exit(1)
   }
   // Calculate hash with all parsed parameters for cache isolation
-  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers)
+  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers, authorizeParams)
 
   // Set server hash globally for debug logging
   global.currentServerUrlHash = serverUrlHash
@@ -1693,6 +1756,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientInfo,
     authorizeResource,
     skipResourceParameter,
+    authorizeParams,
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
@@ -1729,11 +1793,23 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
  * @param headers Optional custom headers
  * @returns MD5 hash of the configuration
  */
-export function getServerUrlHash(serverUrl: string, authorizeResource?: string, headers?: Record<string, string>): string {
+export function getServerUrlHash(
+  serverUrl: string,
+  authorizeResource?: string,
+  headers?: Record<string, string>,
+  authorizeParams?: Record<string, string>,
+): string {
   // Include resource and headers in hash to isolate OAuth sessions
   // per unique server configuration (fixes #25)
   const parts = [serverUrl]
   if (authorizeResource) parts.push(authorizeResource)
+  // Authorize params belong here for the same reason: `audience` decides which API the token is
+  // for, and `access_type` decides whether a refresh token comes back at all. Reusing one set of
+  // credentials across two of those is how you get a token that silently does not work.
+  if (authorizeParams && Object.keys(authorizeParams).length > 0) {
+    const sorted = Object.keys(authorizeParams).sort()
+    parts.push(JSON.stringify(authorizeParams, sorted))
+  }
   if (headers && Object.keys(headers).length > 0) {
     const sortedKeys = Object.keys(headers).sort()
     parts.push(JSON.stringify(headers, sortedKeys))
