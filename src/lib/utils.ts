@@ -129,6 +129,23 @@ const fetchWithMcpHeaders = (async (url: string | URL, init?: RequestInit) => {
   return fetch(url, { ...init, headers })
 }) as unknown as FetchLike
 
+/**
+ * A transport whose stream can come back on a server-side session that is not the one it left on.
+ *
+ * The SSE transport opens the stream and POSTs separately, and a server issues a fresh session for
+ * each stream it serves. So when the stream drops and the EventSource reconnects - a restart, a
+ * container recreate, a network blip - the POST endpoint moves to a session that has never seen an
+ * `initialize`, and every request against it is refused (see issue #269). `connectToRemoteServer`
+ * raises this; `mcpProxy` answers it by handshaking again.
+ */
+type StreamReconnectAware = Transport & { onStreamReconnect?: () => void }
+
+/** How long to wait for the reconnected stream to say where its POSTs now go. */
+const RECONNECT_ENDPOINT_TIMEOUT_MS = 10_000
+
+/** How often to look, while waiting for it. */
+const RECONNECT_ENDPOINT_POLL_MS = 25
+
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
 export { MCP_REMOTE_VERSION }
@@ -295,6 +312,8 @@ export function mcpProxy({
   let keepAliveTimer: NodeJS.Timeout | null = null
   let initializedDelivered: Promise<unknown> | null = null
   let reauthorizeInFlight: Promise<void> | null = null
+  /** In-flight recovery from a reconnected stream. See `onStreamReconnect` below. */
+  let sessionResumption: Promise<void> | null = null
 
   const messageTransformer = createMessageTransformer({
     transformRequestFunction: (request: Message) => {
@@ -432,6 +451,30 @@ export function mcpProxy({
   transportToClient.onerror = onClientError
   transportToServer.onerror = onServerError
 
+  // The stream coming back is not the session coming back. Nothing below this layer notices:
+  // the EventSource reconnects, the endpoint moves to a session the server has just created,
+  // and requests keep going out against a lifecycle that never started.
+  ;(transportToServer as StreamReconnectAware).onStreamReconnect = () => {
+    const droppedEndpoint = postEndpoint()
+
+    // Assigned before anything is awaited. The gap between the stream coming back and the
+    // handshake going out is exactly when a client request is most likely to arrive, and one
+    // that arrives to find this unset is one sent to the session that has gone away.
+    sessionResumption = (async () => {
+      try {
+        await awaitReconnectedEndpoint(droppedEndpoint)
+        await reinitializeSession()
+      } catch (error) {
+        // Nothing is waiting on the resumption itself - it runs off the reconnect, not off a
+        // request - so a failure has to be reported rather than returned. Requests held behind
+        // it are released either way, and answer to the server as they find it.
+        onServerError(error as Error)
+      }
+    })().finally(() => {
+      sessionResumption = null
+    })
+  }
+
   if (keepAlive?.enabled) {
     keepAliveTimer = startKeepAlive(keepAlive.intervalMs)
   }
@@ -465,6 +508,32 @@ export function mcpProxy({
    */
   function isSessionExpired(error: Error) {
     return error instanceof StreamableHTTPError && error.code === 404 && transportToServer.sessionId !== undefined
+  }
+
+  /**
+   * Where the SSE transport is currently POSTing, which is where the session id lives for a
+   * transport that has no `sessionId` of its own. The SDK keeps it private and offers no event
+   * when it moves, so reading it is the only way to tell the new stream from the old one.
+   */
+  function postEndpoint(): string | undefined {
+    return (transportToServer as unknown as { _endpoint?: URL })._endpoint?.href
+  }
+
+  /**
+   * Waits for the reconnected stream to advertise where its POSTs now go.
+   *
+   * The reconnect is announced when the HTTP response arrives, which is before the SDK has read
+   * the `endpoint` event off the body. Handshaking at that moment would POST the handshake itself
+   * to the session that just went away.
+   *
+   * Giving up on the wait does not give up on the handshake: a server that reuses the endpoint
+   * still discarded the lifecycle, and re-initializing is what repairs that.
+   */
+  async function awaitReconnectedEndpoint(droppedEndpoint: string | undefined): Promise<void> {
+    const deadline = Date.now() + RECONNECT_ENDPOINT_TIMEOUT_MS
+    while (postEndpoint() === droppedEndpoint && Date.now() < deadline) {
+      await sleep(RECONNECT_ENDPOINT_POLL_MS)
+    }
   }
 
   let reinitInFlight: Promise<void> | null = null
@@ -613,6 +682,14 @@ export function mcpProxy({
   }
 
   async function sendToServer(message: Message, alreadyReauthorized = false) {
+    // The stream came back on a session that has not been handshaked yet. Sending now would race
+    // the recovery onto the session the server dropped, and that failure is indistinguishable from
+    // a real one. The recovery's own messages go out through `transportToServer.send`, so it never
+    // waits on itself.
+    if (sessionResumption) {
+      await sessionResumption
+    }
+
     try {
       await transportToServer.send(message)
       return
@@ -864,20 +941,36 @@ export async function connectToRemoteServer(
   log(`[${pid}] Connecting to remote server: ${serverUrl}`)
   const url = new URL(serverUrl)
 
+  // Every attempt the EventSource makes to open the stream comes through the `fetch` below,
+  // including the ones it makes on its own after the connection drops. Counting them is how a
+  // reconnect becomes observable from out here: the SDK exposes no event for it.
+  let sseStreamOpened = 0
+
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
     fetch: (requestUrl: string | URL, init?: RequestInit) => {
-      return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(requestUrl, {
-          ...init,
-          headers: mergeHeaders(
-            init?.headers,
-            headers,
-            tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : undefined,
-            { Accept: 'text/event-stream' },
-          ),
-        }),
-      )
+      return Promise.resolve(authProvider?.tokens?.())
+        .then((tokens) =>
+          fetch(requestUrl, {
+            ...init,
+            headers: mergeHeaders(
+              init?.headers,
+              headers,
+              tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : undefined,
+              { Accept: 'text/event-stream' },
+            ),
+          }),
+        )
+        .then((response) => {
+          // Only a stream that actually opened counts. A failed attempt is followed by another,
+          // and announcing a reconnect for each would start a handshake against a stream that
+          // is not there.
+          if (response.ok && ++sseStreamOpened > 1) {
+            log('Remote SSE stream reconnected')
+            ;(transport as StreamReconnectAware).onStreamReconnect?.()
+          }
+          return response
+        })
     },
   }
 

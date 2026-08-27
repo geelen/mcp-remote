@@ -19,7 +19,9 @@ import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamable
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { EventEmitter } from 'events'
-import { createServer } from 'node:http'
+import { createServer, type ServerResponse } from 'node:http'
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 import net from 'net'
 import fs from 'fs'
 import os from 'os'
@@ -876,6 +878,104 @@ describe('Feature: Method-aware MCP HTTP gateways', () => {
       await gateway.stop()
     }
   })
+})
+
+/**
+ * A minimal MCP SSE server: it hands every stream it serves a POST endpoint carrying a session id
+ * of its own, which is what the Python SDK does and what makes a reconnect lose the lifecycle.
+ * The test drops the stream to make the client's EventSource come back for another.
+ */
+function createSseServer() {
+  let streamsServed = 0
+  let openStream: ServerResponse | undefined
+
+  const server = createServer((request, response) => {
+    if (!request.url?.startsWith('/sse')) {
+      response.writeHead(202)
+      response.end()
+      return
+    }
+
+    streamsServed += 1
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    // Without this the EventSource waits out its own default before trying again
+    response.write('retry: 10\n\n')
+    response.write(`event: endpoint\ndata: /messages/?session_id=${streamsServed}\n\n`)
+    openStream = response
+  })
+
+  return {
+    get streamsServed() {
+      return streamsServed
+    },
+    dropStream() {
+      openStream?.end()
+    },
+    async start() {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', resolve)
+      })
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('test server did not expose a port')
+      return `http://127.0.0.1:${address.port}/sse`
+    },
+    async stop() {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    },
+  }
+}
+
+describe('Feature: Noticing an SSE stream come back', () => {
+  it('Scenario: A stream that drops and reconnects is reported to the proxy', async () => {
+    // Given a connected SSE transport
+    const sse = createSseServer()
+    const url = await sse.start()
+    let transport: Transport | undefined
+
+    try {
+      transport = await connectToRemoteServer(null, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'sse-only')
+      const reconnected = vi.fn()
+      ;(transport as any).onStreamReconnect = reconnected
+
+      // When the server drops the stream and the EventSource opens another
+      sse.dropStream()
+
+      // Then it is reported. The SDK raises no event for this, so it is inferred from the
+      // stream being opened a second time - which is the whole basis of the recovery in
+      // mcpProxy, and the reason issue #269 went unnoticed at this layer.
+      await vi.waitFor(() => expect(reconnected).toHaveBeenCalled(), { timeout: 5_000 })
+      expect(sse.streamsServed).toBeGreaterThan(1)
+    } finally {
+      await transport?.close()
+      await sse.stop()
+    }
+  }, 15_000)
+
+  it('Scenario: The first connection is not a reconnection', async () => {
+    const sse = createSseServer()
+    const url = await sse.start()
+    let transport: Transport | undefined
+
+    try {
+      const reconnected = vi.fn()
+      transport = await connectToRemoteServer(null, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'sse-only')
+      ;(transport as any).onStreamReconnect = reconnected
+
+      // Then nothing is announced for the stream we asked for ourselves
+      await sleep(100)
+      expect(reconnected).not.toHaveBeenCalled()
+      expect(sse.streamsServed).toBe(1)
+    } finally {
+      await transport?.close()
+      await sse.stop()
+    }
+  }, 15_000)
 })
 
 describe('Feature: Encoding MCP header values', () => {
@@ -1885,6 +1985,147 @@ describe('Feature: MCP Proxy', () => {
     expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(0)
     expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(1)
   })
+  describe('Feature: A reconnected SSE stream', () => {
+    const OLD_ENDPOINT = 'http://server.example/messages/?session_id=old'
+    const NEW_ENDPOINT = 'http://server.example/messages/?session_id=new'
+
+    /**
+     * An SSE transport: no session id of its own, a private `_endpoint` that moves when the
+     * stream comes back, and a server that answers a handshake but refuses anything sent
+     * against a session that never had one.
+     */
+    const sseServerTransport = (sent: any[]) => {
+      const transport = {
+        send: vi.fn(async (message: any) => {
+          sent.push({ ...message, sentTo: transport._endpoint.href })
+          if (typeof message.id === 'string' && message.id.startsWith('mcp-remote-reinit-')) {
+            setTimeout(() => transport.onmessage?.({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-11-25' } }), 0)
+          }
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        setProtocolVersion: vi.fn(),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+        _endpoint: new URL(OLD_ENDPOINT),
+      } as any
+      return transport
+    }
+
+    const clientTransport = () =>
+      ({
+        send: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        onmessage: vi.fn(),
+        onclose: vi.fn(),
+        onerror: vi.fn(),
+      }) as unknown as Transport
+
+    it('Scenario: Hand the new session the handshake the old one had', async () => {
+      // Given a proxy that has completed the lifecycle against one session
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      await vi.waitFor(() => expect(sent).toHaveLength(1))
+
+      // When the stream drops and comes back on a session the server has just created
+      transportToServer.onStreamReconnect()
+      setTimeout(() => (transportToServer._endpoint = new URL(NEW_ENDPOINT)), 10)
+
+      // Then the lifecycle is replayed against it, unprompted, carrying the client's own
+      // parameters - rather than waiting for a request to be refused (issue #269)
+      await vi.waitFor(() => expect(sent.map((m) => m.method)).toContain('notifications/initialized'))
+      const handshake = sent.find((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))
+      expect(handshake.method).toBe('initialize')
+      expect(handshake.params.clientInfo.name).toContain('Test Client')
+
+      // And it went to the new session, not the one that went away
+      expect(handshake.sentTo).toBe(NEW_ENDPOINT)
+
+      // And the client never saw any of it
+      expect(transportToClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ id: handshake.id }))
+    })
+
+    it('Scenario: Hold a request that arrives mid-handshake', async () => {
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      await vi.waitFor(() => expect(sent).toHaveLength(1))
+
+      // When a tool call is made while the stream is still coming back
+      transportToServer.onStreamReconnect()
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'ping' } } as any)
+      setTimeout(() => (transportToServer._endpoint = new URL(NEW_ENDPOINT)), 10)
+
+      // Then it waits for the handshake rather than racing it onto the dead session
+      await vi.waitFor(() => expect(sent.some((m) => m.method === 'tools/call')).toBe(true))
+      const call = sent.find((m) => m.method === 'tools/call')
+      expect(call.sentTo).toBe(NEW_ENDPOINT)
+      expect(sent.indexOf(call)).toBeGreaterThan(sent.findIndex((m) => m.method === 'notifications/initialized'))
+    })
+
+    it('Scenario: Re-handshake once, however many requests are waiting', async () => {
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      await vi.waitFor(() => expect(sent).toHaveLength(1))
+
+      transportToServer.onStreamReconnect()
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'a' } } as any)
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '3', params: { name: 'b' } } as any)
+      setTimeout(() => (transportToServer._endpoint = new URL(NEW_ENDPOINT)), 10)
+
+      await vi.waitFor(() => expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(2))
+      expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(1)
+      expect(sent.filter((m) => m.method === 'notifications/initialized')).toHaveLength(1)
+    })
+
+    it('Scenario: Leave a stream that has never dropped alone', async () => {
+      // Given a proxy nobody has told about a reconnect
+      const sent: any[] = []
+      const transportToClient = clientTransport()
+      const transportToServer = sseServerTransport(sent)
+      mcpProxy({ transportToClient, transportToServer, ignoredTools: [] })
+
+      transportToClient.onmessage?.({
+        jsonrpc: '2.0' as const,
+        method: 'initialize',
+        id: '1',
+        params: { clientInfo: { name: 'Test Client', version: '1.0.0' } },
+      } as any)
+      transportToClient.onmessage?.({ jsonrpc: '2.0' as const, method: 'tools/call', id: '2', params: { name: 'ping' } } as any)
+
+      await vi.waitFor(() => expect(sent.filter((m) => m.method === 'tools/call')).toHaveLength(1))
+      expect(sent.filter((m) => typeof m.id === 'string' && m.id.startsWith('mcp-remote-reinit-'))).toHaveLength(0)
+    })
+  })
+
   it('Scenario: Answer the client when a request cannot be delivered', async () => {
     // Given a server transport that fails for a reason a new session cannot fix
     const mockTransportToClient = {
