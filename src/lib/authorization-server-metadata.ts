@@ -21,6 +21,8 @@ export interface AuthorizationServerMetadata {
   token_endpoint_auth_methods_supported?: string[]
   /** Whether an HTTPS URL pointing at a Client ID Metadata Document is accepted as a client_id (SEP-991) */
   client_id_metadata_document_supported?: boolean
+  /** URL of the device authorization endpoint, when the server offers the device grant (RFC 8628) */
+  device_authorization_endpoint?: string
   /** Additional metadata fields */
   [key: string]: unknown
 }

@@ -47,6 +47,7 @@ async function runProxy(
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   clientMetadataUrl: string | undefined,
   useIdToken: boolean,
+  useDeviceCode: boolean,
   authorizeResource: string | undefined,
   skipResourceParameter: boolean,
   authorizeParams: Record<string, string>,
@@ -92,6 +93,7 @@ async function runProxy(
     staticOAuthClientInfo,
     clientMetadataUrl,
     useIdToken,
+    useDeviceCode,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,
@@ -133,8 +135,9 @@ async function runProxy(
   // authorize URL and registers a client from inside `transport.start()`, so an instance that only
   // discovered it was a follower afterwards would already have registered its own client and
   // issued its own PKCE challenge - which is what produced one registration and one tab per
-  // instance. Skipped when tokens are already on disk, so a warm start still binds nothing.
-  if (!(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
+  // instance. Skipped when tokens are already on disk, so a warm start still binds nothing - and
+  // skipped entirely under the device grant, which has no callback port to contend over.
+  if (!useDeviceCode && !(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
     await authInitializer()
   }
 
@@ -157,6 +160,14 @@ async function runProxy(
        * port, and the code was dropped on the floor.
        */
       reauthorize: async () => {
+        // Under the device grant the sign-in has already happened inside the SDK's redirect step,
+        // which polls to completion and writes the tokens. The retry finds them; there is no code
+        // to wait for and no port to wait on.
+        if (useDeviceCode) {
+          log('Device authorization completed; retrying with the tokens it produced')
+          return
+        }
+
         const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
         // Another instance is running the flow; it will write the tokens and the retry will pick
@@ -242,6 +253,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
       staticOAuthClientInfo,
       clientMetadataUrl,
       useIdToken,
+      useDeviceCode,
       authorizeResource,
       skipResourceParameter,
       authorizeParams,
@@ -262,6 +274,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
         staticOAuthClientInfo,
         clientMetadataUrl,
         useIdToken,
+        useDeviceCode,
         authorizeResource,
         skipResourceParameter,
         authorizeParams,

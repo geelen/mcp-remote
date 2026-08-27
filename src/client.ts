@@ -42,6 +42,7 @@ async function runClient(
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
   clientMetadataUrl: string | undefined,
   useIdToken: boolean,
+  useDeviceCode: boolean,
   authorizeResource: string | undefined,
   skipResourceParameter: boolean,
   authorizeParams: Record<string, string>,
@@ -85,6 +86,7 @@ async function runClient(
     staticOAuthClientInfo,
     clientMetadataUrl,
     useIdToken,
+    useDeviceCode,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,
@@ -134,8 +136,9 @@ async function runClient(
   // authorize URL and registers a client from inside `transport.start()`, so an instance that only
   // discovered it was a follower afterwards would already have registered its own client and
   // issued its own PKCE challenge - which is what produced one registration and one tab per
-  // instance. Skipped when tokens are already on disk, so a warm start still binds nothing.
-  if (!(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
+  // instance. Skipped when tokens are already on disk, so a warm start still binds nothing - and
+  // skipped entirely under the device grant, which has no callback port to contend over.
+  if (!useDeviceCode && !(await hasUsableTokens(serverUrlHash)) && (await serverIssuesAuthChallenge(serverUrl, headers))) {
     await authInitializer()
   }
 
@@ -209,6 +212,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
       staticOAuthClientInfo,
       clientMetadataUrl,
       useIdToken,
+      useDeviceCode,
       authorizeResource,
       skipResourceParameter,
       authorizeParams,
@@ -227,6 +231,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
         staticOAuthClientInfo,
         clientMetadataUrl,
         useIdToken,
+        useDeviceCode,
         authorizeResource,
         skipResourceParameter,
         authorizeParams,

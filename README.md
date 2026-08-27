@@ -422,6 +422,40 @@ yourself:
 npx mcp-remote https://example.remote/server 3334 --client-metadata-url https://client.example.com/.well-known/oauth-client-metadata
 ```
 
+### Signing In Without a Browser
+
+The default flow needs a browser on this machine and a loopback port to redirect back to — which a
+cron job, an SSH session or a container does not have. If your authorization server supports the
+[OAuth Device Authorization Grant](https://datatracker.ietf.org/doc/html/rfc8628), `--device-code`
+moves the browser to whatever machine you are actually sitting at:
+
+```bash
+npx mcp-remote https://example.remote/server --device-code
+```
+
+mcp-remote prints a short code and a URL, then polls until you approve it:
+
+```
+To authorize this client, visit:
+  https://auth.example.com/activate
+
+And enter the code: WDJB-MJHT
+
+Waiting for approval...
+```
+
+The output goes to stderr, which MCP clients capture into their own logs — so in a headless run,
+that log is where you read the code. This only has to happen once: the refresh token that comes back
+is stored like any other, and later runs are non-interactive.
+
+No callback server is started and no port is bound, so this is also the flow to use when the
+loopback port is unavailable.
+
+The server has to advertise `device_authorization_endpoint` in its authorization server metadata;
+mcp-remote fails with a clear message rather than falling back to a browser that isn't there. Note
+that servers offering this grant often expect a pre-registered client — pair it with
+`--static-oauth-client-info` if dynamic registration is refused.
+
 ### Load Balancer Session Stickiness
 
 MCP sessions live on one backend, so a server behind a load balancer needs every request from a

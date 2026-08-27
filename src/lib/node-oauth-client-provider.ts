@@ -17,6 +17,7 @@ import { sanitizeUrl } from 'strict-url-sanitise'
 import { randomUUID } from 'node:crypto'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import { getAuthorizationServerUrl, type ProtectedResourceMetadata } from './protected-resource-metadata'
+import { authorizeWithDeviceCode, supportsDeviceAuthorization, DEVICE_CODE_GRANT_TYPE } from './device-authorization'
 
 /**
  * The OAuth token response only carries the relative `expires_in`, which is
@@ -114,6 +115,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   clientMetadataUrl?: string
   private useIdToken: boolean
+  private useDeviceCode: boolean
   /** So a server that never issues an ID token is reported once, not on every outgoing request. */
   private warnedAboutMissingIdToken = false
   private authorizeResource: string | undefined
@@ -151,6 +153,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
     this.clientMetadataUrl = options.clientMetadataUrl
     this.useIdToken = options.useIdToken ?? false
+    this.useDeviceCode = options.useDeviceCode ?? false
     const trimmedAuthorizeResource = options.authorizeResource?.trim()
     this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
     this.skipResourceParameter = options.skipResourceParameter ?? false
@@ -191,7 +194,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: this.getTokenEndpointAuthMethod(),
-      grant_types: ['authorization_code', 'refresh_token'],
+      grant_types: this.useDeviceCode ? [DEVICE_CODE_GRANT_TYPE, 'refresh_token'] : ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       client_name: this.clientName,
       client_uri: this.clientUri,
@@ -709,6 +712,14 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     // would turn an exchange loop into a browser-tab loop - the same storm, more visible.
     if (this.inTokenStorm()) throw this.tokenStormError()
 
+    // The device grant needs no browser here and no URL to send one to, so the SDK's whole
+    // redirect is replaced rather than followed. It returns once tokens are on disk, which is
+    // what the reconnect above this then finds.
+    if (this.useDeviceCode) {
+      await this.authorizeWithDeviceCode()
+      return
+    }
+
     // Optionally fetch metadata for debugging/informational purposes (non-blocking)
     this.getAuthorizationServerMetadata().catch(() => {
       // Ignore errors, metadata is optional
@@ -728,6 +739,46 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     } else {
       log('Could not open a browser automatically. Please copy and paste the URL above into your browser.')
     }
+  }
+
+  /**
+   * Signs in with the device grant, and leaves the tokens where the next attempt will find them.
+   *
+   * Runs to completion here rather than handing anything back, because there is nothing to hand
+   * back: no code arrives at a callback port, so the only trace of a finished sign-in is the
+   * tokens on disk.
+   */
+  private async authorizeWithDeviceCode(): Promise<void> {
+    const metadata = await this.getAuthorizationServerMetadata()
+    if (!supportsDeviceAuthorization(metadata)) {
+      throw new Error(
+        '--device-code was passed but the authorization server does not offer the device grant. ' +
+          'Remove the flag to sign in through a browser instead.',
+      )
+    }
+
+    const clientInformation = await this.clientInformation()
+    if (!clientInformation) {
+      throw new Error('No OAuth client is registered, so there is nothing to authorize')
+    }
+
+    const scope = this.getEffectiveScope()
+    const tokens = await authorizeWithDeviceCode({
+      metadata: metadata!,
+      clientInformation,
+      scope: scope || undefined,
+      resource: await this.deviceAuthorizationResource(),
+    })
+
+    await this.saveTokens(tokens)
+  }
+
+  /**
+   * The RFC 8707 resource indicator to send with a device authorization, matching what the SDK
+   * would put on an authorization code flow so the two cannot disagree about what the token is for.
+   */
+  private async deviceAuthorizationResource(): Promise<URL | undefined> {
+    return selectResourceURL(new URL(this.options.serverUrl), this, this.protectedResourceMetadata)
   }
 
   private async preflightCachedDynamicClientRegistration(authorizationUrl: URL): Promise<void> {

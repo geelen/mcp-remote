@@ -4,6 +4,7 @@ import * as mcpAuthConfig from './mcp-auth-config'
 import type { OAuthProviderOptions } from './types'
 import type { AuthorizationServerMetadata } from './authorization-server-metadata'
 import { log } from './utils'
+import { authorizeWithDeviceCode, DEVICE_CODE_GRANT_TYPE } from './device-authorization'
 import { auth, refreshAuthorization } from '@modelcontextprotocol/sdk/client/auth.js'
 import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 
@@ -22,6 +23,10 @@ vi.mock('./utils', () => ({
   buildRedirectUrl: (host: string, port: number, callbackPath = '/oauth/callback') => `http://${host}:${port}${callbackPath}`,
 }))
 vi.mock('open', () => ({ default: vi.fn() }))
+vi.mock('./device-authorization', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  authorizeWithDeviceCode: vi.fn(),
+}))
 vi.mock('@modelcontextprotocol/sdk/client/auth.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   refreshAuthorization: vi.fn(),
@@ -402,6 +407,63 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       await provider.saveClientInformation(registration as any)
 
       expect(mockWriteJsonFile).toHaveBeenCalledWith('test-hash', 'client_info.json', registration)
+    })
+  })
+
+  describe('the device grant', () => {
+    const deviceMetadata = {
+      issuer: 'https://auth.example.com',
+      token_endpoint: 'https://auth.example.com/token',
+      device_authorization_endpoint: 'https://auth.example.com/device',
+    } as AuthorizationServerMetadata
+
+    const deviceProvider = (authorizationServerMetadata = deviceMetadata) =>
+      new NodeOAuthClientProvider({ ...defaultOptions, useDeviceCode: true, authorizationServerMetadata })
+
+    it('registers for the grant it intends to use', () => {
+      // Given DCR, which would otherwise register a client the server will not let near this flow
+      expect(deviceProvider().clientMetadata.grant_types).toEqual([DEVICE_CODE_GRANT_TYPE, 'refresh_token'])
+    })
+
+    it('leaves the authorization code grant alone by default', () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+
+      expect(provider.clientMetadata.grant_types).toEqual(['authorization_code', 'refresh_token'])
+    })
+
+    it('signs in through the device flow instead of opening a browser', async () => {
+      // Given a registered client and a server offering the grant
+      mockReadJsonFile.mockResolvedValue({ client_id: 'c1', redirect_uris: ['http://localhost:8080/oauth/callback'] })
+      vi.mocked(authorizeWithDeviceCode).mockResolvedValue({ access_token: 'at', token_type: 'Bearer', expires_in: 3600 } as any)
+
+      // When the SDK asks for the user to be redirected
+      await deviceProvider().redirectToAuthorization(new URL('https://auth.example.com/authorize?client_id=c1'))
+
+      // Then no browser is opened, and the tokens the flow produced are on disk for the
+      // reconnect above this to find - there is no callback for a code to arrive at
+      const { default: open } = await import('open')
+      expect(open).not.toHaveBeenCalled()
+      expect(authorizeWithDeviceCode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clientInformation: expect.objectContaining({ client_id: 'c1' }),
+          metadata: expect.objectContaining({ device_authorization_endpoint: 'https://auth.example.com/device' }),
+          scope: 'openid email profile',
+        }),
+      )
+      expect(mockWriteJsonFile).toHaveBeenCalledWith('test-hash', 'tokens.json', expect.objectContaining({ access_token: 'at' }))
+    })
+
+    it('refuses rather than silently opening a browser the machine may not have', async () => {
+      // Given a server that does not offer the grant at all
+      mockReadJsonFile.mockResolvedValue({ client_id: 'c1', redirect_uris: [] })
+
+      await expect(
+        deviceProvider({ issuer: 'https://auth.example.com' } as AuthorizationServerMetadata).redirectToAuthorization(
+          new URL('https://auth.example.com/authorize'),
+        ),
+      ).rejects.toThrow('does not offer the device grant')
+
+      expect(authorizeWithDeviceCode).not.toHaveBeenCalled()
     })
   })
 

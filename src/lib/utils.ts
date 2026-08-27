@@ -152,6 +152,15 @@ const cookieJar = createCookieJar()
 /** Whether to take part in cookie-based session stickiness at all. See `--disable-cookies`. */
 let COOKIES_ENABLED = true
 
+/**
+ * Whether a sign-in happens through the device grant rather than a browser on this machine.
+ *
+ * Global for the same reason the debug and dispatcher settings are: `connectToRemoteServer` calls
+ * itself to retry, and threading a flag through that recursion buys nothing over reading the one
+ * decision the command line already made.
+ */
+let DEVICE_CODE_FLOW = false
+
 function cookieHeaderFor(url: string | URL): string | undefined {
   return COOKIES_ENABLED ? cookieJar.header(url) : undefined
 }
@@ -1121,10 +1130,6 @@ export async function connectToRemoteServer(
         stack: error.stack,
       })
 
-      // Initialize authentication on-demand
-      debugLog('Calling authInitializer to start auth flow')
-      const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
-
       const giveUpIfAlreadyRetried = () => {
         if (!recursionReasons.has(REASON_AUTH_NEEDED)) return
         const errorMessage = `Already attempted reconnection for reason: ${REASON_AUTH_NEEDED}. Giving up.`
@@ -1134,6 +1139,21 @@ export async function connectToRemoteServer(
         })
         throw new Error(errorMessage, { cause: error })
       }
+
+      // The device grant has already finished by the time this is reached: the SDK's redirect
+      // step ran the whole flow and wrote the tokens. Nothing is coming to a callback port, so
+      // starting one would only bind a port nobody will ever call.
+      if (DEVICE_CODE_FLOW) {
+        log('Device authorization completed - reconnecting with the tokens it produced')
+        giveUpIfAlreadyRetried()
+
+        recursionReasons.add(REASON_AUTH_NEEDED)
+        return connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy, recursionReasons)
+      }
+
+      // Initialize authentication on-demand
+      debugLog('Calling authInitializer to start auth flow')
+      const { waitForAuthCode, skipBrowserAuth } = await authInitializer()
 
       // A concurrent instance ran the browser flow for us and persisted the tokens. There is no
       // authorization code of our own to exchange - our callback server never received one, and
@@ -1766,6 +1786,13 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     log('Cookies disabled; requests will not carry session stickiness')
   }
 
+  // No browser on this machine: sign in from wherever the person actually is
+  const useDeviceCode = args.includes('--device-code')
+  DEVICE_CODE_FLOW = useDeviceCode
+  if (useDeviceCode) {
+    log('Using the OAuth device grant; no browser will be opened on this machine')
+  }
+
   // An MCP server that verifies who the caller is, rather than what they may do, wants the ID token
   const useIdToken = args.includes('--use-id-token')
   if (useIdToken) {
@@ -1918,6 +1945,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     staticOAuthClientInfo,
     clientMetadataUrl,
     useIdToken,
+    useDeviceCode,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,

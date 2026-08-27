@@ -153,6 +153,18 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.useIdToken).toBe(false)
   })
 
+  it('Scenario: Ask to sign in without a browser on this machine', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/sse', '--device-code'], 'test usage')
+
+    expect(result.useDeviceCode).toBe(true)
+  })
+
+  it('Scenario: Use the browser flow when nothing asks otherwise', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+
+    expect(result.useDeviceCode).toBe(false)
+  })
+
   it('Scenario: Keep credentials for a metadata document client apart from registered ones', async () => {
     // Given the same server reached once by registration and once by metadata document
     const registered = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
