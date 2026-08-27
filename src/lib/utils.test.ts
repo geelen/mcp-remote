@@ -11,7 +11,6 @@ import {
   mergeHeaders,
   parseSecondsOption,
   parseAuthorizeParams,
-  MCP_REMOTE_VERSION,
 } from './utils'
 import { getConfigDir } from './mcp-auth-config'
 import { Headers as UndiciHeaders } from 'undici'
@@ -20,7 +19,6 @@ import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamable
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { EventEmitter } from 'events'
-import express from 'express'
 import { createServer } from 'node:http'
 import net from 'net'
 import fs from 'fs'

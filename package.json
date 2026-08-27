@@ -25,9 +25,13 @@
   "scripts": {
     "build": "tsup",
     "build:watch": "tsup --watch",
-    "format": "prettier --write .",
-    "lint": "prettier --check . && tsc",
+    "dev:client": "tsx src/client.ts",
+    "dev:proxy": "tsx src/proxy.ts",
+    "format": "oxfmt .",
+    "knip": "knip",
+    "lint": "oxfmt --check . && oxlint --deny-warnings && tsc && tsc -p test --noEmit",
     "prepack": "tsup",
+    "prepare": "husky",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -50,15 +54,18 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
-    "zod": "^4.0.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
-    "prettier": "^3.5.3",
+    "husky": "9.1.7",
+    "knip": "6.32.3",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
     "semantic-release": "^25.0.2",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "vitest": "^3.2.3"
+    "vitest": "^3.2.3",
+    "zod": "^4.0.0"
   },
   "tsup": {
     "entry": [

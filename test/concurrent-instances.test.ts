@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import net from 'net'
 import { startOAuthSimulator, startPublicMcpServer, type OAuthSimulator } from './oauth-simulator/server'
 import { runInstances, cleanupRun } from './oauth-simulator/instances'
 

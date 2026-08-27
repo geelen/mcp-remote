@@ -1,5 +1,4 @@
 import { readJsonFile } from './mcp-auth-config'
-import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { OAuthTokensWithExpiresAtSchema } from './node-oauth-client-provider'
 import { AuthCodeResult } from './types'
 import { EventEmitter } from 'events'
@@ -8,12 +7,8 @@ import { Server } from 'http'
 import express from 'express'
 import { log, debugLog, setupOAuthCallbackServerWithLongPoll, MCP_REMOTE_ID_PATH } from './utils'
 
-/** How long a secondary instance waits for the primary to persist the tokens it just obtained. */
-const TOKEN_HANDOFF_TIMEOUT_MS = 30_000
-
 /** How long to wait on another instance's sign-in before going it alone. Sign-ins involve a human. */
 const FOLLOWER_PATIENCE_MS = 3 * 60_000
-const TOKEN_HANDOFF_POLL_INTERVAL_MS = 200
 
 export type AuthCoordinator = {
   initializeAuth: () => Promise<{

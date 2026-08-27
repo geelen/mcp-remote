@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { ListToolsResultSchema, ListResourcesResultSchema, ListPromptsResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { fileURLToPath } from 'url'
 import { dirname, resolve } from 'path'
 
@@ -37,7 +37,7 @@ export async function createMCPClient(serverUrl: string, args: string[] = []): P
   const cleanup = async () => {
     try {
       await client.close()
-    } catch (e) {
+    } catch {
       // Ignore cleanup errors
     }
   }
@@ -57,51 +57,5 @@ export async function listTools(client: Client) {
       return []
     }
     throw err
-  }
-}
-
-/**
- * Safely lists prompts from a server, handling servers that don't support prompts
- */
-export async function listPrompts(client: Client) {
-  try {
-    const response = await client.request({ method: 'prompts/list' }, ListPromptsResultSchema)
-    return response.prompts || []
-  } catch (err: any) {
-    if (err.message?.includes('not supported') || err.code === -32601) {
-      return []
-    }
-    throw err
-  }
-}
-
-/**
- * Safely lists resources from a server, handling servers that don't support resources
- */
-export async function listResources(client: Client) {
-  try {
-    const response = await client.request({ method: 'resources/list' }, ListResourcesResultSchema)
-    return response.resources || []
-  } catch (err: any) {
-    if (err.message?.includes('not supported') || err.code === -32601) {
-      return []
-    }
-    throw err
-  }
-}
-
-/**
- * Helper to verify a server connection works by listing capabilities
- */
-export async function verifyConnection(client: Client) {
-  const [tools, prompts, resources] = await Promise.all([listTools(client), listPrompts(client), listResources(client)])
-
-  return {
-    tools,
-    prompts,
-    resources,
-    hasTools: tools.length > 0,
-    hasPrompts: prompts.length > 0,
-    hasResources: resources.length > 0,
   }
 }

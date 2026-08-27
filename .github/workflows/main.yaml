@@ -30,6 +30,8 @@ jobs:
         run: pnpm install
       - name: Run lint
         run: pnpm lint
+      - name: Check for unused files, exports and dependencies
+        run: pnpm knip
       - name: Run tests
         run: pnpm test
       - name: Build

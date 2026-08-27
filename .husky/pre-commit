@@ -1,0 +1,7 @@
+# Checks rather than writes, so a commit is never quietly different from what was staged.
+# `pnpm format` is the one that fixes formatting.
+#
+# The whole repo is checked, not just the staged files: a partial stage can pass in isolation and
+# still break the build, which is the failure this exists to catch. The full run is about five
+# seconds, so narrowing it would buy nothing.
+pnpm lint && pnpm knip && pnpm test

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "test": {
+      "entry": ["**/*.test.ts", "oauth-simulator/browser-*.mjs"],
+      "project": ["**/*.{ts,mjs}"],
+      "ignoreBinaries": ["build"]
+    }
+  }
+}

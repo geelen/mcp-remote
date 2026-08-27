@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { writeJsonFile, readJsonFile, getConfigFilePath, deleteStaleConfigFiles, getConfigDir } from './mcp-auth-config'
+import { writeJsonFile, getConfigFilePath, deleteStaleConfigFiles, getConfigDir } from './mcp-auth-config'
 
 vi.mock('./utils', () => ({
   log: vi.fn(),
@@ -119,7 +119,7 @@ describe('Feature: Sweeping files nothing will name again', () => {
 
     await deleteStaleConfigFiles(hash, prefix, 10 * 60 * 1000)
 
-    await expect(fs.access(abandoned)).rejects.toThrow()
+    await expect(fs.access(abandoned)).rejects.toThrow(/ENOENT/)
     await expect(fs.access(inFlight)).resolves.toBeUndefined()
     // The sweep stays inside the prefix it was given
     await expect(fs.access(unrelated)).resolves.toBeUndefined()
