@@ -83,6 +83,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
   private authorizeResource: string | undefined
+  private authorizeParams: Record<string, string>
   private skipResourceParameter: boolean
   /**
    * Overrides how the SDK picks the RFC 8707 `resource` indicator. Only defined when we have
@@ -117,6 +118,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     const trimmedAuthorizeResource = options.authorizeResource?.trim()
     this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
     this.skipResourceParameter = options.skipResourceParameter ?? false
+    this.authorizeParams = options.authorizeParams ?? {}
     this._state = randomUUID()
     this._clientInfo = undefined
     this.clientRegistrationSource = undefined
@@ -538,6 +540,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     })
 
     this.applyScope(authorizationUrl)
+    this.applyAuthorizeParams(authorizationUrl)
 
     log(`\nPlease authorize this client by visiting:\n${authorizationUrl.toString()}\n`)
 
@@ -609,6 +612,25 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    *
    * @param authorizationUrl The authorization URL to set the scope on, modified in place
    */
+  /**
+   * Adds the caller's own parameters to the authorization URL.
+   *
+   * Applied after everything this client decides for itself, so an explicitly requested value wins
+   * - the flag exists precisely for servers whose requirements this client does not model. The
+   * parameters the flow derives per request are refused at parse time instead.
+   *
+   * @param authorizationUrl The authorization URL to add parameters to, modified in place
+   */
+  private applyAuthorizeParams(authorizationUrl: URL): void {
+    for (const [key, value] of Object.entries(this.authorizeParams)) {
+      authorizationUrl.searchParams.set(key, value)
+    }
+
+    if (Object.keys(this.authorizeParams).length > 0) {
+      debugLog('Added extra parameters to authorization URL', { keys: Object.keys(this.authorizeParams) })
+    }
+  }
+
   private applyScope(authorizationUrl: URL): void {
     const effectiveScope = this.getEffectiveScope()
     const requestedScope = authorizationUrl.searchParams.get('scope')

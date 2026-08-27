@@ -916,3 +916,66 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
     expect(result?.access_token).toBe('stale-token')
   })
 })
+
+describe('NodeOAuthClientProvider - Extra authorization parameters', () => {
+  const defaultOptions: OAuthProviderOptions = {
+    serverUrl: 'https://example.com',
+    callbackPort: 8080,
+    host: 'localhost',
+    serverUrlHash: 'test-hash',
+  }
+
+  beforeEach(() => {
+    vi.mocked(mcpAuthConfig.readJsonFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.writeJsonFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  it('should put the requested parameters on the authorization URL', async () => {
+    // Given the parameters Google needs to part with a refresh token
+    const provider = new NodeOAuthClientProvider({
+      ...defaultOptions,
+      authorizeParams: { access_type: 'offline', prompt: 'consent' },
+    })
+
+    // When the user is sent to authorize
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
+    await provider.redirectToAuthorization(authUrl)
+
+    // Then the server sees them
+    expect(authUrl.searchParams.get('access_type')).toBe('offline')
+    expect(authUrl.searchParams.get('prompt')).toBe('consent')
+  })
+
+  it('should let a requested parameter override one this client chose', async () => {
+    // Given a scope this client would otherwise decide for itself
+    const provider = new NodeOAuthClientProvider({
+      ...defaultOptions,
+      staticOAuthClientMetadata: { scope: 'openid email' } as any,
+      authorizeParams: { scope: 'openid' },
+    })
+
+    const authUrl = new URL('https://auth.example.com/authorize')
+    await provider.redirectToAuthorization(authUrl)
+
+    // Then the explicit request wins, because that is what the escape hatch is for
+    expect(authUrl.searchParams.get('scope')).toBe('openid')
+  })
+
+  it('should add nothing of its own when none are supplied', async () => {
+    // Given a provider configured exactly as before the flag existed
+    const provider = new NodeOAuthClientProvider({ ...defaultOptions })
+
+    const authUrl = new URL('https://auth.example.com/authorize?response_type=code')
+    await provider.redirectToAuthorization(authUrl)
+
+    // Then the URL carries only what this client already decided for itself - `scope` is
+    // applyScope's doing, not the new flag's
+    expect([...authUrl.searchParams.keys()].sort()).toEqual(['response_type', 'scope'])
+  })
+})
