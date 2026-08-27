@@ -22,7 +22,7 @@ import {
   TransportStrategy,
   discoverOAuthServerInfo,
 } from './lib/utils'
-import { StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
+import { KeepAliveConfig, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './lib/types'
 import { NodeOAuthClientProvider } from './lib/node-oauth-client-provider'
 import { createLazyAuthCoordinator, hasUsableTokens, serverIssuesAuthChallenge } from './lib/coordination'
 
@@ -50,6 +50,7 @@ async function runProxy(
   ignoredTools: string[],
   authTimeoutMs: number,
   serverUrlHash: string,
+  keepAlive: KeepAliveConfig,
 ) {
   // Set up event emitter for auth flow
   const events = new EventEmitter()
@@ -138,6 +139,7 @@ async function runProxy(
       transportToClient: localTransport,
       transportToServer: remoteTransport,
       ignoredTools,
+      keepAlive,
       /**
        * Finishes a sign-in the remote server asked for mid-session.
        *
@@ -236,6 +238,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
       ignoredTools,
       authTimeoutMs,
       serverUrlHash,
+      keepAlive,
     }) => {
       return runProxy(
         serverUrl,
@@ -252,6 +255,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
         ignoredTools,
         authTimeoutMs,
         serverUrlHash,
+        keepAlive,
       )
     },
   )

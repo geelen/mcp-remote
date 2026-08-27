@@ -5,7 +5,13 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { Transport, type FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { AuthCodeResult, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
+import {
+  AuthCodeResult,
+  KeepAliveConfig,
+  OAuthCallbackServerOptions,
+  StaticOAuthClientInformationFull,
+  StaticOAuthClientMetadata,
+} from './types'
 import { getConfigDir, getConfigFilePath, readJsonFile } from './mcp-auth-config'
 import {
   discoverProtectedResourceMetadata,
@@ -32,6 +38,7 @@ declare global {
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
 export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+export const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000
 
 /**
  * Which JSON-RPC methods carry an `Mcp-Name`, and where its value comes from.
@@ -260,11 +267,14 @@ export function mcpProxy({
   transportToClient,
   transportToServer,
   ignoredTools = [],
+  keepAlive,
   reauthorize,
 }: {
   transportToClient: Transport
   transportToServer: Transport
   ignoredTools?: string[]
+  /** Pings the server on an interval, so a connection carrying no traffic is not reaped */
+  keepAlive?: KeepAliveConfig
   /**
    * Completes a sign-in for a request the server refused, or undefined to answer with the error.
    *
@@ -280,6 +290,9 @@ export function mcpProxy({
   let lastInitialize: Message | null = null
   let reinitSeq = 0
   const pendingReinit = new Map<string, (message: Message) => void>()
+  const pendingPings = new Set<string>()
+  let pingSeq = 0
+  let keepAliveTimer: NodeJS.Timeout | null = null
   let initializedDelivered: Promise<unknown> | null = null
   let reauthorizeInFlight: Promise<void> | null = null
 
@@ -355,11 +368,18 @@ export function mcpProxy({
   }
 
   transportToServer.onmessage = (_message) => {
+    const incomingId = (_message as any).id
+
+    // Answers to our own keep-alive pings are ours to consume too. The client never sent the
+    // request, so forwarding the response would hand it an id it has nothing to match against.
+    if (typeof incomingId === 'string' && pendingPings.delete(incomingId)) {
+      return
+    }
+
     // Responses to our own re-initialize handshake are ours to consume, not the client's
-    const reinitId = (_message as any).id
-    if (typeof reinitId === 'string' && pendingReinit.has(reinitId)) {
-      const settle = pendingReinit.get(reinitId)!
-      pendingReinit.delete(reinitId)
+    if (typeof incomingId === 'string' && pendingReinit.has(incomingId)) {
+      const settle = pendingReinit.get(incomingId)!
+      pendingReinit.delete(incomingId)
       settle(_message as any)
       return
     }
@@ -389,6 +409,7 @@ export function mcpProxy({
   }
 
   transportToClient.onclose = () => {
+    stopKeepAlive()
     if (transportToServerClosed) {
       return
     }
@@ -399,6 +420,7 @@ export function mcpProxy({
   }
 
   transportToServer.onclose = () => {
+    stopKeepAlive()
     if (transportToClientClosed) {
       return
     }
@@ -409,6 +431,10 @@ export function mcpProxy({
 
   transportToClient.onerror = onClientError
   transportToServer.onerror = onServerError
+
+  if (keepAlive?.enabled) {
+    keepAliveTimer = startKeepAlive(keepAlive.intervalMs)
+  }
 
   function onClientError(error: Error) {
     log('Error from local client:', error)
@@ -495,6 +521,42 @@ export function mcpProxy({
     // per session - subscriptions, roots, progress tokens - is quietly gone. The
     // spec mandates the new session anyway; there is no way to replay that state.
     log(`Re-established session ${transportToServer.sessionId ?? '(none)'} after server expiry`)
+  }
+
+  /**
+   * Pings the server on an interval so a connection carrying no traffic is not reaped.
+   *
+   * Servers - and the load balancers in front of them - commonly close a connection that has been
+   * idle for a few minutes. Nothing surfaces that to the client until its next request fails, so
+   * for a session that is mostly idle a cheap request on a timer is what keeps it usable.
+   *
+   * Every id here is ours, and so is every answer: they are recorded in `pendingPings` and dropped
+   * in the remote handler instead of being forwarded.
+   */
+  function startKeepAlive(intervalMs: number) {
+    const timer = setInterval(() => {
+      const id = `mcp-remote-keepalive-${++pingSeq}`
+      pendingPings.add(id)
+      transportToServer.send({ jsonrpc: '2.0', id, method: 'ping' }).catch((error) => {
+        // A failed ping is not fatal on its own - the next request is what decides whether the
+        // connection is really gone - so this is reported rather than escalated.
+        pendingPings.delete(id)
+        log(`Keep-alive ping failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }, intervalMs)
+
+    // Waiting to send another ping is never a reason to hold the process open
+    timer.unref?.()
+    log(`Keep-alive enabled, pinging every ${intervalMs / 1000} seconds`)
+    return timer
+  }
+
+  function stopKeepAlive() {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer)
+      keepAliveTimer = null
+    }
+    pendingPings.clear()
   }
 
   /**
@@ -1414,6 +1476,14 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     setGlobalDispatcher(new Agent(dispatcherOptions))
   }
 
+  // Keep-alive. `--ping-interval` implies `--keep-alive`, because an interval that silently does
+  // nothing unless a second flag is also present is the more surprising reading of the two.
+  const pingIntervalMs = parseSecondsOption(args, '--ping-interval')
+  const keepAlive: KeepAliveConfig = {
+    enabled: args.includes('--keep-alive') || pingIntervalMs !== undefined,
+    intervalMs: pingIntervalMs ?? DEFAULT_KEEP_ALIVE_INTERVAL_MS,
+  }
+
   // Parse transport strategy
   let transportStrategy: TransportStrategy = 'http-first' // Default
   const transportIndex = args.indexOf('--transport')
@@ -1626,6 +1696,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     ignoredTools,
     authTimeoutMs,
     serverUrlHash,
+    keepAlive,
   }
 }
 
