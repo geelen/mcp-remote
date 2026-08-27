@@ -2,8 +2,6 @@
 
 Connect an MCP Client that only supports local (stdio) servers to a Remote MCP Server, with auth support:
 
-**Note: this is a working proof-of-concept** but should be considered **experimental**.
-
 ## Why is this necessary?
 
 So far, the majority of MCP servers in the wild are installed locally, using the stdio transport. This has some benefits: both the client and the server can implicitly trust each other as the user has granted them both permission to run. Adding secrets like API keys can be done using environment variables and never leave your machine. And building on `npx` and `uvx` has allowed users to avoid explicit install steps, too.
