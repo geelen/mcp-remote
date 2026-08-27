@@ -2,7 +2,7 @@ import { OAuthClientProvider, UnauthorizedError } from '@modelcontextprotocol/sd
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { Transport, type FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { OAuthClientInformationFull, OAuthClientInformationFullSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { AuthCodeResult, OAuthCallbackServerOptions, StaticOAuthClientInformationFull, StaticOAuthClientMetadata } from './types'
@@ -32,6 +32,95 @@ declare global {
 // Connection constants
 export const REASON_AUTH_NEEDED = 'authentication-needed'
 export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+
+/**
+ * Which JSON-RPC methods carry an `Mcp-Name`, and where its value comes from.
+ *
+ * SEP-2243 sources the header from `params.name` for tools and prompts, and from
+ * `params.uri` for resources.
+ */
+const MCP_NAME_SOURCES: Record<string, 'name' | 'uri'> = {
+  'tools/call': 'name',
+  'prompts/get': 'name',
+  'resources/read': 'uri',
+}
+
+type MirroredMcpHeaders = { method: string; name?: string }
+
+/**
+ * Read the standard MCP request headers out of a JSON-RPC body.
+ *
+ * A batch body is deliberately skipped: it has no single method to mirror, and
+ * mirroring one of several is worse than sending nothing.
+ */
+function mcpHeadersFromBody(body: RequestInit['body']): MirroredMcpHeaders | undefined {
+  if (typeof body !== 'string') return undefined
+
+  let message: unknown
+  try {
+    message = JSON.parse(body)
+  } catch {
+    return undefined
+  }
+
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return undefined
+
+  const { method, params } = message as { method?: unknown; params?: unknown }
+  if (typeof method !== 'string' || method.length === 0) return undefined
+
+  const source = MCP_NAME_SOURCES[method]
+  if (!source || !params || typeof params !== 'object') return { method }
+
+  const name = (params as Record<string, unknown>)[source]
+  return typeof name === 'string' && name.length > 0 ? { method, name } : { method }
+}
+
+/**
+ * Encode a header value per the SEP-2243 value rules.
+ *
+ * RFC 9110 field values are visible ASCII plus space and tab, with no leading or
+ * trailing whitespace. Anything outside that - and any literal that would itself
+ * be mistaken for the sentinel - travels Base64.
+ */
+export function encodeMcpHeaderValue(value: string): string {
+  const headerSafe = /^[\x21-\x7e](?:[\x20-\x7e\t]*[\x21-\x7e])?$/.test(value)
+  const looksEncoded = value.startsWith('=?base64?') && value.endsWith('?=')
+
+  return headerSafe && !looksEncoded ? value : `=?base64?${Buffer.from(value, 'utf8').toString('base64')}?=`
+}
+
+/**
+ * Mirror the JSON-RPC method and target into the standard MCP request headers.
+ *
+ * SEP-2243 (spec revision 2026-07-28) requires `Mcp-Method` on every request and
+ * `Mcp-Name` on `tools/call`, `resources/read` and `prompts/get`, so that gateways
+ * can route and meter without parsing the body. The SDK sends neither, which is
+ * what strands mcp-remote behind a method-aware gateway (#306).
+ *
+ * Both are derived from the exact body being sent, never from anything else: a
+ * server that enforces the rule rejects a header that disagrees with the body -
+ * or a required one that is missing - with `-32020 HeaderMismatch`. That is also
+ * why `Mcp-Method` is never sent alone for a method that requires `Mcp-Name`;
+ * a partial set is itself a mismatch.
+ *
+ * Caller-supplied headers win, so an explicit `--header` still overrides.
+ *
+ * The cast bridges types only: this module is undici-typed throughout (see the
+ * import above) while `FetchLike` is declared against the global DOM types. They
+ * are the same implementation at runtime on the Node versions we support.
+ */
+const fetchWithMcpHeaders = (async (url: string | URL, init?: RequestInit) => {
+  const mirrored = mcpHeadersFromBody(init?.body)
+  if (!mirrored) return fetch(url, init)
+
+  const headers = new Headers(init?.headers)
+  if (!headers.has('Mcp-Method')) headers.set('Mcp-Method', mirrored.method)
+  if (mirrored.name !== undefined && !headers.has('Mcp-Name')) {
+    headers.set('Mcp-Name', encodeMcpHeaderValue(mirrored.name))
+  }
+
+  return fetch(url, { ...init, headers })
+}) as unknown as FetchLike
 
 // Transport strategy types
 export type TransportStrategy = 'sse-only' | 'http-only' | 'sse-first' | 'http-first'
@@ -742,10 +831,12 @@ export async function connectToRemoteServer(
         authProvider,
         requestInit: { headers },
         eventSourceInit,
+        fetch: fetchWithMcpHeaders,
       })
     : new StreamableHTTPClientTransport(url, {
         authProvider,
         requestInit: { headers },
+        fetch: fetchWithMcpHeaders,
       })
 
   // When connecting without a Client (proxy mode), the auth challenge (401) is not received by
@@ -773,7 +864,14 @@ export async function connectToRemoteServer(
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
-        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        // This probe sends the very first `initialize` POST, so it is the request a
+        // method-aware gateway routes on. It needs the mirrored headers as much as the
+        // real transport does.
+        const testTransport = new StreamableHTTPClientTransport(url, {
+          authProvider,
+          requestInit: { headers },
+          fetch: fetchWithMcpHeaders,
+        })
         // This transport is the one that will receive (and store the metadata from) any 401 challenge.
         authChallengeTransport = testTransport
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
