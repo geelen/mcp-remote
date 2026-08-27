@@ -2526,3 +2526,149 @@ describe('Feature: Resource Indicator Flags', () => {
     expect(result.serverUrlHash).toBe(getServerUrlHash('https://example.com/mcp', undefined, {}))
   })
 })
+
+describe('Feature: Keeping an idle connection alive', () => {
+  const mockTransport = () =>
+    ({
+      send: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+      onmessage: vi.fn(),
+      onclose: vi.fn(),
+      onerror: vi.fn(),
+    }) as unknown as Transport
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('Scenario: Pings the server once per interval while the connection is open', async () => {
+    // Given a proxy set up to keep the connection alive every 30 seconds
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+
+    // When two intervals elapse with no other traffic
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    // Then the server has been pinged twice
+    const pings = (transportToServer.send as any).mock.calls.filter(([m]: any[]) => m.method === 'ping')
+    expect(pings).toHaveLength(2)
+    expect(pings[0][0]).toMatchObject({ jsonrpc: '2.0', method: 'ping' })
+  })
+
+  it('Scenario: Without the flag, nothing is sent', async () => {
+    // Given a proxy with no keep-alive configured
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer })
+
+    // When a long time passes
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+
+    // Then the proxy has sent nothing of its own
+    expect(transportToServer.send).not.toHaveBeenCalled()
+  })
+
+  it('Scenario: The answer to our own ping is consumed, not forwarded to the client', async () => {
+    // Given a proxy that has sent a keep-alive ping
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    const [ping] = (transportToServer.send as any).mock.calls.find(([m]: any[]) => m.method === 'ping')
+
+    // When the server answers it
+    transportToServer.onmessage?.({ jsonrpc: '2.0', id: ping.id, result: {} } as any)
+
+    // Then the client is never handed a response to a request it did not send
+    expect(transportToClient.send).not.toHaveBeenCalled()
+  })
+
+  it("Scenario: A response to the client's own request is still forwarded", async () => {
+    // Given a proxy with keep-alive enabled
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    // When the server answers something the client actually asked for
+    transportToServer.onmessage?.({ jsonrpc: '2.0', id: 'client-1', result: { tools: [] } } as any)
+
+    // Then it reaches the client untouched
+    expect(transportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: 'client-1' }))
+  })
+
+  it('Scenario: A ping answer is only swallowed once, so a reused id still reaches the client', async () => {
+    // Given a proxy whose first ping has already been answered
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+    await vi.advanceTimersByTimeAsync(30_000)
+    const [ping] = (transportToServer.send as any).mock.calls.find(([m]: any[]) => m.method === 'ping')
+    transportToServer.onmessage?.({ jsonrpc: '2.0', id: ping.id, result: {} } as any)
+
+    // When a later message arrives carrying that same id
+    transportToServer.onmessage?.({ jsonrpc: '2.0', id: ping.id, result: { second: true } } as any)
+
+    // Then it is treated as the client's, because our ping is no longer outstanding
+    expect(transportToClient.send).toHaveBeenCalledWith(expect.objectContaining({ id: ping.id }))
+  })
+
+  it('Scenario: Pinging stops once the connection closes', async () => {
+    // Given a proxy that has been pinging
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+    await vi.advanceTimersByTimeAsync(30_000)
+    const before = (transportToServer.send as any).mock.calls.length
+
+    // When the remote end closes
+    transportToServer.onclose?.()
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+
+    // Then no further pings are sent
+    expect((transportToServer.send as any).mock.calls.length).toBe(before)
+  })
+
+  it('Scenario: A failed ping is reported without taking the proxy down', async () => {
+    // Given a server that refuses the ping
+    const transportToClient = mockTransport()
+    const transportToServer = mockTransport()
+    ;(transportToServer.send as any).mockRejectedValue(new Error('socket hang up'))
+    mcpProxy({ transportToClient, transportToServer, keepAlive: { enabled: true, intervalMs: 30_000 } })
+
+    // When intervals elapse
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    // Then it keeps trying rather than giving up after the first failure
+    expect((transportToServer.send as any).mock.calls.length).toBe(2)
+  })
+})
+
+describe('Feature: Keep-alive command line flags', () => {
+  it('Scenario: Off unless asked for', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp'], 'usage')
+    expect(result.keepAlive.enabled).toBe(false)
+  })
+
+  it('Scenario: --keep-alive pings every 30 seconds by default', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--keep-alive'], 'usage')
+    expect(result.keepAlive).toEqual({ enabled: true, intervalMs: 30_000 })
+  })
+
+  it('Scenario: --ping-interval sets the interval and implies --keep-alive', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--ping-interval', '10'], 'usage')
+    expect(result.keepAlive).toEqual({ enabled: true, intervalMs: 10_000 })
+  })
+
+  it('Scenario: An unusable interval falls back to the default rather than disabling the flag', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/mcp', '--keep-alive', '--ping-interval', 'soon'], 'usage')
+    expect(result.keepAlive).toEqual({ enabled: true, intervalMs: 30_000 })
+  })
+})

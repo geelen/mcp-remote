@@ -287,6 +287,20 @@ You can specify multiple `--ignore-tool` flags to ignore different patterns. Exa
       ]
 ```
 
+* To stop an idle connection being dropped, add the `--keep-alive` flag. The proxy then sends a `ping` every 30 seconds, which is enough traffic to keep a server — or a load balancer in front of one — from reaping a session that has been quiet for a few minutes. Use `--ping-interval` with a value in seconds to change the period; setting it turns keep-alive on, so the two flags are only both needed when you want the default period spelled out.
+
+  This is the opposite end of the problem from `--body-timeout`: that one governs how long *we* wait, whereas this keeps the *other* side from hanging up.
+
+```json
+      "args": [
+        "mcp-remote",
+        "https://remote.mcp.server/sse",
+        "--keep-alive",
+        "--ping-interval",
+        "60"
+      ]
+```
+
 * To connect over IPv4 only, add the `--ipv4` flag. Useful when a hostname resolves to both IPv4 and IPv6 addresses but the IPv6 routes silently black-hole rather than being refused — connection attempts then time out instead of failing over, and the request never completes.
 
 ```json

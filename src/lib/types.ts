@@ -65,6 +65,14 @@ export type AuthCodeResult = {
   state?: string
 }
 
+/*
+ * How often, if ever, to ping the remote server so an idle connection is not reaped
+ */
+export interface KeepAliveConfig {
+  enabled: boolean
+  intervalMs: number
+}
+
 // optional tatic OAuth client information
 export type StaticOAuthClientMetadata = OAuthClientMetadata | null | undefined
 export type StaticOAuthClientInformationFull = OAuthClientInformationFull | null | undefined
