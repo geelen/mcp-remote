@@ -19,6 +19,8 @@ export interface AuthorizationServerMetadata {
   grant_types_supported?: string[]
   /** JSON array containing a list of client authentication methods supported by this token endpoint */
   token_endpoint_auth_methods_supported?: string[]
+  /** Whether an HTTPS URL pointing at a Client ID Metadata Document is accepted as a client_id (SEP-991) */
+  client_id_metadata_document_supported?: boolean
   /** Additional metadata fields */
   [key: string]: unknown
 }

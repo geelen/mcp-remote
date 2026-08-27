@@ -321,6 +321,89 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
     })
   })
 
+  describe('client id metadata document', () => {
+    const CLIENT_METADATA_URL = 'https://client.example.com/.well-known/oauth-client-metadata'
+
+    const providerFor = (client_id_metadata_document_supported?: boolean, clientMetadataUrl = CLIENT_METADATA_URL) =>
+      new NodeOAuthClientProvider({
+        ...defaultOptions,
+        clientMetadataUrl,
+        authorizationServerMetadata: {
+          issuer: 'https://auth.example.com',
+          ...(client_id_metadata_document_supported === undefined ? {} : { client_id_metadata_document_supported }),
+        } as AuthorizationServerMetadata,
+      })
+
+    it('identifies the client by its metadata URL when the server accepts one', async () => {
+      // Given a server advertising SEP-991 support
+      provider = providerFor(true)
+
+      // Then the URL is the client id, and nothing is registered
+      await expect(provider.clientInformation()).resolves.toEqual({ client_id: CLIENT_METADATA_URL })
+      expect(mockReadJsonFile).not.toHaveBeenCalledWith('test-hash', 'client_info.json', expect.anything())
+    })
+
+    it('prefers the metadata document to a registration cached before the flag was passed', async () => {
+      // Given a dynamic registration already on disk
+      mockReadJsonFile.mockResolvedValue({ client_id: 'registered-earlier', redirect_uris: ['http://localhost:8080/oauth/callback'] })
+      provider = providerFor(true)
+
+      // Then the flag takes effect immediately, rather than after the old registration expires
+      await expect(provider.clientInformation()).resolves.toEqual({ client_id: CLIENT_METADATA_URL })
+    })
+
+    it('registers dynamically when the server does not advertise support', async () => {
+      // Given a server that says nothing about client metadata documents
+      mockReadJsonFile.mockResolvedValue(undefined)
+      provider = providerFor(undefined)
+
+      // Then we fall back rather than send a client id the server will not recognise
+      await expect(provider.clientInformation()).resolves.toBeUndefined()
+      expect(mockReadJsonFile).toHaveBeenCalledWith('test-hash', 'client_info.json', expect.anything())
+    })
+
+    it('registers dynamically when the server advertises support as false', async () => {
+      mockReadJsonFile.mockResolvedValue(undefined)
+      provider = providerFor(false)
+
+      await expect(provider.clientInformation()).resolves.toBeUndefined()
+    })
+
+    it('lets static client information win over the metadata document', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        clientMetadataUrl: CLIENT_METADATA_URL,
+        authorizationServerMetadata: {
+          issuer: 'https://auth.example.com',
+          client_id_metadata_document_supported: true,
+        } as AuthorizationServerMetadata,
+        staticOAuthClientInfo: { client_id: 'pinned-by-the-user' } as any,
+      })
+
+      await expect(provider.clientInformation()).resolves.toEqual({ client_id: 'pinned-by-the-user' })
+    })
+
+    it('does not cache the metadata URL as if it were a registration', async () => {
+      // Given the SDK reaching its own SEP-991 branch and offering the derived id back
+      provider = providerFor(true)
+
+      await provider.saveClientInformation({ client_id: CLIENT_METADATA_URL } as any)
+
+      // Then nothing is written: client_info.json holds full registrations, and this
+      // one could never be read back out of it
+      expect(mockWriteJsonFile).not.toHaveBeenCalled()
+    })
+
+    it('still caches a real registration when a metadata URL is set but unused', async () => {
+      provider = providerFor(false)
+      const registration = { client_id: 'issued-by-the-server', redirect_uris: ['http://localhost:8080/oauth/callback'] }
+
+      await provider.saveClientInformation(registration as any)
+
+      expect(mockWriteJsonFile).toHaveBeenCalledWith('test-hash', 'client_info.json', registration)
+    })
+  })
+
   describe('token endpoint authentication method', () => {
     const methodFor = (token_endpoint_auth_methods_supported?: string[]) =>
       new NodeOAuthClientProvider({

@@ -40,6 +40,7 @@ async function runClient(
   host: string,
   staticOAuthClientMetadata: StaticOAuthClientMetadata,
   staticOAuthClientInfo: StaticOAuthClientInformationFull,
+  clientMetadataUrl: string | undefined,
   authorizeResource: string | undefined,
   skipResourceParameter: boolean,
   authorizeParams: Record<string, string>,
@@ -49,7 +50,9 @@ async function runClient(
   // Set up event emitter for auth flow
   const events = new EventEmitter()
 
-  const strictPort = !!specifiedPort || !!staticOAuthClientInfo
+  // A redirect_uri pinned outside this process - by a static registration, or by the redirect_uris
+  // in a client metadata document - stops being valid the moment we wander onto another port.
+  const strictPort = !!specifiedPort || !!staticOAuthClientInfo || !!clientMetadataUrl
 
   // Create a lazy auth coordinator
   const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs, strictPort)
@@ -79,6 +82,7 @@ async function runClient(
     clientName: 'MCP CLI Client',
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
+    clientMetadataUrl,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,
@@ -201,6 +205,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
       host,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
+      clientMetadataUrl,
       authorizeResource,
       skipResourceParameter,
       authorizeParams,
@@ -217,6 +222,7 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote-client <https://s
         host,
         staticOAuthClientMetadata,
         staticOAuthClientInfo,
+        clientMetadataUrl,
         authorizeResource,
         skipResourceParameter,
         authorizeParams,

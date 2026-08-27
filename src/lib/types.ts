@@ -29,6 +29,8 @@ export interface OAuthProviderOptions {
   staticOAuthClientMetadata?: StaticOAuthClientMetadata
   /** Static OAuth client information to use instead of OAuth registration */
   staticOAuthClientInfo?: StaticOAuthClientInformationFull
+  /** URL of a Client ID Metadata Document (SEP-991), used as the client_id instead of registering */
+  clientMetadataUrl?: string
   /** Resource parameter to send to the authorization server */
   authorizeResource?: string
   /** Omit the RFC 8707 resource parameter entirely (some servers reject it, e.g. Entra ID v2) */

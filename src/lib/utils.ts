@@ -1289,6 +1289,23 @@ async function invalidateMismatchedClientRegistration(serverUrlHash: string, red
   await rm(getConfigFilePath(serverUrlHash, 'client_info.json'), { force: true })
 }
 
+/**
+ * Whether a value can serve as a Client ID Metadata Document URL (SEP-991).
+ *
+ * Mirrors the SDK's own check, which throws deep inside `auth()` rather than at startup. A
+ * rejected URL there surfaces long after the flag was typed, so the same rule is applied while
+ * the arguments are still being read and the user can be told which one was wrong. The root path
+ * is excluded because a client id has to be distinguishable from the origin that serves it.
+ */
+function isClientMetadataUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.pathname !== '/'
+  } catch {
+    return false
+  }
+}
+
 export function calculateDefaultPort(serverUrlHash: string): number {
   // Convert the first 4 bytes of the serverUrlHash into a port offset
   const offset = parseInt(serverUrlHash.substring(0, 4), 16)
@@ -1600,6 +1617,19 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     }
   }
 
+  // Parse the Client ID Metadata Document URL (SEP-991), used in place of dynamic registration
+  let clientMetadataUrl: string | undefined
+  const clientMetadataUrlIndex = args.indexOf('--client-metadata-url')
+  if (clientMetadataUrlIndex !== -1 && clientMetadataUrlIndex < args.length - 1) {
+    const value = args[clientMetadataUrlIndex + 1].trim()
+    if (isClientMetadataUrl(value)) {
+      clientMetadataUrl = value
+      log(`Using client metadata document: ${value}`)
+    } else {
+      log(`Warning: Ignoring invalid client metadata URL: ${value}. It must be an HTTPS URL with a path.`)
+    }
+  }
+
   // Parse the RFC 8707 resource indicator, and whether to omit it entirely
   let authorizeResource: string | undefined
   let skipResourceParameter = args.includes('--disable-resource-parameter')
@@ -1678,7 +1708,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     process.exit(1)
   }
   // Calculate hash with all parsed parameters for cache isolation
-  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers, authorizeParams)
+  const serverUrlHash = getServerUrlHash(serverUrl, authorizeResource, headers, authorizeParams, clientMetadataUrl)
 
   // Set server hash globally for debug logging
   global.currentServerUrlHash = serverUrlHash
@@ -1744,6 +1774,7 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     debug,
     staticOAuthClientMetadata,
     staticOAuthClientInfo,
+    clientMetadataUrl,
     authorizeResource,
     skipResourceParameter,
     authorizeParams,
@@ -1781,6 +1812,8 @@ export function setupSignalHandlers(cleanup: () => Promise<void>) {
  * @param serverUrl The server URL
  * @param authorizeResource Optional resource parameter for OAuth
  * @param headers Optional custom headers
+ * @param authorizeParams Optional extra authorization parameters
+ * @param clientMetadataUrl Optional Client ID Metadata Document URL used as the client_id
  * @returns MD5 hash of the configuration
  */
 export function getServerUrlHash(
@@ -1788,6 +1821,7 @@ export function getServerUrlHash(
   authorizeResource?: string,
   headers?: Record<string, string>,
   authorizeParams?: Record<string, string>,
+  clientMetadataUrl?: string,
 ): string {
   // Include resource and headers in hash to isolate OAuth sessions
   // per unique server configuration (fixes #25)
@@ -1804,6 +1838,10 @@ export function getServerUrlHash(
     const sortedKeys = Object.keys(headers).sort()
     parts.push(JSON.stringify(headers, sortedKeys))
   }
+  // And so does the client id, when it comes from a metadata document rather than a registration.
+  // A refresh token is bound to the client that obtained it, so tokens from a dynamic registration
+  // cannot be refreshed once this client starts identifying itself by a URL instead.
+  if (clientMetadataUrl) parts.push(clientMetadataUrl)
   return crypto.createHash('md5').update(parts.join('|')).digest('hex')
 }
 

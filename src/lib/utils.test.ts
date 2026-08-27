@@ -111,6 +111,47 @@ describe('Feature: Command Line Arguments Parsing', () => {
     expect(result.callbackPath).toBe('/custom-callback')
   })
 
+  it('Scenario: Parse a client metadata document URL', async () => {
+    // Given a URL serving this client's metadata document (SEP-991)
+    const args = ['https://example.com/sse', '--client-metadata-url', 'https://example.com/.well-known/oauth-client-metadata']
+
+    // When parsing the command line arguments
+    const result = await parseCommandLineArgs(args, 'test usage')
+
+    // Then it is carried through to the OAuth client provider
+    expect(result.clientMetadataUrl).toBe('https://example.com/.well-known/oauth-client-metadata')
+  })
+
+  it('Scenario: Ignore a client metadata URL an authorization server would reject', async () => {
+    // Given URLs failing the two rules SEP-991 imposes: HTTPS, and a path to distinguish
+    // the client id from the origin serving it
+    for (const url of ['http://example.com/client-metadata', 'https://example.com/', 'https://example.com', 'not-a-url']) {
+      const result = await parseCommandLineArgs(['https://example.com/sse', '--client-metadata-url', url], 'test usage')
+
+      // Then it is dropped here, rather than thrown from inside the sign-in
+      expect(result.clientMetadataUrl).toBeUndefined()
+    }
+  })
+
+  it('Scenario: Register dynamically when no client metadata URL is given', async () => {
+    const result = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+
+    expect(result.clientMetadataUrl).toBeUndefined()
+  })
+
+  it('Scenario: Keep credentials for a metadata document client apart from registered ones', async () => {
+    // Given the same server reached once by registration and once by metadata document
+    const registered = await parseCommandLineArgs(['https://example.com/sse'], 'test usage')
+    const byDocument = await parseCommandLineArgs(
+      ['https://example.com/sse', '--client-metadata-url', 'https://client.example.com/metadata'],
+      'test usage',
+    )
+
+    // Then they do not share a token store: a refresh token belongs to the client that
+    // obtained it, so the other client cannot renew it
+    expect(byDocument.serverUrlHash).not.toBe(registered.serverUrlHash)
+  })
+
   it('Scenario: Ignore a callback path that is not rooted', async () => {
     // Given a callback path Express cannot route back to the redirect URI we would advertise
     const args = ['https://example.com/sse', '--callback-path', 'custom-callback']

@@ -397,6 +397,33 @@ npx mcp-remote https://example.remote/server --static-oauth-client-info "{ \"cli
 npx mcp-remote https://example.remote/server --static-oauth-client-info '@/Users/username/Library/Application Support/Claude/oauth_client_info.json'
 ```
 
+### Client ID Metadata Documents
+
+[SEP-991](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) lets an
+authorization server accept an HTTPS URL as the `client_id`, where that URL serves a JSON document
+describing the client. Servers that support it advertise
+`"client_id_metadata_document_supported": true` in their authorization server metadata, and no
+dynamic registration is needed.
+
+Point mcp-remote at your document with `--client-metadata-url`:
+
+```bash
+npx mcp-remote https://example.remote/server --client-metadata-url https://client.example.com/.well-known/oauth-client-metadata
+```
+
+The URL must use HTTPS and have a path — a bare origin is rejected. If the server does not advertise
+support, mcp-remote registers dynamically as usual, so the flag is safe to leave in place.
+
+The document you host has to list the `redirect_uri` mcp-remote will send, which contains the OAuth
+callback port. Passing this flag makes that port strict: mcp-remote uses the port derived from the
+server URL (or the one you pass explicitly) and fails rather than quietly moving to another one, so
+the `redirect_uris` in your document stay correct. Run once to see the port it picked, or choose it
+yourself:
+
+```bash
+npx mcp-remote https://example.remote/server 3334 --client-metadata-url https://client.example.com/.well-known/oauth-client-metadata
+```
+
 ### Claude Desktop
 
 [Official Docs](https://modelcontextprotocol.io/quickstart/user)

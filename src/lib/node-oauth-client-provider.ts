@@ -1,8 +1,10 @@
 import { z } from 'zod'
 import { OAuthClientProvider, refreshAuthorization, selectResourceURL } from '@modelcontextprotocol/sdk/client/auth.js'
 import {
+  OAuthClientInformation,
   OAuthClientInformationFull,
   OAuthClientInformationFullSchema,
+  OAuthClientInformationMixed,
   OAuthTokens,
   OAuthTokensSchema,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
@@ -56,7 +58,7 @@ const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
  */
 const TOKEN_ENDPOINT_AUTH_METHOD_PREFERENCE = ['none', 'client_secret_post', 'client_secret_basic']
 
-type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | undefined
+type ClientRegistrationSource = 'cached-dynamic' | 'fresh-dynamic' | 'static' | 'client-id-metadata-document' | undefined
 
 function staleClientRegistrationError(value: unknown): InvalidClientError | UnauthorizedClientError | undefined {
   if (!value || typeof value !== 'object') {
@@ -88,6 +90,11 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   private softwareVersion: string
   private staticOAuthClientMetadata: StaticOAuthClientMetadata
   private staticOAuthClientInfo: StaticOAuthClientInformationFull
+  /**
+   * URL of a Client ID Metadata Document, which SEP-991 lets a server accept in place of a
+   * registered client id. Read by the SDK, hence a public field rather than a private one.
+   */
+  clientMetadataUrl?: string
   private authorizeResource: string | undefined
   private authorizeParams: Record<string, string>
   private skipResourceParameter: boolean
@@ -121,6 +128,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
     this.softwareVersion = options.softwareVersion || MCP_REMOTE_VERSION
     this.staticOAuthClientMetadata = options.staticOAuthClientMetadata
     this.staticOAuthClientInfo = options.staticOAuthClientInfo
+    this.clientMetadataUrl = options.clientMetadataUrl
     const trimmedAuthorizeResource = options.authorizeResource?.trim()
     this.authorizeResource = trimmedAuthorizeResource ? trimmedAuthorizeResource : undefined
     this.skipResourceParameter = options.skipResourceParameter ?? false
@@ -303,7 +311,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    * Gets the client information if it exists
    * @returns The client information or undefined
    */
-  async clientInformation(): Promise<OAuthClientInformationFull | undefined> {
+  async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     debugLog('Reading client info')
     if (this.staticOAuthClientInfo) {
       debugLog('Returning static client info')
@@ -311,6 +319,13 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       this.clientRegistrationSource = 'static'
       return this.staticOAuthClientInfo
     }
+
+    const clientIdMetadataDocument = await this.clientIdMetadataDocument()
+    if (clientIdMetadataDocument) {
+      this.clientRegistrationSource = 'client-id-metadata-document'
+      return clientIdMetadataDocument
+    }
+
     const clientInfo = await readJsonFile<OAuthClientInformationFull>(
       this.serverUrlHash,
       'client_info.json',
@@ -329,10 +344,49 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   /**
+   * The client id to use when the authorization server accepts a Client ID Metadata Document.
+   *
+   * SEP-991 lets a client be identified by an HTTPS URL that serves its own metadata, removing the
+   * need to register at all. That helps against servers with no dynamic registration, and against
+   * those that hand out a fresh client on every run.
+   *
+   * The SDK has this branch too, but only reaches it when nothing is cached. Deciding it here
+   * means a client that already registered dynamically switches over as soon as the flag is
+   * passed, instead of quietly carrying on with the old registration.
+   */
+  private async clientIdMetadataDocument(): Promise<OAuthClientInformation | undefined> {
+    if (!this.clientMetadataUrl) {
+      return undefined
+    }
+
+    const metadata = await this.getAuthorizationServerMetadata()
+    if (metadata?.client_id_metadata_document_supported !== true) {
+      debugLog('Authorization server does not accept a client metadata document; registering instead', {
+        clientMetadataUrl: this.clientMetadataUrl,
+      })
+      return undefined
+    }
+
+    debugLog('Identifying this client by its metadata document', { client_id: this.clientMetadataUrl })
+    return { client_id: this.clientMetadataUrl }
+  }
+
+  /**
    * Saves client information
    * @param clientInformation The client information to save
    */
   async saveClientInformation(clientInformation: OAuthClientInformationFull): Promise<void> {
+    // A client id that is a metadata document URL is not a registration. It came from the command
+    // line and is reproduced from there on every run, so caching it could only ever store the same
+    // value or a stale one - and store it in a file this client cannot read back, since
+    // client_info.json is parsed as a full registration and that shape has only a client_id. The
+    // SDK offers it here because its own SEP-991 branch saves whatever it derives.
+    if (this.clientMetadataUrl && clientInformation.client_id === this.clientMetadataUrl) {
+      debugLog('Not caching a client id that came from a client metadata document')
+      this.clientRegistrationSource = 'client-id-metadata-document'
+      return
+    }
+
     debugLog('Saving client info', { client_id: clientInformation.client_id })
     this._clientInfo = clientInformation
     this.clientRegistrationSource = 'fresh-dynamic'
