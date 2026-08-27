@@ -21,7 +21,7 @@ import {
 } from './protected-resource-metadata'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
 import express from 'express'
-import net, { AddressInfo } from 'net'
+import { AddressInfo } from 'net'
 import { Server } from 'http'
 import crypto from 'crypto'
 import fs from 'fs'
@@ -36,9 +36,9 @@ declare global {
 }
 
 // Connection constants
-export const REASON_AUTH_NEEDED = 'authentication-needed'
-export const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
-export const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000
+const REASON_AUTH_NEEDED = 'authentication-needed'
+const REASON_TRANSPORT_FALLBACK = 'falling-back-to-alternate-transport'
+const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000
 
 /**
  * Which JSON-RPC methods carry an `Mcp-Name`, and where its value comes from.
@@ -135,8 +135,8 @@ export { MCP_REMOTE_VERSION }
 
 const pid = process.pid
 // Global debug flag
-export let DEBUG = false
-export let SILENT = false
+let DEBUG = false
+let SILENT = false
 
 // Helper function for timestamp formatting
 function getTimestamp(): string {
@@ -200,7 +200,7 @@ const sleep = (ms: number) =>
 
 const isMessageBlocked = (value: any): value is typeof MESSAGE_BLOCKED => value === MESSAGE_BLOCKED
 
-export function createMessageTransformer({
+function createMessageTransformer({
   transformRequestFunction,
   transformResponseFunction,
 }: {
@@ -866,9 +866,9 @@ export async function connectToRemoteServer(
 
   // Create transport with eventSourceInit to pass Authorization header if present
   const eventSourceInit = {
-    fetch: (url: string | URL, init?: RequestInit) => {
+    fetch: (requestUrl: string | URL, init?: RequestInit) => {
       return Promise.resolve(authProvider?.tokens?.()).then((tokens) =>
-        fetch(url, {
+        fetch(requestUrl, {
           ...init,
           headers: mergeHeaders(
             init?.headers,
@@ -965,7 +965,7 @@ export async function connectToRemoteServer(
       if (recursionReasons.has(REASON_TRANSPORT_FALLBACK)) {
         const errorMessage = `Already attempted transport fallback. Giving up.`
         log(errorMessage)
-        throw new Error(errorMessage)
+        throw new Error(errorMessage, { cause: error })
       }
 
       log(`Recursively reconnecting for reason: ${REASON_TRANSPORT_FALLBACK}`)
@@ -1002,7 +1002,7 @@ export async function connectToRemoteServer(
         debugLog('Already attempted auth reconnection, giving up', {
           recursionReasons: Array.from(recursionReasons),
         })
-        throw new Error(errorMessage)
+        throw new Error(errorMessage, { cause: error })
       }
 
       // A concurrent instance ran the browser flow for us and persisted the tokens. There is no
@@ -1256,22 +1256,12 @@ export async function setupOAuthCallbackServerWithLongPoll(options: OAuthCallbac
   return { server, actualPort, authCode: null, waitForAuthCode, authCompletedPromise }
 }
 
-/**
- * Sets up an Express server to handle OAuth callbacks
- * @param options The server options
- * @returns A promise resolving to an object with the server, authCode, and waitForAuthCode function
- */
-export async function setupOAuthCallbackServer(options: OAuthCallbackServerOptions) {
-  const { server, authCode, waitForAuthCode } = await setupOAuthCallbackServerWithLongPoll(options)
-  return { server, authCode, waitForAuthCode }
-}
-
 /** The callback path the OAuth redirect URI is built on, unless --callback-path overrides it. */
-export const DEFAULT_CALLBACK_PATH = '/oauth/callback'
+const DEFAULT_CALLBACK_PATH = '/oauth/callback'
 
 /** Endpoint secondary instances long-poll to await the auth flow the primary instance is running. */
 export const MCP_REMOTE_ID_PATH = '/.mcp-remote/id'
-export const LONG_POLL_PATH = '/wait-for-auth'
+const LONG_POLL_PATH = '/wait-for-auth'
 
 /**
  * Builds the OAuth redirect URI for a given host/port. Kept in one place because the value
@@ -1421,7 +1411,7 @@ async function readHeaderFile(filePath: string): Promise<Record<string, string>>
   try {
     contents = await readFile(filePath, 'utf8')
   } catch (error) {
-    throw new Error(`Could not read the header file ${filePath}: ${(error as Error).message}`)
+    throw new Error(`Could not read the header file ${filePath}: ${(error as Error).message}`, { cause: error })
   }
 
   const headers: Record<string, string> = {}

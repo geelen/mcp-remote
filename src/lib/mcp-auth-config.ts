@@ -54,7 +54,7 @@ export function getConfigDir(): string {
 /**
  * Ensures the configuration directory exists
  */
-export async function ensureConfigDir(): Promise<void> {
+async function ensureConfigDir(): Promise<void> {
   try {
     const configDir = getConfigDir()
     await fs.mkdir(configDir, { recursive: true })
@@ -208,7 +208,7 @@ export async function readTextFile(serverUrlHash: string, filename: string, erro
     const filePath = getConfigFilePath(serverUrlHash, filename)
     return await fs.readFile(filePath, 'utf-8')
   } catch (error) {
-    throw new Error(errorMessage || `Error reading ${filename}`)
+    throw new Error(errorMessage || `Error reading ${filename}`, { cause: error })
   }
 }
 

@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'crypto'
  * opening a tab - are only visible from outside the processes involved. Asserting on anything a
  * single process knows about itself is how a green suite coexists with three browser tabs.
  */
-export type AuthServerCounters = {
+type AuthServerCounters = {
   /** Dynamic client registrations (RFC 7591). One flow should need one. */
   registrations: number
   /** Authorization requests, i.e. browser tabs actually followed. */

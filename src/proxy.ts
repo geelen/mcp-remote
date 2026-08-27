@@ -232,7 +232,6 @@ parseCommandLineArgs(process.argv.slice(2), 'Usage: mcp-remote <https://server-u
       headers,
       transportStrategy,
       host,
-      debug,
       staticOAuthClientMetadata,
       staticOAuthClientInfo,
       authorizeResource,
