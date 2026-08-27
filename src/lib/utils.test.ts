@@ -881,6 +881,124 @@ describe('Feature: Method-aware MCP HTTP gateways', () => {
 })
 
 /**
+ * A server standing in for one behind a sticky load balancer: it plants a routing cookie on the
+ * first response and records what every later request sends back.
+ */
+function createStickyServer() {
+  const cookiesSeen: Array<string | undefined> = []
+  let responses = 0
+
+  const server = createServer((request, response) => {
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      cookiesSeen.push(request.headers.cookie)
+
+      const headers: Record<string, string | string[]> = { 'content-type': 'application/json' }
+      if (++responses === 1) {
+        headers['set-cookie'] = ['AWSALB=node-1; Path=/', 'AWSALBCORS=node-1; Path=/; SameSite=None']
+      }
+
+      // Closing the transport sends a bodyless DELETE to end the session, and it carries a
+      // cookie like everything else - there is just nothing to answer.
+      const message = body ? (JSON.parse(body) as { id?: string | number; method: string }) : undefined
+      if (!message || message.id === undefined) {
+        response.writeHead(202, headers)
+        response.end()
+        return
+      }
+
+      response.writeHead(200, headers)
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: message.id,
+          result:
+            message.method === 'initialize'
+              ? { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'sticky', version: '1.0.0' } }
+              : {},
+        }),
+      )
+    })
+  })
+
+  return {
+    cookiesSeen,
+    async start() {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', resolve)
+      })
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('test server did not expose a port')
+      return `http://127.0.0.1:${address.port}/mcp`
+    },
+    async stop() {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    },
+  }
+}
+
+describe('Feature: Load balancer session stickiness', () => {
+  it('Scenario: A cookie the server sets is sent back on every later request', async () => {
+    // Given a server behind a balancer that pins this client to one node
+    const sticky = createStickyServer()
+    const url = await sticky.start()
+
+    try {
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(client, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'http-only')
+      await transport.send({ jsonrpc: '2.0', method: 'server/discover', id: 2, params: {} })
+
+      // Then the first request could not have carried one, and everything after it does -
+      // without which each request lands on whichever node the balancer feels like, and the
+      // session is on none of them (issue #168)
+      expect(sticky.cookiesSeen[0]).toBeUndefined()
+      expect(sticky.cookiesSeen.length).toBeGreaterThan(1)
+      for (const cookie of sticky.cookiesSeen.slice(1)) {
+        expect(cookie).toBe('AWSALB=node-1; AWSALBCORS=node-1')
+      }
+
+      await transport.close()
+    } finally {
+      await sticky.stop()
+    }
+  }, 15_000)
+
+  it('Scenario: A header the user pinned is not overwritten by the jar', async () => {
+    // Given someone sending their own Cookie via --header
+    const sticky = createStickyServer()
+    const url = await sticky.start()
+
+    try {
+      const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} })
+      const transport = await connectToRemoteServer(
+        client,
+        url,
+        undefined as unknown as OAuthClientProvider,
+        { Cookie: 'pinned=by-the-user' },
+        noAuth,
+        'http-only',
+      )
+      await transport.send({ jsonrpc: '2.0', method: 'server/discover', id: 2, params: {} })
+
+      // Then theirs is what the server sees, throughout
+      for (const cookie of sticky.cookiesSeen) {
+        expect(cookie).toBe('pinned=by-the-user')
+      }
+
+      await transport.close()
+    } finally {
+      await sticky.stop()
+    }
+  }, 15_000)
+})
+
+/**
  * A minimal MCP SSE server: it hands every stream it serves a POST endpoint carrying a session id
  * of its own, which is what the Python SDK does and what makes a reconnect lose the lifecycle.
  * The test drops the stream to make the client's EventSource come back for another.
@@ -889,8 +1007,11 @@ function createSseServer() {
   let streamsServed = 0
   let openStream: ServerResponse | undefined
 
+  const postCookies: Array<string | undefined> = []
+
   const server = createServer((request, response) => {
     if (!request.url?.startsWith('/sse')) {
+      postCookies.push(request.headers.cookie)
       response.writeHead(202)
       response.end()
       return
@@ -901,6 +1022,8 @@ function createSseServer() {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
       connection: 'keep-alive',
+      // A balancer plants its cookie on the stream; the POSTs have to carry it back
+      'set-cookie': `AWSALB=node-${streamsServed}; Path=/`,
     })
     // Without this the EventSource waits out its own default before trying again
     response.write('retry: 10\n\n')
@@ -909,6 +1032,7 @@ function createSseServer() {
   })
 
   return {
+    postCookies,
     get streamsServed() {
       return streamsServed
     },
@@ -951,6 +1075,25 @@ describe('Feature: Noticing an SSE stream come back', () => {
       // mcpProxy, and the reason issue #269 went unnoticed at this layer.
       await vi.waitFor(() => expect(reconnected).toHaveBeenCalled(), { timeout: 5_000 })
       expect(sse.streamsServed).toBeGreaterThan(1)
+    } finally {
+      await transport?.close()
+      await sse.stop()
+    }
+  }, 15_000)
+
+  it('Scenario: A cookie set on the stream rides the POSTs that follow it', async () => {
+    // Given a balancer that pins the stream to a node, while the POSTs go out separately
+    const sse = createSseServer()
+    const url = await sse.start()
+    let transport: Transport | undefined
+
+    try {
+      transport = await connectToRemoteServer(null, url, undefined as unknown as OAuthClientProvider, {}, noAuth, 'sse-only')
+      await transport.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+
+      // Then the POST reaches the node holding the session, rather than whichever one the
+      // balancer picks next (issue #168)
+      expect(sse.postCookies).toEqual(['AWSALB=node-1'])
     } finally {
       await transport?.close()
       await sse.stop()

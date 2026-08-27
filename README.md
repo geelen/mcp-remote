@@ -424,6 +424,25 @@ yourself:
 npx mcp-remote https://example.remote/server 3334 --client-metadata-url https://client.example.com/.well-known/oauth-client-metadata
 ```
 
+### Load Balancer Session Stickiness
+
+MCP sessions live on one backend, so a server behind a load balancer needs every request from a
+client to reach the same node. AWS ALB, Azure Load Balancer and others do this with a cookie the
+client is expected to send back.
+
+mcp-remote keeps cookies the MCP server sets and replays them on later requests, including from the
+SSE stream onto the POSTs that follow it. Nothing to configure. Cookies are held in memory for the
+life of the process, never written to disk, and only ever sent back to the exact origin that set
+them — `Domain` is ignored, so nothing travels to another host.
+
+A `Cookie` you pass yourself with `--header` always wins.
+
+To turn it off:
+
+```bash
+npx mcp-remote https://example.remote/server --disable-cookies
+```
+
 ### Using the ID Token as the Bearer Credential
 
 By default mcp-remote sends the OAuth **access token**, which says what the caller is allowed to

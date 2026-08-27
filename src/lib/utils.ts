@@ -20,6 +20,7 @@ import {
   type ProtectedResourceMetadata,
 } from './protected-resource-metadata'
 import { fetchAuthorizationServerMetadata, type AuthorizationServerMetadata } from './authorization-server-metadata'
+import { createCookieJar } from './cookie-jar'
 import express from 'express'
 import { AddressInfo } from 'net'
 import { Server } from 'http'
@@ -118,16 +119,46 @@ export function encodeMcpHeaderValue(value: string): string {
  */
 const fetchWithMcpHeaders = (async (url: string | URL, init?: RequestInit) => {
   const mirrored = mcpHeadersFromBody(init?.body)
-  if (!mirrored) return fetch(url, init)
+  const cookie = cookieHeaderFor(url)
 
-  const headers = new Headers(init?.headers)
-  if (!headers.has('Mcp-Method')) headers.set('Mcp-Method', mirrored.method)
-  if (mirrored.name !== undefined && !headers.has('Mcp-Name')) {
-    headers.set('Mcp-Name', encodeMcpHeaderValue(mirrored.name))
+  let request = init
+  if (mirrored || cookie) {
+    const headers = new Headers(init?.headers)
+    if (mirrored) {
+      if (!headers.has('Mcp-Method')) headers.set('Mcp-Method', mirrored.method)
+      if (mirrored.name !== undefined && !headers.has('Mcp-Name')) {
+        headers.set('Mcp-Name', encodeMcpHeaderValue(mirrored.name))
+      }
+    }
+    if (cookie && !headers.has('Cookie')) headers.set('Cookie', cookie)
+    request = { ...init, headers }
   }
 
-  return fetch(url, { ...init, headers })
+  const response = await fetch(url, request)
+  captureCookies(url, response)
+  return response
 }) as unknown as FetchLike
+
+/**
+ * The cookies the remote server has set on this process, if it has set any.
+ *
+ * Held at module scope rather than per connection so that stickiness survives a reconnect: the
+ * node a balancer chose for us is still the node holding the session after the transport falls
+ * back, re-authorizes, or the stream comes back. Keyed by origin, so nothing crosses between
+ * servers.
+ */
+const cookieJar = createCookieJar()
+
+/** Whether to take part in cookie-based session stickiness at all. See `--disable-cookies`. */
+let COOKIES_ENABLED = true
+
+function cookieHeaderFor(url: string | URL): string | undefined {
+  return COOKIES_ENABLED ? cookieJar.header(url) : undefined
+}
+
+function captureCookies(url: string | URL, response: { headers: { getSetCookie?: () => string[] } }): void {
+  if (COOKIES_ENABLED) cookieJar.capture(url, response)
+}
 
 /**
  * A transport whose stream can come back on a server-side session that is not the one it left on.
@@ -950,18 +981,24 @@ export async function connectToRemoteServer(
   const eventSourceInit = {
     fetch: (requestUrl: string | URL, init?: RequestInit) => {
       return Promise.resolve(authProvider?.tokens?.())
-        .then((tokens) =>
-          fetch(requestUrl, {
+        .then((tokens) => {
+          const cookie = cookieHeaderFor(requestUrl)
+          return fetch(requestUrl, {
             ...init,
             headers: mergeHeaders(
               init?.headers,
+              // The stream is usually where a balancer plants its cookie, and always where it
+              // has to be sent back, or the POSTs land on a node that never saw this session.
+              cookie ? { Cookie: cookie } : undefined,
               headers,
               tokens?.access_token ? { Authorization: `Bearer ${tokens.access_token}` } : undefined,
               { Accept: 'text/event-stream' },
             ),
-          }),
-        )
+          })
+        })
         .then((response) => {
+          captureCookies(requestUrl, response)
+
           // Only a stream that actually opened counts. A failed attempt is followed by another,
           // and announcing a reconnect for each would start a handshake against a stream that
           // is not there.
@@ -1721,6 +1758,12 @@ export async function parseCommandLineArgs(args: string[], usage: string) {
     } else {
       log(`Warning: Ignoring invalid client metadata URL: ${value}. It must be an HTTPS URL with a path.`)
     }
+  }
+
+  // Cookie-based session stickiness, on unless it is turned off
+  if (args.includes('--disable-cookies')) {
+    COOKIES_ENABLED = false
+    log('Cookies disabled; requests will not carry session stickiness')
   }
 
   // An MCP server that verifies who the caller is, rather than what they may do, wants the ID token
