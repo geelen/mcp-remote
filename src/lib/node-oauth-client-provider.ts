@@ -34,6 +34,8 @@ export const OAuthTokensWithExpiresAtSchema = OAuthTokensSchema.extend({
 })
 type OAuthTokensWithExpiresAt = z.infer<typeof OAuthTokensWithExpiresAtSchema>
 
+const FALLBACK_SCOPE = 'openid email profile'
+
 /** The shape of the state we issue, and the only shape accepted into a config filename. */
 const ISSUED_STATE = /^[A-Za-z0-9-]{1,64}$/
 
@@ -279,6 +281,10 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
   }
 
   private getEffectiveScope(): string {
+    return this.requestedScope() ?? FALLBACK_SCOPE
+  }
+
+  private requestedScope(): string | undefined {
     // Priority 1: User-provided scope from staticOAuthClientMetadata (highest priority)
     if (this.staticOAuthClientMetadata?.scope && this.staticOAuthClientMetadata.scope.trim().length > 0) {
       debugLog('Using scope from staticOAuthClientMetadata', { scope: this.staticOAuthClientMetadata.scope })
@@ -327,9 +333,8 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       return scope
     }
 
-    // Priority 6: Fallback to hardcoded default when metadata is unknown or omits scopes_supported
-    debugLog('Using fallback default scope')
-    return 'openid email profile'
+    debugLog('No source describes the scope to request')
+    return undefined
   }
 
   /**
@@ -550,7 +555,9 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   private scopeRequestChanged(tokens: OAuthTokensWithExpiresAt): boolean {
     if (tokens.requested_scope === undefined) return false
-    return tokens.requested_scope !== this.getEffectiveScope()
+    const requested = this.requestedScope()
+    if (requested === undefined) return false
+    return tokens.requested_scope !== requested
   }
 
   /**

@@ -569,6 +569,25 @@ describe('NodeOAuthClientProvider - OAuth Scope Handling', () => {
       expect(mockDeleteConfigFile).not.toHaveBeenCalled()
     })
 
+    it('keeps the sign-in when nothing describes the scope to ask for', async () => {
+      provider = new NodeOAuthClientProvider(defaultOptions)
+      storedWith('openid profile offline_access')
+
+      await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'at' })
+      expect(mockDeleteConfigFile).not.toHaveBeenCalled()
+    })
+
+    it('signs in again when a server advertises the same scopes the fallback happens to name', async () => {
+      provider = new NodeOAuthClientProvider({
+        ...defaultOptions,
+        protectedResourceMetadata: { resource: 'https://example.com', scopes_supported: ['openid', 'email', 'profile'] } as any,
+      })
+      storedWith('openid profile offline_access')
+
+      await expect(provider.tokens()).resolves.toBeUndefined()
+      expect(mockDeleteConfigFile).toHaveBeenCalledWith('test-hash', 'tokens.json')
+    })
+
     it('reuses a token when the configuration has not changed', async () => {
       provider = new NodeOAuthClientProvider({ ...defaultOptions, staticOAuthClientMetadata: { scope: 'a.read' } as any })
       storedWith('a.read')
