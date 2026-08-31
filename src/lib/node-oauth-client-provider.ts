@@ -10,7 +10,15 @@ import {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { type OAuthProviderOptions, type StaticOAuthClientInformationFull, type StaticOAuthClientMetadata } from './types'
 import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
+import {
+  readJsonFile,
+  writeJsonFile,
+  readTextFile,
+  writeTextFile,
+  deleteConfigFile,
+  deleteStaleConfigFiles,
+  claimConfigFile,
+} from './mcp-auth-config'
 import { openBrowser } from './open-browser'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -51,6 +59,10 @@ const CODE_VERIFIER_PREFIX = 'code_verifier_'
  */
 const TOKEN_STORM_LIMIT = 20
 const TOKEN_STORM_WINDOW_MS = 30_000
+
+const REFRESH_MARKER_FILE = 'refresh_in_progress.json'
+const REFRESH_MARKER_TTL_MS = 30_000
+const REFRESH_WAIT_POLL_MS = 200
 
 /** How long a flow may still be in progress, and its verifier still needed. */
 const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
@@ -574,11 +586,62 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   private async refreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
     if (!this.refreshInFlight) {
-      this.refreshInFlight = this.doRefreshTokens(refreshToken).finally(() => {
+      this.refreshInFlight = this.refreshOncePerHost(refreshToken).finally(() => {
         this.refreshInFlight = null
       })
     }
     return this.refreshInFlight
+  }
+
+  /**
+   * Redeems the refresh token, or waits for whichever instance is already redeeming it
+   *
+   * A host runs several instances against one server and they share a token store, so a refresh
+   * token rotated by one of them is dead in the hands of the rest.
+   *
+   * @param refreshToken The refresh token to redeem
+   * @returns The refreshed tokens, or undefined if the refresh could not be completed
+   */
+  private async refreshOncePerHost(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    const claimed = await claimConfigFile(
+      this.serverUrlHash,
+      REFRESH_MARKER_FILE,
+      { pid: process.pid, at: Date.now() },
+      REFRESH_MARKER_TTL_MS,
+    )
+
+    if (!claimed) {
+      const renewed = await this.awaitRefreshBySibling()
+      if (renewed) {
+        debugLog('Another instance refreshed the token')
+        return renewed
+      }
+      return undefined
+    }
+
+    try {
+      return await this.doRefreshTokens(refreshToken)
+    } finally {
+      await deleteConfigFile(this.serverUrlHash, REFRESH_MARKER_FILE)
+    }
+  }
+
+  private async awaitRefreshBySibling(): Promise<OAuthTokensWithExpiresAt | undefined> {
+    const deadline = Date.now() + REFRESH_MARKER_TTL_MS
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_WAIT_POLL_MS))
+
+      const stored = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
+      if (stored?.expires_at !== undefined && Date.now() < stored.expires_at - 60_000) return stored
+
+      const marker = await readJsonFile<{ at: number }>(this.serverUrlHash, REFRESH_MARKER_FILE, {
+        parseAsync: async (data: any) => (typeof data?.at === 'number' ? data : null),
+      })
+      if (!marker) return undefined
+    }
+
+    return undefined
   }
 
   private async doRefreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {

@@ -134,6 +134,35 @@ export async function deleteStaleConfigFiles(serverUrlHash: string, prefix: stri
  * @param schema The schema to validate against
  * @returns The parsed file content or undefined if the file doesn't exist
  */
+/**
+ * Creates a config file only if no live one exists, so concurrent instances agree on a single winner
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the file to create
+ * @param data The data to write
+ * @param maxAgeMs How old an existing file must be before it is treated as left by a dead instance
+ * @returns True if this call created the file
+ */
+export async function claimConfigFile(serverUrlHash: string, filename: string, data: any, maxAgeMs: number): Promise<boolean> {
+  await ensureConfigDir()
+  const filePath = getConfigFilePath(serverUrlHash, filename)
+
+  for (const attempt of [0, 1]) {
+    try {
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 0) return false
+      try {
+        if ((await fs.stat(filePath)).mtimeMs > Date.now() - maxAgeMs) return false
+        await fs.unlink(filePath)
+      } catch {
+        return false
+      }
+    }
+  }
+  return false
+}
+
 export async function readJsonFile<T>(serverUrlHash: string, filename: string, schema: any): Promise<T | undefined> {
   try {
     await ensureConfigDir()

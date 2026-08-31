@@ -1051,6 +1051,7 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
     mockRefresh = vi.mocked(refreshAuthorization)
     mockWriteJsonFile.mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.claimConfigFile).mockResolvedValue(true)
 
     // Any client_info read hands back a registered client; tokens.json is per-test
     mockReadJsonFile.mockImplementation(async (_hash: string, file: string) =>
@@ -1102,6 +1103,17 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
     expect(mockRefresh).toHaveBeenCalledTimes(1)
     expect(mockRefresh.mock.calls[0][1].refreshToken).toBe('r1')
     expect(result?.access_token).toBe('fresh-token')
+  })
+
+  it('Scenario: an instance waits for the sibling already refreshing rather than spending the token twice', async () => {
+    const expired = storedTokens({ expires_at: Date.now() - 1000 })
+    const renewed = storedTokens({ access_token: 'from-sibling', refresh_token: 'r2', expires_at: Date.now() + 3_600_000 })
+    mockReadJsonFile.mockResolvedValueOnce(expired).mockResolvedValue(renewed)
+    vi.mocked(mcpAuthConfig.claimConfigFile).mockResolvedValue(false)
+    const provider = new NodeOAuthClientProvider(options)
+
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'from-sibling' })
+    expect(mockRefresh).not.toHaveBeenCalled()
   })
 
   it('Scenario: concurrent requests share a single refresh', async () => {
@@ -1246,6 +1258,7 @@ describe('NodeOAuthClientProvider - Extra authorization parameters', () => {
     vi.mocked(mcpAuthConfig.readJsonFile).mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.writeJsonFile).mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.claimConfigFile).mockResolvedValue(true)
   })
 
   afterEach(() => {
