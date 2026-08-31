@@ -10,7 +10,17 @@ import {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { type OAuthProviderOptions, type StaticOAuthClientInformationFull, type StaticOAuthClientMetadata } from './types'
 import { InvalidClientError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
-import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, deleteConfigFile, deleteStaleConfigFiles } from './mcp-auth-config'
+import {
+  readJsonFile,
+  writeJsonFile,
+  readTextFile,
+  writeTextFile,
+  deleteConfigFile,
+  deleteStaleConfigFiles,
+  acquireConfigLease,
+  readConfigLease,
+  releaseConfigLease,
+} from './mcp-auth-config'
 import { openBrowser } from './open-browser'
 import { log, debugLog, buildRedirectUrl, MCP_REMOTE_VERSION } from './utils'
 import { sanitizeUrl } from 'strict-url-sanitise'
@@ -51,6 +61,25 @@ const CODE_VERIFIER_PREFIX = 'code_verifier_'
  */
 const TOKEN_STORM_LIMIT = 20
 const TOKEN_STORM_WINDOW_MS = 30_000
+
+/** Treat a token about to expire as expired, rather than sending one that will 401 in transit. */
+const TOKEN_EXPIRY_MARGIN_MS = 60_000
+
+/** The lease that keeps a rotating refresh token to one use per host. See {@link refreshOncePerHost}. */
+const REFRESH_LEASE_FILE = 'refresh_in_progress.json'
+
+/**
+ * How long an instance may hold the refresh lease.
+ *
+ * Only ever reached by an instance that is alive and stuck, since one that died is spotted by pid
+ * and its lease taken at once. So this is sized for the slowest token request worth waiting on
+ * rather than for how quickly an abandoned lease should be noticed.
+ */
+const REFRESH_LEASE_MS = 30_000
+const REFRESH_POLL_MS = 200
+
+/** Stands in for a lease when the store cannot be written at all. See {@link takeRefreshLease}. */
+const UNCOORDINATED = ''
 
 /** How long a flow may still be in progress, and its verifier still needed. */
 const ABANDONED_FLOW_AGE_MS = 10 * 60 * 1000
@@ -458,7 +487,7 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
       // Use the persisted absolute expiry timestamp to detect imminent expiry,
       // refreshing ~60s early to avoid sending a token that is about to 401.
       const expiresAt = this.bearerExpiresAt(tokens)
-      const isExpired = expiresAt ? Date.now() >= expiresAt - 60_000 : false
+      const isExpired = expiresAt ? Date.now() >= expiresAt - TOKEN_EXPIRY_MARGIN_MS : false
 
       debugLog('Token result:', {
         found: true,
@@ -574,11 +603,99 @@ export class NodeOAuthClientProvider implements OAuthClientProvider {
    */
   private async refreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
     if (!this.refreshInFlight) {
-      this.refreshInFlight = this.doRefreshTokens(refreshToken).finally(() => {
+      this.refreshInFlight = this.refreshOncePerHost(refreshToken).finally(() => {
         this.refreshInFlight = null
       })
     }
     return this.refreshInFlight
+  }
+
+  /**
+   * Redeems the refresh token, or waits for whichever instance is already redeeming it.
+   *
+   * A host runs several instances against one server and they share a token store, so a refresh
+   * token rotated by one of them is dead in the hands of the rest. {@link refreshInFlight} holds
+   * this instance to a single use; nothing held the instances to a single use between them, and a
+   * server that rotates without a grace period answers the second use by revoking the chain - a
+   * browser sign-in in return for a burst of requests that were all legitimate.
+   *
+   * The callback port that arbitrates a sign-in is no help here. It is held only while a flow is
+   * running, and a refresh happens without one, so there is no existing mutex to reuse and the
+   * lease has to stand in for one. Losing the race is not fatal: the loser reads the token the
+   * winner wrote, and failing that returns undefined into the path that existed before any of this.
+   *
+   * @param refreshToken The refresh token this instance set out to redeem
+   * @returns The refreshed tokens, or undefined if the refresh could not be completed
+   */
+  private async refreshOncePerHost(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {
+    let lease = await this.takeRefreshLease()
+
+    if (lease === undefined) {
+      const sibling = await this.awaitRefreshBySibling()
+      if (sibling.tokens) {
+        debugLog('Another instance refreshed the token')
+        return sibling.tokens
+      }
+      // A sibling that released its lease has already had its turn, and a second attempt at a
+      // token it may have spent is the storm this exists to stop. Only work it never got to is
+      // this instance's to pick up.
+      if (!sibling.abandoned) return undefined
+
+      lease = await this.takeRefreshLease()
+      if (lease === undefined) return undefined
+    }
+
+    try {
+      // A sibling may have rotated the token while this instance was reading it, or waiting for
+      // the lease, so redeem whatever is on disk now rather than what the caller set out with.
+      const stored = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
+      return await this.doRefreshTokens(stored?.refresh_token ?? refreshToken)
+    } finally {
+      if (lease !== UNCOORDINATED) await releaseConfigLease(this.serverUrlHash, REFRESH_LEASE_FILE, lease)
+    }
+  }
+
+  /**
+   * Takes the refresh lease.
+   *
+   * A store this instance cannot write is the refresh's own problem to report - it fails, says so,
+   * and hands back undefined the way it always did. Failing here instead would turn that into an
+   * exception out of `tokens()`, which is on the path of every outgoing request.
+   *
+   * @returns The lease, undefined if a sibling holds it, or {@link UNCOORDINATED} if no lease can be taken at all
+   */
+  private async takeRefreshLease(): Promise<string | undefined> {
+    try {
+      return await acquireConfigLease(this.serverUrlHash, REFRESH_LEASE_FILE, REFRESH_LEASE_MS)
+    } catch (error) {
+      debugLog('Could not take the refresh lease; refreshing without coordinating', error)
+      return UNCOORDINATED
+    }
+  }
+
+  /**
+   * Waits on the instance holding the refresh lease, until it has something to show for it.
+   *
+   * Bounded by the lease rather than by a clock of its own: an owner that died is spotted within a
+   * poll, and one that is alive but stuck runs out its {@link REFRESH_LEASE_MS} and is treated the
+   * same. Reading the token before the lease matters, because the winner writes the token first
+   * and only then lets go of the lease.
+   *
+   * @returns The token a sibling wrote, or whether it died still owing one
+   */
+  private async awaitRefreshBySibling(): Promise<{ tokens?: OAuthTokensWithExpiresAt; abandoned?: boolean }> {
+    debugLog('Waiting for the instance already refreshing this token')
+
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_POLL_MS))
+
+      const stored = await readJsonFile<OAuthTokensWithExpiresAt>(this.serverUrlHash, 'tokens.json', OAuthTokensWithExpiresAtSchema)
+      if (stored?.expires_at !== undefined && Date.now() < stored.expires_at - TOKEN_EXPIRY_MARGIN_MS) return { tokens: stored }
+
+      const holder = await readConfigLease(this.serverUrlHash, REFRESH_LEASE_FILE, REFRESH_LEASE_MS)
+      if (!holder) return {}
+      if (!holder.live) return { abandoned: true }
+    }
   }
 
   private async doRefreshTokens(refreshToken: string): Promise<OAuthTokensWithExpiresAt | undefined> {

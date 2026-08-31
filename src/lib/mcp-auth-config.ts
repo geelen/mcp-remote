@@ -1,6 +1,8 @@
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
+import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import { log, debugLog } from './utils'
 
 /**
@@ -227,4 +229,107 @@ export async function writeTextFile(serverUrlHash: string, filename: string, tex
     log(`Error writing ${filename}:`, error)
     throw error
   }
+}
+
+/**
+ * A lease records who took it and when, so a challenger can tell an owner still working from one
+ * that will never come back. The nonce is the part no other instance can guess, which is what
+ * makes ownership checkable after the fact.
+ */
+const ConfigLeaseSchema = z.object({ pid: z.number().int().positive(), nonce: z.string().min(1), at: z.number() })
+
+/** A lease read off disk, with whether its owner still appears to hold it. */
+export type ConfigLease = z.infer<typeof ConfigLeaseSchema> & { live: boolean }
+
+/**
+ * Whether a process still exists.
+ *
+ * Signal 0 sends nothing; it only asks the kernel to do the permission and existence checks it
+ * would do for a real signal. EPERM means the process is there and belongs to someone else.
+ */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * Takes a lease on a filename, naming this process as its owner.
+ *
+ * The claim itself is one `O_CREAT|O_EXCL` write, so the kernel picks the winner and no two
+ * instances can create the same file. What a file cannot do is release itself when its owner
+ * dies, so the lease also records a pid and a timestamp: an owner that no longer exists is gone
+ * for good and its lease is taken immediately, and one that exists but has held the lease past
+ * `maxAgeMs` is treated the same way, since a wedged instance would otherwise block every other
+ * one forever.
+ *
+ * Clearing an abandoned lease is not atomic on its own - two challengers can each delete what
+ * they found and each create their own - so a claim is only trusted once the file is read back
+ * and still carries the nonce this call wrote.
+ *
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the lease file
+ * @param maxAgeMs How long an owner may hold the lease before a challenger may take it
+ * @returns The nonce identifying this lease, or undefined if another instance holds it
+ */
+export async function acquireConfigLease(serverUrlHash: string, filename: string, maxAgeMs: number): Promise<string | undefined> {
+  await ensureConfigDir()
+  const filePath = getConfigFilePath(serverUrlHash, filename)
+  const nonce = randomUUID()
+
+  // At most one round of clearing an abandoned lease, so a filename nothing can hold - a
+  // directory, say - cannot spin here.
+  for (const attempt of [0, 1]) {
+    try {
+      const lease = { pid: process.pid, nonce, at: Date.now() }
+      await fs.writeFile(filePath, JSON.stringify(lease, null, 2), { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
+      return (await readLeaseFile(serverUrlHash, filename))?.nonce === nonce ? nonce : undefined
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 0) return undefined
+
+      const held = await readConfigLease(serverUrlHash, filename, maxAgeMs)
+      if (held?.live) return undefined
+
+      // Abandoned, or unreadable and so of no use to whoever wrote it either
+      debugLog('Clearing an abandoned lease', { filename, heldBy: held?.pid })
+      await fs.unlink(filePath).catch(() => {})
+    }
+  }
+  return undefined
+}
+
+/** @returns The lease on disk, or undefined if there is none or it cannot be read */
+async function readLeaseFile(serverUrlHash: string, filename: string): Promise<z.infer<typeof ConfigLeaseSchema> | undefined> {
+  return readJsonFile<z.infer<typeof ConfigLeaseSchema>>(serverUrlHash, filename, ConfigLeaseSchema)
+}
+
+/**
+ * Reads the lease on a filename, if one is held
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the lease file
+ * @param maxAgeMs How long an owner may hold the lease before a challenger may take it
+ * @returns The lease and whether its owner still holds it, or undefined if nobody does
+ */
+export async function readConfigLease(serverUrlHash: string, filename: string, maxAgeMs: number): Promise<ConfigLease | undefined> {
+  const lease = await readLeaseFile(serverUrlHash, filename)
+  if (!lease) return undefined
+  return { ...lease, live: Date.now() - lease.at < maxAgeMs && processIsAlive(lease.pid) }
+}
+
+/**
+ * Releases a lease, if this instance still holds it.
+ *
+ * An owner that ran past `maxAgeMs` may find the lease already taken by someone else, and
+ * deleting that one would hand the same work to a third instance.
+ *
+ * @param serverUrlHash The hash of the server URL
+ * @param filename The name of the lease file
+ * @param nonce The nonce returned when the lease was acquired
+ */
+export async function releaseConfigLease(serverUrlHash: string, filename: string, nonce: string): Promise<void> {
+  if ((await readLeaseFile(serverUrlHash, filename))?.nonce !== nonce) return
+  await deleteConfigFile(serverUrlHash, filename)
 }

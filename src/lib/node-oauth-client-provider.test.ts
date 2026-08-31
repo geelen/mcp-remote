@@ -1051,6 +1051,8 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
     mockRefresh = vi.mocked(refreshAuthorization)
     mockWriteJsonFile.mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockResolvedValue('lease-1')
+    vi.mocked(mcpAuthConfig.releaseConfigLease).mockResolvedValue(undefined)
 
     // Any client_info read hands back a registered client; tokens.json is per-test
     mockReadJsonFile.mockImplementation(async (_hash: string, file: string) =>
@@ -1102,6 +1104,71 @@ describe('NodeOAuthClientProvider - proactive token refresh', () => {
     expect(mockRefresh).toHaveBeenCalledTimes(1)
     expect(mockRefresh.mock.calls[0][1].refreshToken).toBe('r1')
     expect(result?.access_token).toBe('fresh-token')
+  })
+
+  const heldLease = (overrides: Record<string, unknown> = {}) => ({ pid: 4242, nonce: 'theirs', at: Date.now(), live: true, ...overrides })
+
+  it('Scenario: an instance waits for the sibling already refreshing rather than spending the token twice', async () => {
+    const expired = storedTokens({ expires_at: Date.now() - 1000 })
+    const renewed = storedTokens({ access_token: 'from-sibling', refresh_token: 'r2', expires_at: Date.now() + 3_600_000 })
+    mockReadJsonFile.mockResolvedValueOnce(expired).mockResolvedValue(renewed)
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.readConfigLease).mockResolvedValue(heldLease())
+    const provider = new NodeOAuthClientProvider(options)
+
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'from-sibling' })
+    // The whole point: one refresh_token use per host, not one per instance
+    expect(mockRefresh).not.toHaveBeenCalled()
+  })
+
+  it('Scenario: a lease its owner died holding is taken over rather than waited out', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    mockRefresh.mockResolvedValue({ access_token: 'fresh-token', refresh_token: 'r2', token_type: 'Bearer', expires_in: 3600 })
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockResolvedValueOnce(undefined).mockResolvedValue('lease-2')
+    // An instance killed mid-refresh leaves its lease behind; nothing will ever release it
+    vi.mocked(mcpAuthConfig.readConfigLease).mockResolvedValue(heldLease({ live: false }))
+    const provider = new NodeOAuthClientProvider(options)
+
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'fresh-token' })
+    expect(mockRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('Scenario: a sibling that finished without a token is not followed by a second attempt', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockResolvedValue(undefined)
+    // The lease is released whether the refresh worked or not, so its absence says the sibling
+    // has had its turn - and retrying a token it may already have spent is the storm being avoided
+    vi.mocked(mcpAuthConfig.readConfigLease).mockResolvedValue(undefined)
+    const provider = new NodeOAuthClientProvider(options)
+
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'stale-token' })
+    expect(mockRefresh).not.toHaveBeenCalled()
+    expect(vi.mocked(mcpAuthConfig.acquireConfigLease)).toHaveBeenCalledTimes(1)
+  })
+
+  it('Scenario: the token redeemed is the one on disk once the lease is held', async () => {
+    // A sibling rotated between this instance reading the token and winning the lease. Redeeming
+    // what was read would spend a token the server has already retired.
+    mockReadJsonFile
+      .mockResolvedValueOnce(storedTokens({ expires_at: Date.now() - 1000 }))
+      .mockResolvedValue(storedTokens({ refresh_token: 'r-rotated', expires_at: Date.now() - 1000 }))
+    mockRefresh.mockResolvedValue({ access_token: 'fresh-token', refresh_token: 'r3', token_type: 'Bearer', expires_in: 3600 })
+    const provider = new NodeOAuthClientProvider(options)
+
+    await provider.tokens()
+
+    expect(mockRefresh.mock.calls[0][1].refreshToken).toBe('r-rotated')
+  })
+
+  it('Scenario: a lease that cannot be taken at all does not fail the request', async () => {
+    withStoredTokens(storedTokens({ expires_at: Date.now() - 1000 }))
+    mockRefresh.mockResolvedValue({ access_token: 'fresh-token', refresh_token: 'r2', token_type: 'Bearer', expires_in: 3600 })
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockRejectedValue(new Error('EACCES'))
+    const provider = new NodeOAuthClientProvider(options)
+
+    // tokens() runs on every outgoing request; an unwritable store is for the refresh to report
+    await expect(provider.tokens()).resolves.toMatchObject({ access_token: 'fresh-token' })
+    expect(vi.mocked(mcpAuthConfig.releaseConfigLease)).not.toHaveBeenCalled()
   })
 
   it('Scenario: concurrent requests share a single refresh', async () => {
@@ -1246,6 +1313,7 @@ describe('NodeOAuthClientProvider - Extra authorization parameters', () => {
     vi.mocked(mcpAuthConfig.readJsonFile).mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.writeJsonFile).mockResolvedValue(undefined)
     vi.mocked(mcpAuthConfig.deleteConfigFile).mockResolvedValue(undefined)
+    vi.mocked(mcpAuthConfig.acquireConfigLease).mockResolvedValue('lease-1')
   })
 
   afterEach(() => {
