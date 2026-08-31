@@ -2,7 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { writeJsonFile, getConfigFilePath, deleteStaleConfigFiles, getConfigDir } from './mcp-auth-config'
+import {
+  writeJsonFile,
+  getConfigFilePath,
+  deleteStaleConfigFiles,
+  getConfigDir,
+  acquireConfigLease,
+  readConfigLease,
+  releaseConfigLease,
+} from './mcp-auth-config'
 
 vi.mock('./utils', () => ({
   log: vi.fn(),
@@ -126,5 +134,86 @@ describe('Feature: Sweeping files nothing will name again', () => {
 
     await fs.unlink(inFlight).catch(() => {})
     await fs.unlink(unrelated).catch(() => {})
+  })
+})
+
+describe('Feature: Leasing a filename to one instance at a time', () => {
+  const hash = 'lease-test'
+  const filename = 'refresh_in_progress.json'
+  const TTL = 30_000
+  const leaseOnDisk = async () => JSON.parse(await fs.readFile(getConfigFilePath(hash, filename), 'utf-8'))
+  const writeFileInStore = async (contents: string) => {
+    await fs.mkdir(getConfigDir(), { recursive: true })
+    await fs.writeFile(getConfigFilePath(hash, filename), contents, 'utf-8')
+  }
+  const writeLease = (lease: Record<string, unknown>) => writeFileInStore(JSON.stringify(lease))
+
+  // A pid nothing can be running under: the kernel rejects it outright, so it can never be reused
+  const DEAD_PID = 0x7fffffff
+
+  it('Scenario: Several instances race and exactly one comes away with the lease', async () => {
+    const claims = await Promise.all(Array.from({ length: 8 }, () => acquireConfigLease(hash, filename, TTL)))
+
+    // A refresh token spent twice is a revoked chain, so "roughly one winner" is not good enough
+    expect(claims.filter(Boolean)).toHaveLength(1)
+    expect((await leaseOnDisk()).nonce).toBe(claims.find(Boolean))
+  })
+
+  it('Scenario: An instance that is still working keeps its lease', async () => {
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeTruthy()
+
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeUndefined()
+    expect((await readConfigLease(hash, filename, TTL))?.live).toBe(true)
+  })
+
+  it('Scenario: A lease its owner died holding is taken over at once', async () => {
+    // Killed mid-refresh a moment ago. Waiting out the age of a lease nobody will ever release
+    // stalls every other instance for the whole of it.
+    await writeLease({ pid: DEAD_PID, nonce: 'theirs', at: Date.now() })
+
+    expect(await readConfigLease(hash, filename, TTL)).toMatchObject({ live: false })
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeTruthy()
+    expect((await leaseOnDisk()).pid).toBe(process.pid)
+  })
+
+  it('Scenario: A live owner that has run past its deadline stops holding everyone up', async () => {
+    await writeLease({ pid: process.pid, nonce: 'theirs', at: Date.now() - TTL - 1 })
+
+    expect(await readConfigLease(hash, filename, TTL)).toMatchObject({ live: false })
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeTruthy()
+  })
+
+  it('Scenario: A lease nothing can make sense of is not left blocking everyone', async () => {
+    await writeFileInStore('not json at all')
+
+    expect(await readConfigLease(hash, filename, TTL)).toBeUndefined()
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeTruthy()
+  })
+
+  it('Scenario: Releasing only clears a lease this instance still holds', async () => {
+    const nonce = await acquireConfigLease(hash, filename, TTL)
+    // Overran its deadline, and a sibling has since taken over
+    await writeLease({ pid: process.pid, nonce: 'somebody-else', at: Date.now() })
+
+    await releaseConfigLease(hash, filename, nonce!)
+
+    // Deleting it would hand the same work to a third instance
+    expect((await leaseOnDisk()).nonce).toBe('somebody-else')
+  })
+
+  it('Scenario: Releasing frees the filename for the next instance', async () => {
+    const nonce = await acquireConfigLease(hash, filename, TTL)
+
+    await releaseConfigLease(hash, filename, nonce!)
+
+    expect(await readConfigLease(hash, filename, TTL)).toBeUndefined()
+    expect(await acquireConfigLease(hash, filename, TTL)).toBeTruthy()
+  })
+
+  it('Scenario: The lease is readable only by its owner', async () => {
+    await acquireConfigLease(hash, filename, TTL)
+
+    const mode = (await fs.stat(getConfigFilePath(hash, filename))).mode & 0o777
+    expect(mode).toBe(0o600)
   })
 })
